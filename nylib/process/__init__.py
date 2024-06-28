@@ -14,9 +14,9 @@ _T = typing.TypeVar('_T')
 class Process:
     current: 'Process'
 
-    def __init__(self, process_id: int, da=0x1F0FFF):
+    def __init__(self, process_id: int, handle=None, da=0x1F0FFF):
         self.process_id = process_id
-        self.handle = winapi.OpenProcess(da, False, process_id)
+        self.handle = winapi.OpenProcess(da, False, process_id) if handle is None else handle
         self._cached_scanners = {}
         self._ldr_cache = {}
 
@@ -406,4 +406,4 @@ class Process:
         return self.Injector(self)
 
 
-Process.current = Process(winapi.GetCurrentProcessId())
+Process.current = Process(winapi.GetCurrentProcessId(), winapi.GetCurrentProcess())
