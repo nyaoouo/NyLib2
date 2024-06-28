@@ -32,3 +32,4 @@ GetExitCodeProcess = def_win_api(_dll.GetExitCodeProcess, ctypes.c_bool, (ctypes
 GlobalAlloc = def_win_api(_dll.GlobalAlloc, ctypes.c_void_p, (ctypes.c_uint, ctypes.c_size_t), error_zero=True)
 GlobalLock = def_win_api(_dll.GlobalLock, ctypes.c_void_p, (ctypes.c_void_p,), error_zero=True)
 GlobalUnlock = def_win_api(_dll.GlobalUnlock, ctypes.c_bool, (ctypes.c_void_p,))
+TerminateProcess = def_win_api(_dll.TerminateProcess, ctypes.c_bool, (ctypes.c_void_p, ctypes.c_uint), error_zero=True)
