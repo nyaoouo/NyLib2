@@ -5,6 +5,7 @@ import logging
 import os
 import os.path
 import pathlib
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -53,6 +54,33 @@ def reload_env_path():
             old_env.append(p)
     os.environ['Path'] = os.pathsep.join(old_env)
     return os.environ['Path']
+
+
+def find_by_uninstall(name):
+    key = winreg.OpenKey(
+        winreg.HKEY_CURRENT_USER,
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+        0, winreg.KEY_READ
+    )
+    try:
+        i = 0
+        while True:
+            try:
+                subkey = winreg.OpenKey(key, winreg.EnumKey(key, i))
+                try:
+                    display_name = winreg.QueryValueEx(subkey, "DisplayName")[0]
+                    if name in display_name:
+                        return winreg.QueryValueEx(subkey, "InstallLocation")[0]
+                except FileNotFoundError:
+                    pass
+                finally:
+                    winreg.CloseKey(subkey)
+            except OSError:
+                break
+            finally:
+                i += 1
+    finally:
+        winreg.CloseKey(key)
 
 
 def ensure_winget(tmp_dir=None, shell=True):
@@ -171,38 +199,63 @@ def ensure_cygwin_dir(tmp_dir=None, shell=True):
     raise FileNotFoundError('cygwin not found')
 
 
-def _find_clang_dir():
-    if p := shutil.which('clang'): return pathlib.Path(p).parent
-    try:
-        path, _ = winreg.QueryValueEx(winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"SOFTWARE\ClangLLVM\prebuilt", 0, winreg.KEY_READ), 'binDir')
-    except FileNotFoundError:
-        return None
-    path = pathlib.Path(path)
-    if (path / 'clang.exe').is_file(): return path
+def _find_msys2_dir():
+    return find_by_uninstall('MSYS2')
 
 
-def ensure_clang_dir(tmp_dir=None, shell=True):
-    if p := _find_clang_dir(): return p
+def ensure_msys2(tmp_dir=None, shell=True):
+    if p := _find_msys2_dir(): return p
+
     tmp_dir = pathlib.Path(tmp_dir or get_tmpdir())
     download(
-        r'https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.6/clang+llvm-18.1.6-x86_64-pc-windows-msvc.tar.xz',
-        tmp_dir / 'clang_llvm.tar.xz', show_progress=shell
+        r'https://github.com/msys2/msys2-installer/releases/download/2024-05-07/msys2-x86_64-20240507.exe',
+        tmp_dir / 'msys2-x86_64-20240507.exe', show_progress=shell
     )
-    p = pathlib.Path(f'{os.getenv("SystemDrive")}\\MyBuildTools\\clang_llvm')
-    assert not p.exists()
-    with tarfile.open(tmp_dir / 'clang_llvm.tar.xz') as f:
-        f.extractall(p)
+    p = pathlib.Path(f'{os.getenv("SystemDrive")}\\MyBuildTools\\msys2')
+    # msys2-x86_64-20240507.exe -t "C:\path\to\installation\location" --al --am --da -c
+    subprocess.check_call([
+        tmp_dir / 'msys2-x86_64-20240507.exe',
+        '--al', '--da', '-c', 'install', '-t', p,
+    ], shell=shell)
 
-    # remove first directory
-    assert len(list(p.iterdir())) == 1
-    d = next(p.iterdir())
-    assert d.is_dir()
-    for f in d.iterdir():
-        shutil.move(f, p)
-    d.rmdir()
+    if p := _find_msys2_dir(): return p
+    raise FileNotFoundError('msys2 not found')
 
-    reg = winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"SOFTWARE\ClangLLVM\prebuilt")
-    winreg.SetValueEx(reg, 'binDir', 0, winreg.REG_SZ, str(p / 'bin'))
-    winreg.SetValueEx(reg, 'rootDir', 0, winreg.REG_SZ, str(p))
-    if p := _find_clang_dir(): return p
-    raise FileNotFoundError('clang not found')
+
+def make_msys2_shell(args):
+    p = _find_msys2_dir()
+    if not p: raise FileNotFoundError('msys2 not found')
+    return [pathlib.Path(p) / 'msys2_shell.cmd', '-defterm', '-no-start', '-c', shlex.join(map(str, args))]
+
+
+def ensure_msys2_file(fp, shell=True):
+    if not hasattr(ensure_msys2_file, 'cache'):
+        ensure_msys2_file.cache = {}
+    elif fp in ensure_msys2_file.cache:
+        return ensure_msys2_file.cache[fp]
+    ensure_msys2()
+    if not hasattr(ensure_msys2_file, 'db_loaded'):
+        subprocess.check_output(make_msys2_shell(['pacman', '-Fy']), shell=shell)
+        ensure_msys2_file.db_loaded = True
+    package_ = subprocess.check_output(make_msys2_shell(['pacman', '-F', '-q', fp]))
+    mode, package = package_.split()[0].decode('utf-8').split('/', 1)
+    ensure_msys2_package(package, shell=shell)
+    ensure_msys2_file.cache[fp] = os.path.join(_find_msys2_dir(), fp.lstrip('/\\'))
+    return ensure_msys2_file.cache[fp]
+
+
+def ensure_msys2_package(pkg, shell=True):
+    if not hasattr(ensure_msys2_package, 'cache'):
+        ensure_msys2_package.cache = {}
+    elif pkg in ensure_msys2_package.cache:
+        return
+    ensure_msys2()
+    try:
+        subprocess.check_output(make_msys2_shell(['pacman', '-Q', pkg]), shell=shell)
+    except subprocess.CalledProcessError:
+        pass
+    else:
+        ensure_msys2_package.cache[pkg] = True
+        return
+    subprocess.check_output(make_msys2_shell(['pacman', '-S', '--noconfirm', '--needed', pkg]), shell=shell)
+    ensure_msys2_package.cache[pkg] = True
