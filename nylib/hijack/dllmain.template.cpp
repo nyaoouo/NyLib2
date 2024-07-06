@@ -136,12 +136,12 @@ ULONG WINAPI RunPython()
 
     char* initBuffer = (char*)malloc(snprintf(NULL, 0, initTemplate, pyMain, cfgPath) + 1);
     initBuffer[sprintf(initBuffer, initTemplate, pyMain, cfgPath)] = 0;
+	fclose(fp);
 
 	Py_Initialize();
 	PyRun_SimpleString(initBuffer);
 	PyRun_SimpleString(mainBuffer);
 	Py_Finalize();
-	fclose(fp);
 
 	free(initBuffer);
 	free(mainBuffer);
