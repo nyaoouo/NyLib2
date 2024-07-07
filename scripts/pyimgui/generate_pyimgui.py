@@ -371,7 +371,7 @@ void setup_pyimgui_core(pybind11::module_ m);
     return res
 
 
-def build(*a, debug=0, **kw):
+def pybind11_build(*a, debug=0, **kw):
     required('pybind11')
     if sys.version_info < (3, 12):
         os.environ['SETUPTOOLS_USE_DISTUTILS'] = 'stdlib'
@@ -429,98 +429,67 @@ def load_src(src_dir):
     ], cwd=cimgui_dir / 'generator', env=env)
 
 
-def test():
-    import pyimgui.detours as detours
-    print(detours.DetourTransactionBegin)
-    import pyimgui.imgui as imgui
-    import pyimgui.imgui.ctx as imgui_ctx
-    print(imgui.ImDrawFlags_(0).name, imgui.ImDrawFlags_None.value)
-    vec = imgui.ImColor(1., 2., 3., 4.)
-    print(f"{vec.Value.x=}, {vec.Value.y=}, {vec.Value.z=}, {vec.Value.w=}")
-    vec.SetHSV(0.5, 0.5, 0.5)
-    print(f"{vec.Value.x=}, {vec.Value.y=}, {vec.Value.z=}, {vec.Value.w=}")
-
-    show_windows = [False, False, False, False, False]
-    datas = {
-        'test_string': 'Hello, world!',
-    }
-
-    def draw_func(wnd):
-        if show_windows[0]:
-            show_windows[0] = imgui.ShowAboutWindow()
-        if show_windows[1]:
-            show_windows[1] = imgui.ShowDebugLogWindow()
-        if show_windows[2]:
-            show_windows[2] = imgui.ShowDemoWindow()
-        if show_windows[3]:
-            show_windows[3] = imgui.ShowIDStackToolWindow()
-        if show_windows[4]:
-            show_windows[4] = imgui.ShowMetricsWindow()
-        with imgui_ctx.Begin("Hello, world") as (show, window_open):
-            if not window_open:
-                wnd.Close()
-            if show:
-                imgui.Text("This is another useful text.")
-                imgui.Text(f"{show_windows=}")
-                window_size = imgui.GetWindowSize()
-                imgui.Text(f"Window size: {window_size.x}, {window_size.y}")
-                window_pos = imgui.GetWindowPos()
-                imgui.Text(f"Window pos: {window_pos.x}, {window_pos.y}")
-                if imgui.CollapsingHeader("Test"):
-                    _, wnd.clear_color = imgui.ColorEdit4("Clear color", wnd.clear_color)
-                    changed, datas['test_string'] = imgui.InputText("Test string", datas['test_string'])
-                    imgui.Text(f"Test string: {datas['test_string']}")
-                changed, show_windows[0] = imgui.Checkbox("Show about window", show_windows[0])
-                changed, show_windows[1] = imgui.Checkbox("Show debug log window", show_windows[1])
-                changed, show_windows[2] = imgui.Checkbox("Show demo window", show_windows[2])
-                changed, show_windows[3] = imgui.Checkbox("Show ID stack tool window", show_windows[3])
-                changed, show_windows[4] = imgui.Checkbox("Show metrics window", show_windows[4])
-
-    import pyimgui
-    pyimgui.Dx11ImguiWindow(draw_func).Serve()
+def build(debug=0):
+    cwd = pathlib.Path(__file__).parent
+    src_dir = cwd / 'src'
+    auto_src_dir = cwd / 'auto_src'
+    cimgui_dir = auto_src_dir / 'cimgui'
+    imgui_dir = cimgui_dir / 'imgui'
+    detours_dir = auto_src_dir / 'detours'
+    load_src(auto_src_dir)
+    pybind11_build(
+        name="pyimgui",
+        sources=sorted(map(str, [
+            *cimgui_dir.glob('*.cpp'),
+            *imgui_dir.glob('*.cpp'),
+            *generate_pyimgui(cimgui_dir, auto_src_dir / 'pyimgui'),
+            *src_dir.glob('*.cpp'),
+            *(src_dir / 'imgui_impl').glob('*.cpp'),
+            *(f for f in (detours_dir / 'src').glob('*.cpp') if f.name != 'uimports.cpp')
+        ])),
+        include_dirs=sorted(map(str, [
+            cimgui_dir,
+            cimgui_dir / 'generator' / 'output',
+            auto_src_dir / 'pyimgui',
+            # glfw_dir / 'include',
+            imgui_dir,
+            imgui_dir / 'backends',
+            src_dir,
+            auto_src_dir,
+        ])),
+        extra_objects=[],
+        extra_compile_args=[
+            *(f'/DCIMGUI_USE_{backend.upper()}=1' for backend in backends),
+            '/DIMGUI_DISABLE_OBSOLETE_FUNCTIONS=1',
+            '/DIMGUI_IMPL_API=extern \"C\"',
+            '/D_AMD64_=1',
+            '/utf-8',
+        ],
+        debug=debug,
+    )
+    required('pybind11-stubgen')
+    import pybind11_stubgen
+    args = pybind11_stubgen.arg_parser().parse_args(["-o", str(cwd), "pyimgui"], namespace=pybind11_stubgen.CLIArgs())
+    out_dir, sub_dir = pybind11_stubgen.to_output_and_subdir(
+        output_dir=args.output_dir,
+        module_name=args.module_name,
+        root_suffix=args.root_suffix,
+    )
+    pybind11_stubgen.run(
+        pybind11_stubgen.stub_parser_from_args(args),
+        pybind11_stubgen.Printer(invalid_expr_as_ellipses=not args.print_invalid_expressions_as_is),
+        args.module_name,
+        out_dir,
+        sub_dir=sub_dir,
+        dry_run=args.dry_run,
+        writer=pybind11_stubgen.Writer(stub_ext=args.stub_extension),
+    )
 
 
 def main(do_build=1, debug=0):
-    if do_build:
-        cwd = pathlib.Path(__file__).parent
-        src_dir = cwd / 'src'
-        auto_src_dir = cwd / 'auto_src'
-        cimgui_dir = auto_src_dir / 'cimgui'
-        imgui_dir = cimgui_dir / 'imgui'
-        detours_dir = auto_src_dir / 'detours'
-        load_src(auto_src_dir)
-        build(
-            name="pyimgui",
-            sources=sorted(map(str, [
-                *cimgui_dir.glob('*.cpp'),
-                *imgui_dir.glob('*.cpp'),
-                *generate_pyimgui(cimgui_dir, auto_src_dir / 'pyimgui'),
-                *src_dir.glob('*.cpp'),
-                *(src_dir / 'imgui_impl').glob('*.cpp'),
-                *(f for f in (detours_dir / 'src').glob('*.cpp') if f.name != 'uimports.cpp')
-            ])),
-            include_dirs=sorted(map(str, [
-                cimgui_dir,
-                cimgui_dir / 'generator' / 'output',
-                auto_src_dir / 'pyimgui',
-                # glfw_dir / 'include',
-                imgui_dir,
-                imgui_dir / 'backends',
-                src_dir,
-                auto_src_dir,
-            ])),
-            extra_objects=[],
-            extra_compile_args=[
-                *(f'/DCIMGUI_USE_{backend.upper()}=1' for backend in backends),
-                '/DIMGUI_DISABLE_OBSOLETE_FUNCTIONS=1',
-                '/DIMGUI_IMPL_API=extern \"C\"',
-                '/D_AMD64_=1',
-                '/utf-8',
-            ],
-            debug=debug,
-        )
-
-    test()
+    if do_build: build(debug)
+    import test_pyimgui
+    test_pyimgui.test()
 
 
 if __name__ == '__main__':
