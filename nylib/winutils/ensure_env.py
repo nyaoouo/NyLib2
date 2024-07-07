@@ -233,15 +233,17 @@ def ensure_msys2_file(fp, shell=True):
         ensure_msys2_file.cache = {}
     elif fp in ensure_msys2_file.cache:
         return ensure_msys2_file.cache[fp]
-    ensure_msys2()
-    if not hasattr(ensure_msys2_file, 'db_loaded'):
-        subprocess.check_output(make_msys2_shell(['pacman', '-Fy']), shell=shell)
-        ensure_msys2_file.db_loaded = True
-    package_ = subprocess.check_output(make_msys2_shell(['pacman', '-F', '-q', fp]))
-    mode, package = package_.split()[0].decode('utf-8').split('/', 1)
-    ensure_msys2_package(package, shell=shell)
-    ensure_msys2_file.cache[fp] = os.path.join(_find_msys2_dir(), fp.lstrip('/\\'))
-    return ensure_msys2_file.cache[fp]
+    fp_ = os.path.join(_find_msys2_dir(), fp.lstrip('/\\'))
+    if not os.path.exists(fp_):
+        ensure_msys2()
+        if not hasattr(ensure_msys2_file, 'db_loaded'):
+            subprocess.check_output(make_msys2_shell(['pacman', '-Fy']), shell=shell)
+            ensure_msys2_file.db_loaded = True
+        package_ = subprocess.check_output(make_msys2_shell(['pacman', '-F', '-q', fp]))
+        mode, package = package_.split()[0].decode('utf-8').split('/', 1)
+        ensure_msys2_package(package, shell=shell)
+    ensure_msys2_file.cache[fp] = fp_
+    return fp_
 
 
 def ensure_msys2_package(pkg, shell=True):

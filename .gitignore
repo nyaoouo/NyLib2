@@ -5,6 +5,11 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.dmp
+*.pdb
+/scripts/pyimgui/auto_src/
+.vscode/
+imgui.ini
 
 # C extensions
 *.so
