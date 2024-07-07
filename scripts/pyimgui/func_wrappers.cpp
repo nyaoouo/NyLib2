@@ -108,10 +108,6 @@ void _(py::module &m)
                 {return igColorButton(desc_id, col.Value, flags, size); }, py::arg("desc_id"), py::arg("col"), py::arg("flags") = 0, py::arg("size") = ImVec2(0, 0))
         /*END:igColorButton*/
 
-        /*START:igGetIO*/
-        .def("GetIO", &igGetIO, py::return_value_policy::reference)
-        /*END:igGetIO*/
-
         /*START:igSliderAngle*/
         .def("SliderAngle", [](const char *label, float v_rad, float v_degrees_min, float v_degrees_max, const char *format, ImGuiSliderFlags flags)
              {

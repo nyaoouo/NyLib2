@@ -19,7 +19,7 @@ backends = {
     'dx9': [],
     'dx10': [],
     'dx11': [],
-    'dx12':[],
+    'dx12': [],
 }
 
 
@@ -194,6 +194,9 @@ def generate_pyimgui(cimgui_dir, output_dir):
         if nonUDT:
             args += ", py::return_value_policy::move"
 
+        if (ret := func.get('ret','')).endswith('*') and ret[:-1] in struct_and_enums['structs']:
+            args += ", py::return_value_policy::reference"
+
         match func_type:
             case 0:  # global function
                 return f".def(\"{func['funcname']}\", {desc}{args})", extra_types
@@ -317,7 +320,7 @@ def generate_pyimgui(cimgui_dir, output_dir):
         (
             core_dir / 'globals.cpp',
             f"#include \"./globals.h\"\n"
-            f"{specified_wrappers.get('__GLOBAL_EXTRA__','')}\n"
+            f"{specified_wrappers.get('__GLOBAL_EXTRA__', '')}\n"
             f"void setup_pyimgui_core_globals(pybind11::module_ m) {{ {glob_defs.getvalue()} }}"
         ),
         # (
