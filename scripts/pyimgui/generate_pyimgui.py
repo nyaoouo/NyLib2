@@ -5,6 +5,7 @@ import pathlib
 import re
 import shutil
 import subprocess
+import sys
 
 from nylib.utils.pip import required
 from nylib.winutils import ensure_env, msvc
@@ -372,7 +373,8 @@ void setup_pyimgui_core(pybind11::module_ m);
 
 def build(*a, debug=0, **kw):
     required('pybind11')
-
+    if sys.version_info < (3, 12):
+        os.environ['SETUPTOOLS_USE_DISTUTILS'] = 'stdlib'
     from setuptools import Distribution
     from pybind11.setup_helpers import Pybind11Extension, build_ext
     dist = Distribution({

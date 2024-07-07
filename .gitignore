@@ -10,6 +10,7 @@ __pycache__/
 /scripts/pyimgui/auto_src/
 .vscode/
 imgui.ini
+venv_*/
 
 # C extensions
 *.so
