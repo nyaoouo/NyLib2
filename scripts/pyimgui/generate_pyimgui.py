@@ -317,6 +317,7 @@ def generate_pyimgui(cimgui_dir, output_dir):
         (
             core_dir / 'globals.cpp',
             f"#include \"./globals.h\"\n"
+            f"{specified_wrappers.get('__GLOBAL_EXTRA__','')}\n"
             f"void setup_pyimgui_core_globals(pybind11::module_ m) {{ {glob_defs.getvalue()} }}"
         ),
         # (
@@ -433,6 +434,9 @@ def test():
     print(f"{vec.Value.x=}, {vec.Value.y=}, {vec.Value.z=}, {vec.Value.w=}")
 
     show_windows = [False, False, False, False, False]
+    datas = {
+        'test_string': 'Hello, world!',
+    }
 
     def draw_func(wnd):
         if show_windows[0]:
@@ -457,6 +461,8 @@ def test():
             imgui.Text(f"Window size: {window_size.x}, {window_size.y}")
             window_pos = imgui.GetWindowPos()
             imgui.Text(f"Window pos: {window_pos.x}, {window_pos.y}")
+            changed, datas['test_string'] = imgui.InputText("Test string", datas['test_string'])
+            imgui.Text(f"Test string: {datas['test_string']}")
             changed, show_windows[0] = imgui.Checkbox("Show about window", show_windows[0])
             changed, show_windows[1] = imgui.Checkbox("Show debug log window", show_windows[1])
             changed, show_windows[2] = imgui.Checkbox("Show demo window", show_windows[2])
