@@ -493,7 +493,7 @@ def generate(backends, debug=False):
     nylib_path = cwd.parent.parent / 'nylib'
     for file in cwd.glob('pyimgui.*.pyd'):
         shutil.copy(file, nylib_path / file.name)
-    if (cwd.parent / 'nylib' / 'pyimgui').is_dir():
+    if (nylib_path / 'pyimgui').is_dir():
         shutil.rmtree(nylib_path / 'pyimgui')
     shutil.copytree(cwd / 'pyimgui', nylib_path / 'pyimgui')
 
