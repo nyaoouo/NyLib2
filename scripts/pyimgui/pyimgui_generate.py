@@ -490,6 +490,13 @@ def generate(backends, debug=False):
     )
     stub_gen('pyimgui', str(cwd))
 
+    nylib_path = cwd.parent.parent / 'nylib'
+    for file in cwd.glob('pyimgui.*.pyd'):
+        shutil.copy(file, nylib_path / file.name)
+    if (cwd.parent / 'nylib' / 'pyimgui').is_dir():
+        shutil.rmtree(nylib_path / 'pyimgui')
+    shutil.copytree(cwd / 'pyimgui', nylib_path / 'pyimgui')
+
 
 def main():
     generate([
