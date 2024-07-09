@@ -86,6 +86,8 @@ def msvc14_find_vcvarsall(plat_spec):
 @functools.cache
 def load_vcvarsall(plat_spec):
     vcvarsall, _ = msvc14_find_vcvarsall(plat_spec)
+    if not vcvarsall:
+        raise FileNotFoundError("vcvarsall.bat not found")
     try:
         out = subprocess.check_output(f'cmd /u /c "{vcvarsall}" {plat_spec} && set').decode('utf-16le', errors='replace')
     except subprocess.CalledProcessError as exc:

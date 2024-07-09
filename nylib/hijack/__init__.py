@@ -76,8 +76,10 @@ def orig_name(pe_path):
 
 
 def hijack(pe_path, build_dir=None, default_config=None):
-    from ..winutils import msvc
+    from ..winutils import msvc, ensure_env
     from ..process import Process
+
+    ensure_env.ensure_msvc()
 
     pe_path = pathlib.Path(pe_path).absolute()
     default_orig = orig_name(pe_path)
