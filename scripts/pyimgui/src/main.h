@@ -1,8 +1,0 @@
-#include "./gheader.h"
-#include "pyimgui.h"
-#include "win32.h"
-#include "pydetours.h"
-#include "./imgui_impl/impl_dx9.h"
-#include "./imgui_impl/impl_dx10.h"
-#include "./imgui_impl/impl_dx11.h"
-#include "./imgui_impl/impl_dx12.h"

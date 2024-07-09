@@ -7,8 +7,6 @@ __pycache__/
 *$py.class
 *.dmp
 *.pdb
-/scripts/pyimgui/auto_src/
-/scripts/pyimgui/pyimgui/
 .vscode/
 imgui.ini
 venv_*/
