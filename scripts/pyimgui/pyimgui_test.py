@@ -1,4 +1,6 @@
 import contextlib
+import os
+import pathlib
 
 
 def test():
@@ -9,20 +11,21 @@ def test():
     show_windows = [False, False, False, False, False]
     datas = {
         'test_string': 'Hello, world!',
-        'is_init': False,
-        'font': None,
     }
+
     def init_func():
         io = imgui.GetIO()
-        datas['font'] = io.Fonts.AddFontFromFileTTF(r"c:\Windows\Fonts\msyh.ttc", 16,None, io.Fonts.GetGlyphRangesChineseFull())
-        io.Fonts.Build()
-        wnd.InvalidateDeviceObjects()
+        font_dir = pathlib.Path(os.environ['WINDIR']) / 'fonts'
+        if (font_file := font_dir / 'msyh.ttc').is_file():
+            datas['font'] = io.Fonts.AddFontFromFileTTF(str(font_file), 16, None, io.Fonts.GetGlyphRangesChineseFull())
+            io.Fonts.Build()
+            wnd.InvalidateDeviceObjects()
         datas['is_init'] = True
 
     def draw_func():
-        if not datas['is_init']:
+        if not datas.get('is_init', False):
             wnd.CallBeforeFrameOnce(init_func)
-        with imgui_ctx.PushFont(datas['font']) if datas['font'] else contextlib.nullcontext():
+        with imgui_ctx.PushFont(im_font) if (im_font := datas.get('font')) else contextlib.nullcontext():
             if show_windows[0]:
                 show_windows[0] = imgui.ShowAboutWindow()
             if show_windows[1]:
