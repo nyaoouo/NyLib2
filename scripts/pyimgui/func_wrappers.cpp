@@ -17,48 +17,160 @@ static int mImguiInputTextCallback(ImGuiInputTextCallbackData *data)
 template <typename T>
 struct PyArrayWrapper
 {
-    T *data;
-    size_t size;
+     T *data;
+     size_t size;
 
-    PyArrayWrapper(T *data, size_t size)
-    {
-        this->data = data;
-        this->size = size;
-    }
+     PyArrayWrapper(T *data, size_t size)
+     {
+          this->data = data;
+          this->size = size;
+     }
 
-    inline T &operator[](size_t i)
-    {
-        if (i >= this->size)
-            _throwV_("Index out of range: {} >= {}", i, this->size);
-        return this->data[i];
-    }
+     inline T &operator[](size_t i)
+     {
+          if (i >= this->size)
+               _throwV_("Index out of range: {} >= {}", i, this->size);
+          return this->data[i];
+     }
 
-    static inline void pybind_setup(py::module_ m, const char *name)
-    {
-        py::class_<PyArrayWrapper<T>>(m, name)
-            .def("__getitem__", [](PyArrayWrapper<T> &self, size_t i) { return self[i]; })
-            .def("__setitem__", [](PyArrayWrapper<T> &self, size_t i, T v) { self[i] = v; })
-            .def("__len__", [](PyArrayWrapper<T> &self) { return self.size; })
-            .def("__iter__", [](PyArrayWrapper<T> &self) { return py::make_iterator(self.data, self.data + self.size); });
-    }
+     static inline void pybind_setup(py::module_ m, const char *name)
+     {
+          py::class_<PyArrayWrapper<T>>(m, name)
+              .def("__getitem__", [](PyArrayWrapper<T> &self, size_t i)
+                   { return self[i]; })
+              .def("__setitem__", [](PyArrayWrapper<T> &self, size_t i, T v)
+                   { self[i] = v; })
+              .def("__len__", [](PyArrayWrapper<T> &self)
+                   { return self.size; })
+              .def("__iter__", [](PyArrayWrapper<T> &self)
+                   { return py::make_iterator(self.data, self.data + self.size); });
+     }
+};
+
+#include <list>
+struct GlyphRanges
+{
+     const ImWchar *ranges;
+
+     // GlyphRanges(std::list<ImWchar> ranges)
+     // {
+     //      this->ranges = new ImWchar[ranges.size() + 1];
+     //      size_t i = 0;
+     //      for (ImWchar c : ranges)
+     //           this->ranges[i++] = c;
+     //      this->ranges[i] = 0;
+     // }
+
+     // ~GlyphRanges()
+     // {
+     //      delete[] this->ranges;
+     // }
+
+     std::list<ImWchar> ToList() const
+     {
+          std::list<ImWchar> res;
+          for (const ImWchar *p = this->ranges; *p; p++)
+               res.push_back(*p);
+          return res;
+     }
 };
 /*END:__STRUCTS_EXTRA__*/
 
-void _(py::module &m)
+void
+_(py::module &m)
 {
      /*START:__GLOBAL_DEF_EXTRA__*/
      /*END:__GLOBAL_DEF_EXTRA__*/
      /*START:__STRUCTS_DEF_EXTRA__*/
+     py::class_<GlyphRanges>(m, "GlyphRanges", py::dynamic_attr())
+         //.def(py::init<std::list<ImWchar>>())
+         .def("ToList", &GlyphRanges::ToList);
      /*END:__STRUCTS_DEF_EXTRA__*/
      m
-     /*START:_CLS_FIELD_:ImGuiViewportP::_ImGuiViewport*/
-     .def_property_readonly("_ImGuiViewport", [](ImGuiViewportP &self) { return (ImGuiViewport *)&self; })
-     /*END:_CLS_FIELD_:ImGuiViewportP::_ImGuiViewport*/
+         /*START:_CLS_FIELD_:ImGuiViewportP::_ImGuiViewport*/
+         .def_property_readonly("_ImGuiViewport", [](ImGuiViewportP &self)
+                                { return (ImGuiViewport *)&self; })
+         /*END:_CLS_FIELD_:ImGuiViewportP::_ImGuiViewport*/
+
+         // TODO: Deal With Pointer Properly
+         /*START:_GFUNC_:ImFontAtlas_GetGlyphRangesChineseFull*/
+         .def("GetGlyphRangesChineseFull", [](ImFontAtlas &self)
+              { return (GlyphRanges)ImFontAtlas_GetGlyphRangesChineseFull(&self); }, py::return_value_policy::reference)
+         /*END:_GFUNC_:ImFontAtlas_GetGlyphRangesChineseFull*/
+         /*START:_GFUNC_:ImFontAtlas_GetGlyphRangesChineseSimplifiedCommon*/
+         .def("GetGlyphRangesChineseSimplifiedCommon", [](ImFontAtlas &self)
+              { return (GlyphRanges)ImFontAtlas_GetGlyphRangesChineseSimplifiedCommon(&self); }, py::return_value_policy::reference)
+         /*END:_GFUNC_:ImFontAtlas_GetGlyphRangesChineseSimplifiedCommon*/
+         /*START:_GFUNC_:ImFontAtlas_GetGlyphRangesCyrillic*/
+         .def("GetGlyphRangesCyrillic", [](ImFontAtlas &self)
+              { return (GlyphRanges)ImFontAtlas_GetGlyphRangesCyrillic(&self); }, py::return_value_policy::reference)
+         /*END:_GFUNC_:ImFontAtlas_GetGlyphRangesCyrillic*/
+         /*START:_GFUNC_:ImFontAtlas_GetGlyphRangesDefault*/
+         .def("GetGlyphRangesDefault", [](ImFontAtlas &self)
+              { return (GlyphRanges)ImFontAtlas_GetGlyphRangesDefault(&self); }, py::return_value_policy::reference)
+         /*END:_GFUNC_:ImFontAtlas_GetGlyphRangesDefault*/
+         /*START:_GFUNC_:ImFontAtlas_GetGlyphRangesGreek*/
+         .def("GetGlyphRangesGreek", [](ImFontAtlas &self)
+              { return (GlyphRanges)ImFontAtlas_GetGlyphRangesGreek(&self); }, py::return_value_policy::reference)
+         /*END:_GFUNC_:ImFontAtlas_GetGlyphRangesGreek*/
+         /*START:_GFUNC_:ImFontAtlas_GetGlyphRangesJapanese*/
+         .def("GetGlyphRangesJapanese", [](ImFontAtlas &self)
+              { return (GlyphRanges)ImFontAtlas_GetGlyphRangesJapanese(&self); }, py::return_value_policy::reference)
+         /*END:_GFUNC_:ImFontAtlas_GetGlyphRangesJapanese*/
+         /*START:_GFUNC_:ImFontAtlas_GetGlyphRangesKorean*/
+         .def("GetGlyphRangesKorean", [](ImFontAtlas &self)
+              { return (GlyphRanges)ImFontAtlas_GetGlyphRangesKorean(&self); }, py::return_value_policy::reference)
+         /*END:_GFUNC_:ImFontAtlas_GetGlyphRangesKorean*/
+         /*START:_GFUNC_:ImFontAtlas_GetGlyphRangesThai*/
+         .def("GetGlyphRangesThai", [](ImFontAtlas &self)
+              { return (GlyphRanges)ImFontAtlas_GetGlyphRangesThai(&self); }, py::return_value_policy::reference)
+         /*END:_GFUNC_:ImFontAtlas_GetGlyphRangesThai*/
+         /*START:_GFUNC_:ImFontAtlas_GetGlyphRangesVietnamese*/
+         .def("GetGlyphRangesVietnamese", [](ImFontAtlas &self)
+              { return (GlyphRanges)ImFontAtlas_GetGlyphRangesVietnamese(&self); }, py::return_value_policy::reference)
+         /*END:_GFUNC_:ImFontAtlas_GetGlyphRangesVietnamese*/
+
+         /*START:_GFUNC_:ImFontAtlas_AddFontFromFileTTF*/
+         .def("AddFontFromFileTTF", [](ImFontAtlas &self, const char *filename, float size_pixels, std::optional<const ImFontConfig> &font_cfg, std::optional<GlyphRanges> &glyph_ranges)
+              {auto __ret = ImFontAtlas_AddFontFromFileTTF(&self, filename, size_pixels, (font_cfg ? &*font_cfg : nullptr), (glyph_ranges ? glyph_ranges->ranges : nullptr));return __ret; }, py::arg("filename"), py::arg("size_pixels"), py::arg("font_cfg") = py::none(), py::arg("glyph_ranges") = py::none(), py::return_value_policy::reference)
+         /*END:_GFUNC_:ImFontAtlas_AddFontFromFileTTF*/
+         /*START:_GFUNC_:ImFontAtlas_AddFontFromMemoryCompressedBase85TTF*/
+         .def("AddFontFromMemoryCompressedBase85TTF", [](ImFontAtlas &self, const char *compressed_font_data_base85, float size_pixels, std::optional<const ImFontConfig> &font_cfg, std::optional<GlyphRanges> &glyph_ranges)
+              {auto __ret = ImFontAtlas_AddFontFromMemoryCompressedBase85TTF(&self, compressed_font_data_base85, size_pixels, (font_cfg ? &*font_cfg : nullptr), (glyph_ranges ? glyph_ranges->ranges : nullptr));return __ret; }, py::arg("compressed_font_data_base85"), py::arg("size_pixels"), py::arg("font_cfg") = py::none(), py::arg("glyph_ranges") = py::none(), py::return_value_policy::reference)
+         /*END:_GFUNC_:ImFontAtlas_AddFontFromMemoryCompressedBase85TTF*/
+         /*START:_GFUNC_:ImFontAtlas_AddFontFromMemoryCompressedTTF*/
+         .def("AddFontFromMemoryCompressedTTF", [](ImFontAtlas &self, const void *compressed_font_data, int compressed_font_data_size, float size_pixels, std::optional<const ImFontConfig> &font_cfg, std::optional<GlyphRanges> &glyph_ranges)
+              {auto __ret = ImFontAtlas_AddFontFromMemoryCompressedTTF(&self, compressed_font_data, compressed_font_data_size, size_pixels, (font_cfg ? &*font_cfg : nullptr), (glyph_ranges ? glyph_ranges->ranges : nullptr));return __ret; }, py::arg("compressed_font_data"), py::arg("compressed_font_data_size"), py::arg("size_pixels"), py::arg("font_cfg") = py::none(), py::arg("glyph_ranges") = py::none(), py::return_value_policy::reference)
+         /*END:_GFUNC_:ImFontAtlas_AddFontFromMemoryCompressedTTF*/
+         /*START:_GFUNC_:ImFontAtlas_AddFontFromMemoryTTF*/
+         .def("AddFontFromMemoryTTF", [](ImFontAtlas &self, void *font_data, int font_data_size, float size_pixels, std::optional<const ImFontConfig> &font_cfg, std::optional<GlyphRanges> &glyph_ranges)
+              {auto __ret = ImFontAtlas_AddFontFromMemoryTTF(&self, font_data, font_data_size, size_pixels, (font_cfg ? &*font_cfg : nullptr), (glyph_ranges ? glyph_ranges->ranges : nullptr));return __ret; }, py::arg("font_data"), py::arg("font_data_size"), py::arg("size_pixels"), py::arg("font_cfg") = py::none(), py::arg("glyph_ranges") = py::none(), py::return_value_policy::reference)
+         /*END:_GFUNC_:ImFontAtlas_AddFontFromMemoryTTF*/
 
          /*START:_GFUNC_:igText*/
          .def("Text", [](const char *s)
               { return igText(s); }, py::arg("s") = "")
          /*END:_GFUNC_:igText*/
+
+         /*START:_GFUNC_:igTextColored*/
+         .def("TextColored", [](const ImVec4 &col, const char *s)
+              { return igTextColored(col, s); }, py::arg("col"), py::arg("s") = "")
+         /*END:_GFUNC_:igTextColored*/
+
+         /*START:_GFUNC_:igTextDisabled*/
+         .def("TextDisabled", [](const char *s)
+              { return igTextDisabled(s); }, py::arg("s") = "")
+         /*END:_GFUNC_:igTextDisabled*/
+
+         /*START:_GFUNC_:igTextWrapped*/
+         .def("TextWrapped", [](const char *s)
+              { return igTextWrapped(s); }, py::arg("s") = "")
+         /*END:_GFUNC_:igTextWrapped*/
+
+         /*START:_GFUNC_:igTextV*/         /*END:_GFUNC_:igTextV*/
+         /*START:_GFUNC_:igTextColoredV*/  /*END:_GFUNC_:igTextColoredV*/
+         /*START:_GFUNC_:igTextDisabledV*/ /*END:_GFUNC_:igTextDisabledV*/
+         /*START:_GFUNC_:igTextWrappedV*/  /*END:_GFUNC_:igTextWrappedV*/
 
          /*START:_GFUNC_:igCheckbox*/
          .def("Checkbox", [](const char *label, bool v)

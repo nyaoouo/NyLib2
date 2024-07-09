@@ -1,35 +1,7 @@
 #include "./Impl_Dx11.h"
 
 START_M_IMGUI_IMPL_Dx11_NAMESPACE
-
 {
-
-    void Dx11Render::CallRenderCallback()
-    {
-        if (!this->renderCallback.has_value())
-            return;
-        if (this->renderCallback_argc == 0)
-            this->renderCallback.value()();
-        else if (this->renderCallback_argc == 1)
-            this->renderCallback.value()(this);
-        else
-            _throwV_("Invalid renderCallback_argc {}", this->renderCallback_argc);
-    }
-
-    void Dx11Render::SetRenderCallback(std::optional<py::function> renderCallback)
-    {
-        if (!renderCallback.has_value())
-        {
-            this->renderCallback = std::nullopt;
-            this->renderCallback_argc = 0;
-            return;
-        }
-        this->renderCallback = renderCallback;
-        auto _renderCallback = renderCallback.value();
-        pybind11::module inspect_module = pybind11::module::import("inspect");
-        pybind11::object result = inspect_module.attr("signature")(_renderCallback).attr("parameters");
-        this->renderCallback_argc = py::len(result);
-    }
 
     void Dx11Render::CreateRenderTarget()
     {
@@ -182,7 +154,7 @@ START_M_IMGUI_IMPL_Dx11_NAMESPACE
         // io->ConfigDockingTransparentPayload = true;
         // io->ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleFonts;     // FIXME-DPI: Experimental. THIS CURRENTLY DOESN'T WORK AS EXPECTED. DON'T USE IN USER APP!
         // io->ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleViewports; // FIXME-DPI: Experimental.
-
+        // ImFontAtlas_AddFontFromFileTTF(io->Fonts, "c:\\Windows\\Fonts\\msyh.ttc", 18.0f, nullptr, ImFontAtlas_GetGlyphRangesChineseFull(io->Fonts));
         // igStyleColorsDark(NULL);
         igStyleColorsLight(NULL);
 
@@ -228,14 +200,41 @@ START_M_IMGUI_IMPL_Dx11_NAMESPACE
                 CreateRenderTarget();
             }
 
+            do
+            {
+                auto gstate = PyGILState_Ensure();
+                while (!this->callBeforeFrameOnce.empty())
+                {
+                    auto &func = this->callBeforeFrameOnce.back();
+                    auto argc = PyFuncArgc(func);
+
+                    switch (argc)
+                    {
+                    case 0:
+                        func();
+                        break;
+                    case 1:
+                        func(this);
+                        break;
+                    default:
+                        _throwV_("Invalid callBeforeFrameOnce argc {}", argc);
+                    }
+                    this->callBeforeFrameOnce.pop_back();
+                }
+                PyGILState_Release(gstate);
+            } while (0);
+
             // Start the Dear ImGui frame
             ImGui_ImplDX11_NewFrame();
             ImGui_ImplWin32_NewFrame();
             igNewFrame();
 
-            auto gstate = PyGILState_Ensure();
-            this->CallRenderCallback();
-            PyGILState_Release(gstate);
+            do
+            {
+                auto gstate = PyGILState_Ensure();
+                this->CallRenderCallback();
+                PyGILState_Release(gstate);
+            } while (0);
 
             igEndFrame();
             igRender();
@@ -393,24 +392,52 @@ START_M_IMGUI_IMPL_Dx11_NAMESPACE
     void Dx11Inbound::_Update()
     {
         this->pd3dDeviceContext->OMSetRenderTargets(1, &this->mainRenderTargetView, nullptr);
+
+        do
+        {
+            auto gstate = PyGILState_Ensure();
+            while (!this->callBeforeFrameOnce.empty())
+            {
+                auto &func = this->callBeforeFrameOnce.back();
+                auto argc = PyFuncArgc(func);
+
+                switch (argc)
+                {
+                case 0:
+                    func();
+                    break;
+                case 1:
+                    func(this);
+                    break;
+                default:
+                    _throwV_("Invalid callBeforeFrameOnce argc {}", argc);
+                }
+                this->callBeforeFrameOnce.pop_back();
+            }
+            PyGILState_Release(gstate);
+        } while (0);
+
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         igNewFrame();
 
-        auto gstate = PyGILState_Ensure();
-        try
+        do
         {
-            this->CallRenderCallback();
-        }
-        catch (std::exception &e)
-        {
-            printf("Error in render callback,detach: \n");
-            printf(e.what());
-            this->Detach();
+            auto gstate = PyGILState_Ensure();
+            try
+            {
+                this->CallRenderCallback();
+            }
+            catch (std::exception &e)
+            {
+                printf("Error in render callback,detach: \n");
+                printf(e.what());
+                this->Detach();
+                PyGILState_Release(gstate);
+                return;
+            }
             PyGILState_Release(gstate);
-            return;
-        }
-        PyGILState_Release(gstate);
+        } while (0);
 
         igEndFrame();
         igRender();

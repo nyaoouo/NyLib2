@@ -121,8 +121,8 @@ def generate_pyimgui(cimgui_dir, output_dir, backends):
     def make_func_desc(func):
         if (s := specified_wrappers.get(f"_GFUNC_:{func['ov_cimguiname']}")) is not None:
             return s, set()
-        if func.get('isvararg'): return f"/* TODO:varg func {func['ov_cimguiname']}*/", set()
-        if any(arg['type'] == 'va_list' for arg in func['argsT']): return f"/* TODO:va_list func {func['ov_cimguiname']}*/", set()
+        if func.get('isvararg'): return f"\n/* TODO:varg func {func['ov_cimguiname']}*/", set()
+        if any(arg['type'] == 'va_list' for arg in func['argsT']): return f"\n/* TODO:va_list func {func['ov_cimguiname']}*/", set()
 
         real_arg_off = nonUDT = func.get("nonUDT", 0)
 
@@ -137,25 +137,36 @@ def generate_pyimgui(cimgui_dir, output_dir, backends):
         else:
             func_type = 1  # class method
 
-        if nonUDT or func_type == 1:
+        def_arg_map = {}
+        if func_type == 12 or func_type == 11:
+            desc = f"&{func['ov_cimguiname']}"
+        else:
             func_args = []
-            if func_type == 1:
-                real_arg_off += 1
-                func_args.append((func['stname'] + '&', 'self', None))
             for argt in func['argsT'][real_arg_off:]:
-                func_args.append((argt['type'], argt['name'], func.get("defaults", {}).get(argt['name'])))
-            func_args = ', '.join(f"{t} {n}" for t, n, _ in func_args)
+                if re.search(r"\(\*\)\((.*)\)$", argt['type']):
+                    return f"\n/* TODO:func pointer arg {func['ov_cimguiname']} {func.get('ret')} {func['signature']}*/", set()
+                if argt['type'].endswith('*') and argt['type'][:-1].strip().rsplit(' ', 1)[-1] in struct_and_enums['structs']:
+                    if func.get("defaults", {}).get(argt['name']) in ('nullptr', 'NULL'):
+                        a = f"std::optional<{argt['type'][:-1]}>& {argt['name']}"
+                        c = f"({argt['name']} ? &*{argt['name']} : nullptr)"
+                        def_arg_map[argt['name']] = "py::none()"
+                    else:
+                        a = f"{argt['type'][:-1]}& {argt['name']}"
+                        c = f"&{argt['name']}"
+                else:
+                    a = f"{argt['type']} {argt['name']}"
+                    c = argt['name']
+                func_args.append((a, c))
+            func_args_s = ', '.join(a for a, c in func_args)
             has_return = int(func.get('ret', 'void') != 'void')
             call_args = [f"&__out_{i}" for i in range(nonUDT)]
-            if func_type == 1: call_args.append("&self")
-            call_args.extend(arg['name'] for arg in func['argsT'][real_arg_off:])
+            # if func_type == 1: call_args.append("&self")
+            call_args.extend(c for a, c in func_args)
             ret_args = []
             if has_return: ret_args.append("__ret")
             ret_args.extend(f"__out_{i}" for i in range(nonUDT))
 
-            # print(func['ov_cimguiname'],real_arg_off, func_args, call_args, ret_args)
-
-            desc = f"[]({func_args}){{"
+            desc = f"[]({func_args_s}){{"
             for i, argt in enumerate(func['argsT'][:nonUDT]):
                 desc += f"{argt['type'][:-1]} __out_{i} = {{}};"
             if has_return:
@@ -167,14 +178,14 @@ def generate_pyimgui(cimgui_dir, output_dir, backends):
             elif len(ret_args) > 1:
                 desc += f"return std::make_tuple({', '.join(ret_args)});"
             desc += "}"
-        else:
-            desc = f"&{func['ov_cimguiname']}"
 
         args = ''
         extra_types = set()
+        if func_type == 1:
+            real_arg_off += 1
         for argt in func['argsT'][real_arg_off:]:
             args += f", py::arg(\"{argt['name']}\")"
-            if (d := func.get("defaults", {}).get(argt['name'])) is not None:
+            if (d := def_arg_map.get(argt['name'])) or (d := func.get("defaults", {}).get(argt['name'])) is not None:
                 args += f" = {d}"
             t = argt['type'].rstrip('*&')
             if t.startswith("const "):
@@ -320,8 +331,11 @@ def generate_pyimgui(cimgui_dir, output_dir, backends):
             "namespace mNameSpace{ namespace PyImguiCore{\n"
             f"{specified_wrappers.get('__STRUCTS_EXTRA__', '')}\n"
             f'{template_defs.getvalue()}\n'
-            f"void pybind_setup_pyimgui_structs(pybind11::module_ m) {{ {cls_template_defs.getvalue()} \n {cls_defs.getvalue()} }}"
-            "}}\n"
+            "void pybind_setup_pyimgui_structs(pybind11::module_ m) {"
+            f"{specified_wrappers.get('__STRUCTS_DEF_EXTRA__', '')};\n"
+            f"{cls_template_defs.getvalue()};\n "
+            f"{cls_defs.getvalue()}\n"
+            "}}}\n"
         ),
         (
             core_dir / 'globals.h',
@@ -336,9 +350,10 @@ def generate_pyimgui(cimgui_dir, output_dir, backends):
             f"#include \"./globals.h\"\n"
             "namespace mNameSpace{ namespace PyImguiCore{\n"
             f"{specified_wrappers.get('__GLOBAL_EXTRA__', '')}\n"
-            f"void pybind_setup_pyimgui_globals(pybind11::module_ m) {{ {specified_wrappers.get('__GLOBAL_DEF_EXTRA__', '')};"
-            f" {glob_defs.getvalue()} }}"
-            "}}\n"
+            "void pybind_setup_pyimgui_globals(pybind11::module_ m) {\n"
+            f"{specified_wrappers.get('__GLOBAL_DEF_EXTRA__', '')};\n"
+            f" {glob_defs.getvalue()}\n"
+            "}}}\n"
         ),
         (
             output_dir / 'pyimgui.h',
