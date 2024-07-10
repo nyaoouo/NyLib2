@@ -8,6 +8,7 @@ __pycache__/
 *.dmp
 *.pdb
 /nylib/pyimgui/
+/nylib/winutils/python_loader/python_loader.dll
 .vscode/
 imgui.ini
 venv_*/
