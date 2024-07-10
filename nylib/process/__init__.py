@@ -347,4 +347,28 @@ class Process:
             return self.read_u64(return_address)
 
 
+def _local_call(func_ptr, *args: int | float | bytes | bool, push_stack_depth=0x28, block=True):
+    a = [ctypes.c_size_t]
+    for v in args:
+        if isinstance(v, int):
+            a.append(ctypes.c_size_t)
+        elif isinstance(v, float):
+            a.append(ctypes.c_float)
+        elif isinstance(v, bytes):
+            a.append(ctypes.c_char_p)
+        elif isinstance(v, bool):
+            a.append(ctypes.c_bool)
+        else:
+            raise TypeError(f'not support arg type {type(v)}')
+    return ctypes.CFUNCTYPE(*a)(func_ptr)(*args)
+
+
+def _local_read(address, type_: typing.Type[_T] | int) -> _T:
+    if isinstance(type_, int):
+        return ctypes.string_at(address, type_)
+    return type_.from_address(address)
+
+
 Process.current = Process(winapi.GetCurrentProcessId(), winapi.GetCurrentProcess())
+Process.current.read = _local_read
+Process.current.call = _local_call
