@@ -88,8 +88,6 @@ def hijack(pe_path, build_dir=None, default_config=None):
 
     plat_spec = 'x86_amd64'  # TODO: check
     build_env = msvc.load_vcvarsall(plat_spec)
-    if build_env is None:
-        raise RuntimeError("Cannot find msvc, please install Visual Studio.")
 
     py_dll = f"python{sys.version_info.major}{sys.version_info.minor}.dll"
     if default_config is None:

@@ -240,9 +240,14 @@ class Process:
         return self.static_scanner(self.base_ldr_data.BaseDllName.remote_value(self))
 
     def get_proc_address(self, dll: str | int, func_name: str):
+        if not hasattr(Process.get_proc_address, 'pGetProcAddress'):
+            Process.get_proc_address.pGetProcAddress = winapi.GetProcAddress(
+                self.get_ldr_data('kernel32.dll').DllBase,
+                b"GetProcAddress"
+            )
         if isinstance(func_name, str): func_name = func_name.encode('utf-8')
         if isinstance(dll, str): dll = self.get_ldr_data(dll).DllBase
-        return winapi.GetProcAddress(dll, func_name)
+        return self.call(Process.get_proc_address.pGetProcAddress, dll, func_name)
 
     def name_space(self):
         return Namespace(self)
@@ -268,8 +273,7 @@ class Process:
                     b"\x48\x89\x03"  # mov qword ptr [rbx], rax
                     b"\xeb\x16"  # jmp end
                     # fail:
-                    b"\x48\xb8" + struct.pack('<Q', self.get_proc_address('kernel32.dll',
-                                                                          "GetLastError")) +  # movabs rax, GetLastError
+                    b"\x48\xb8" + struct.pack('<Q', self.get_proc_address('kernel32.dll', "GetLastError")) +  # movabs rax, GetLastError
                     b"\xff\xd0"  # call rax
                     b"\x48\x89\x03"  # mov qword ptr [rbx], rax
                     b"\x48\x31\xc0"  # xor rax, rax
@@ -341,69 +345,6 @@ class Process:
             code_address = name_space.store(shell)
             self._call(code_address, block=block)
             return self.read_u64(return_address)
-
-    @functools.cache
-    def _get_pyfunc_offset(self, func_name):
-        c = Process.current
-        ldr = c.get_ldr_data(PYTHON_DLL)
-        base = ldr.DllBase
-        return c.get_proc_address(base, func_name) - base
-
-    def get_python_base(self, auto_inject=False):
-        try:
-            return self.get_ldr_data(PYTHON_DLL).DllBase
-        except KeyError:
-            if auto_inject:
-                base = self.load_library(Process.current.get_ldr_data(PYTHON_DLL).FullDllName.value)
-                self.call(base + self._get_pyfunc_offset("Py_Initialize"), 1, push_stack_depth=0x58)
-                return base
-            raise
-
-    def exec_shell_code(self, code: str, p_dict=None, auto_inject=False):
-        py_base = self.get_python_base(auto_inject)
-        need_decref = False
-        if p_dict is None:
-            p_dict = self.call(py_base + self._get_pyfunc_offset("PyDict_New"))
-            need_decref = True
-
-        with tempfile.NamedTemporaryFile('w', encoding='utf-8', delete=False) as f:
-            f.write(code)
-            f.close()
-            res = self.call(py_base + self._get_pyfunc_offset("PyRun_String"),
-                            f'with open({f.name!r},encoding="utf-8") as f:exec(f.read())'.encode('utf-8'), 0x101,
-                            p_dict, p_dict)
-
-        if not res:
-            if error_occurred := self.call(py_base + self._get_pyfunc_offset("PyErr_Occurred")):
-                type_name = self.read_string(self.read_ptr(error_occurred + 0x18))
-                with self.name_space() as ns:
-                    p_data = ns.take(0x18)
-                    self.call(py_base + self._get_pyfunc_offset("PyErr_Fetch"), p_data, p_data + 0x8, p_data + 0x10)
-                    exc_val = self.read_ptr(p_data + 0x8)
-                    desc = None
-                    if exc_val:
-                        py_str = self.call(py_base + self._get_pyfunc_offset("PyObject_Str"), exc_val)
-                        str_size = ns.take(8)
-                        if p_str := self.call(py_base + self._get_pyfunc_offset("PyUnicode_AsUTF8AndSize"), py_str,
-                                              str_size):
-                            desc = self.read_string(p_str, self.read_u64(str_size))
-                            # decref(py_str)
-                        # decref(exc_val)
-                    # decref(error_occurred)
-                    if desc:
-                        raise RuntimeError(f"Exception in shell: {type_name}: {desc}")
-                    else:
-                        raise RuntimeError(f"Exception in shell: {type_name}")
-            else:
-                raise RuntimeError(f"Exception in shell but no error occurred")
-        else:
-            pass  # decref(res)
-        if need_decref:
-            pass  # decref(p_dict)
-
-    @functools.cached_property
-    def injector(self):
-        return self.Injector(self)
 
 
 Process.current = Process(winapi.GetCurrentProcessId(), winapi.GetCurrentProcess())
