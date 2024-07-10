@@ -76,8 +76,7 @@ struct GlyphRanges
 };
 /*END:__STRUCTS_EXTRA__*/
 
-void
-_(py::module &m)
+void _(py::module &m)
 {
      /*START:__GLOBAL_DEF_EXTRA__*/
      /*END:__GLOBAL_DEF_EXTRA__*/
@@ -429,5 +428,10 @@ _(py::module &m)
               {
                 auto changed = igInputDouble(label, &v, step, step_fast, format, flags);
                 return py::make_tuple(changed, v); }, py::arg("label"), py::arg("v"), py::arg("step") = 0.0, py::arg("step_fast") = 0.0, py::arg("format") = "%.6f", py::arg("flags") = 0)
-     /*END:_GFUNC_:igInputDouble*/
+         /*END:_GFUNC_:igInputDouble*/
+         /*START:_GFUNC_:igColumns*/
+         .def("Columns", [](int count, std::optional<const char *> &id, bool border)
+              { igColumns(count, (id ? *id : NULL), border); }, py::arg("count") = 1, py::arg("id") = py::none(), py::arg("border") = true)
+         /*END:_GFUNC_:igColumns*/
+         .def();
 }
