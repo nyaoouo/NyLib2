@@ -36,10 +36,25 @@ def test():
                 show_windows[3] = imgui.ShowIDStackToolWindow()
             if show_windows[4]:
                 show_windows[4] = imgui.ShowMetricsWindow()
-            with imgui_ctx.Begin("Hello, world") as (show, window_open):
+            io = imgui.GetIO()
+            with imgui_ctx.Begin(
+                    f"Hello, world (fps: {io.Framerate:.1f}) ###HelloWorld",
+            ) as (show, window_open):
                 if not window_open:
                     wnd.Close()
                 if show:
+                    if 'Profiler' not in datas:
+                        if imgui.Button("Start profiler"):
+                            import cProfile
+                            datas['Profiler'] = pr = cProfile.Profile()
+                            pr.enable()
+                    else:
+                        if imgui.Button("Stop profiler"):
+                            import pstats
+                            pr = datas.pop('Profiler')
+                            pr.disable()
+                            pstats.Stats(pr).sort_stats(pstats.SortKey.CUMULATIVE).print_stats()
+
                     imgui.Text("中文字符")
                     imgui.Text("This is another useful text.")
                     imgui.Text(f"{show_windows=}")

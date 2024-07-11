@@ -1,14 +1,5 @@
 #pragma once
-#include "../gHeader.h"
-#include "../PyDetours.h"
-#include "../ImguiInbound.h"
-
-#define M_IMGUI_IMPL_NAMESPACE mNameSpace::MImguiImpl
-#define START_M_IMGUI_IMPL_NAMESPACE \
-    namespace mNameSpace             \
-    {                                \
-        namespace MImguiImpl
-#define END_M_IMGUI_IMPL_NAMESPACE }
+#include "./Impl_Cmn.h"
 
 #define M_IMGUI_IMPL_WIN32_NAMESPACE M_IMGUI_IMPL_NAMESPACE::Impl_Win32
 #define START_M_IMGUI_IMPL_WIN32_NAMESPACE \

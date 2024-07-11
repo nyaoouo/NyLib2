@@ -200,41 +200,14 @@ START_M_IMGUI_IMPL_Dx11_NAMESPACE
                 CreateRenderTarget();
             }
 
-            do
-            {
-                auto gstate = PyGILState_Ensure();
-                while (!this->callBeforeFrameOnce.empty())
-                {
-                    auto &func = this->callBeforeFrameOnce.back();
-                    auto argc = PyFuncArgc(func);
-
-                    switch (argc)
-                    {
-                    case 0:
-                        func();
-                        break;
-                    case 1:
-                        func(this);
-                        break;
-                    default:
-                        _throwV_("Invalid callBeforeFrameOnce argc {}", argc);
-                    }
-                    this->callBeforeFrameOnce.pop_back();
-                }
-                PyGILState_Release(gstate);
-            } while (0);
+            this->ProcessCallBeforeFrameOnce();
 
             // Start the Dear ImGui frame
             ImGui_ImplDX11_NewFrame();
             ImGui_ImplWin32_NewFrame();
             igNewFrame();
 
-            do
-            {
-                auto gstate = PyGILState_Ensure();
-                this->CallRenderCallback();
-                PyGILState_Release(gstate);
-            } while (0);
+            this->ProcessRenderCallback();
 
             igEndFrame();
             igRender();
@@ -393,51 +366,23 @@ START_M_IMGUI_IMPL_Dx11_NAMESPACE
     {
         this->pd3dDeviceContext->OMSetRenderTargets(1, &this->mainRenderTargetView, nullptr);
 
-        do
-        {
-            auto gstate = PyGILState_Ensure();
-            while (!this->callBeforeFrameOnce.empty())
-            {
-                auto &func = this->callBeforeFrameOnce.back();
-                auto argc = PyFuncArgc(func);
-
-                switch (argc)
-                {
-                case 0:
-                    func();
-                    break;
-                case 1:
-                    func(this);
-                    break;
-                default:
-                    _throwV_("Invalid callBeforeFrameOnce argc {}", argc);
-                }
-                this->callBeforeFrameOnce.pop_back();
-            }
-            PyGILState_Release(gstate);
-        } while (0);
+        this->ProcessCallBeforeFrameOnce();
 
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         igNewFrame();
 
-        do
+        try
         {
-            auto gstate = PyGILState_Ensure();
-            try
-            {
-                this->CallRenderCallback();
-            }
-            catch (std::exception &e)
-            {
-                printf("Error in render callback,detach: \n");
-                printf(e.what());
-                this->Detach();
-                PyGILState_Release(gstate);
-                return;
-            }
-            PyGILState_Release(gstate);
-        } while (0);
+            this->ProcessRenderCallback();
+        }
+        catch (std::exception &e)
+        {
+            printf("Error in render callback,detach: \n");
+            printf(e.what());
+            this->Detach();
+            return;
+        }
 
         igEndFrame();
         igRender();

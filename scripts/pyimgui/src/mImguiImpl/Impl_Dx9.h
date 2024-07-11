@@ -12,22 +12,9 @@
 
 START_M_IMGUI_IMPL_Dx9_NAMESPACE
 {
-    class Dx9Render
+    class Dx9Render : public RenderBase
     {
     public:
-        py::function renderCallback;
-        HWND hwnd = nullptr;
-
-        Dx9Render(py::function renderCallback)
-        {
-            this->renderCallback = renderCallback;
-        }
-
-        inline void Close()
-        {
-            if (this->hwnd != nullptr)
-                PostMessage(this->hwnd, WM_CLOSE, 0, 0);
-        }
     };
 
     class Dx9Window : public Dx9Render
@@ -35,6 +22,16 @@ START_M_IMGUI_IMPL_Dx9_NAMESPACE
     public:
         static inline Dx9Window *_instance = nullptr;
         ImVec4 ClearColor = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
+
+        LPDIRECT3D9 pD3D = nullptr;
+        LPDIRECT3DDEVICE9 pd3dDevice = nullptr;
+        bool DeviceLost = false;
+        UINT ResizeWidth = 0, ResizeHeight = 0;
+        D3DPRESENT_PARAMETERS d3dpp = {};
+
+        void CreateDeviceD3D();
+        void CleanupDeviceD3D();
+        void ResetDevice();
 
         Dx9Window(py::function renderCallback) : Dx9Render(renderCallback)
         {
@@ -66,9 +63,9 @@ START_M_IMGUI_IMPL_Dx9_NAMESPACE
 
     inline void pybind_setup_mImguiImpl_Dx9(pybind11::module_ m)
     {
-        py::class_<Dx9Render>(m, "Dx9Render")
-            .def(py::init<py::function>())
-            .def("Close", &Dx9Render::Close);
+        py::class_<Dx9Render, RenderBase>(m, "_Dx9Render")
+            .def_static("InvalidateDeviceObjects", &ImGui_ImplDX9_InvalidateDeviceObjects)
+            .def_static("CreateDeviceObjects", &ImGui_ImplDX9_CreateDeviceObjects);
         py::class_<Dx9Window, Dx9Render>(m, "Dx9Window")
             .def(py::init<py::function>())
             .def_readwrite("ClearColor", &Dx9Window::ClearColor)
