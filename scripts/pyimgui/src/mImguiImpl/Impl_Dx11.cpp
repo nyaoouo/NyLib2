@@ -132,6 +132,7 @@ START_M_IMGUI_IMPL_Dx11_NAMESPACE
         }
         catch (std::exception &e)
         {
+            this->CleanupDeviceD3D();
             ::DestroyWindow(this->hwnd);
             ::UnregisterClass(wc.lpszClassName, wc.hInstance);
             throw e;

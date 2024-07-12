@@ -23,7 +23,8 @@ START_M_IMGUI_HELPER_Dx11_NAMESPACE
         Dx11TextureHelper(ID3D11Device *pd3dDevice) : pd3dDevice(pd3dDevice) {}
         Dx11TextureHelper(ID3D11Device *pd3dDevice, const char *filename) : pd3dDevice(pd3dDevice)
         {
-            LoadTextureFromFile(filename);
+            if (filename != nullptr)
+                LoadTextureFromFile(filename);
         }
 
         ~Dx11TextureHelper()

@@ -1,6 +1,7 @@
 #include "./Impl_Win32.h"
 #include <d3d12.h>
 #include <dxgi1_4.h>
+#include "./Helper_Dx12.h"
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
 
@@ -29,13 +30,23 @@ START_M_IMGUI_IMPL_Dx12_NAMESPACE
     class Dx12Render : public RenderBase
     {
     public:
-
         ID3D12Device *pd3dDevice = nullptr;
         IDXGISwapChain3 *pSwapChain = nullptr;
         ID3D12DescriptorHeap *pd3dRtvDescHeap = nullptr;
         ID3D12DescriptorHeap *pd3dSrvDescHeap = nullptr;
         ID3D12CommandQueue *pd3dCommandQueue = nullptr;
         ID3D12GraphicsCommandList *pd3dCommandList = nullptr;
+
+        inline M_IMGUI_HELPER_Dx12_NAMESPACE::Dx12TextureHelper *CreateTexture(const char *filename = nullptr)
+        {
+            UINT handle_increment = this->pd3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            int descriptor_index = 1; // The descriptor table index to use (not normally a hard-coded constant, but in this case we'll assume we have slot 1 reserved for us)
+            D3D12_CPU_DESCRIPTOR_HANDLE srv_cpu_handle = this->pd3dSrvDescHeap->GetCPUDescriptorHandleForHeapStart();
+            srv_cpu_handle.ptr += (handle_increment * descriptor_index);
+            D3D12_GPU_DESCRIPTOR_HANDLE srv_gpu_handle = this->pd3dSrvDescHeap->GetGPUDescriptorHandleForHeapStart();
+            srv_gpu_handle.ptr += (handle_increment * descriptor_index);
+            return new M_IMGUI_HELPER_Dx12_NAMESPACE::Dx12TextureHelper(this->pd3dDevice, srv_cpu_handle, srv_gpu_handle, filename);
+        }
     };
 
     class Dx12Window : public Dx12Render
@@ -113,9 +124,14 @@ START_M_IMGUI_IMPL_Dx12_NAMESPACE
 
     inline void pybind_setup_mImguiImpl_Dx12(pybind11::module_ m)
     {
+        M_IMGUI_HELPER_Dx12_NAMESPACE::pybind_setup_helper_Dx12(m);
         py::class_<Dx12Render, RenderBase>(m, "Dx12Render")
             .def_static("InvalidateDeviceObjects", &ImGui_ImplDX12_InvalidateDeviceObjects)
-            .def_static("CreateDeviceObjects", &ImGui_ImplDX12_CreateDeviceObjects);
+            .def_static("CreateDeviceObjects", &ImGui_ImplDX12_CreateDeviceObjects)
+            .def("CreateTexture", [](Dx12Render &self, const char *filename)
+                 { return self.CreateTexture(filename); }, py::return_value_policy::move)
+            .def("CreateTexture", [](Dx12Render &self)
+                 { return self.CreateTexture(); }, py::return_value_policy::move);
         py::class_<Dx12Window, Dx12Render>(m, "Dx12Window")
             .def(py::init<py::function>())
             .def_readwrite("ClearColor", &Dx12Window::ClearColor)

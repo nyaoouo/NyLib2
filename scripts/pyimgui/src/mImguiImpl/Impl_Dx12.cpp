@@ -108,7 +108,7 @@ START_M_IMGUI_IMPL_Dx12_NAMESPACE
         {
             D3D12_DESCRIPTOR_HEAP_DESC desc = {};
             desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-            desc.NumDescriptors = 1;
+            desc.NumDescriptors = 2;
             desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
             if (hr = this->pd3dDevice->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&this->pd3dSrvDescHeap)); hr != S_OK)
             {
@@ -291,12 +291,9 @@ START_M_IMGUI_IMPL_Dx12_NAMESPACE
 
     void Dx12Window::Serve()
     {
-        // Create application window
-        // ImGui_ImplWin32_EnableDpiAwareness();
-        WNDCLASSEXW wc = {sizeof(wc), CS_CLASSDC, Dx12ImguiWndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, L"ImGui Example", nullptr};
-        ::RegisterClassExW(&wc);
-        HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"Dear ImGui DirectX12 Example", WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, nullptr, nullptr, wc.hInstance, nullptr);
-        this->hwnd = hwnd;
+        WNDCLASSEX wc = {sizeof(wc), CS_CLASSDC, Dx12ImguiWndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, _T("mImguiWindow"), nullptr};
+        ::RegisterClassEx(&wc);
+        this->hwnd = ::CreateWindow(wc.lpszClassName, _T("mImguiWindow"), WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, nullptr, nullptr, wc.hInstance, nullptr);
 
         try
         {
@@ -305,12 +302,13 @@ START_M_IMGUI_IMPL_Dx12_NAMESPACE
         catch (...)
         {
             CleanupDeviceD3D();
-            ::UnregisterClassW(wc.lpszClassName, wc.hInstance);
+            ::DestroyWindow(hwnd);
+            ::UnregisterClass(wc.lpszClassName, wc.hInstance);
             throw;
         }
         // Show the window
-        ::ShowWindow(hwnd, SW_SHOWDEFAULT);
-        ::UpdateWindow(hwnd);
+        ::ShowWindow(this->hwnd, SW_SHOWDEFAULT);
+        ::UpdateWindow(this->hwnd);
 
         // Setup Dear ImGui context
         igCreateContext(NULL);
@@ -429,7 +427,7 @@ START_M_IMGUI_IMPL_Dx12_NAMESPACE
 
         CleanupDeviceD3D();
         ::DestroyWindow(hwnd);
-        ::UnregisterClassW(wc.lpszClassName, wc.hInstance);
+        ::UnregisterClass(wc.lpszClassName, wc.hInstance);
     }
 
     void Dx12Inbound::InitImGui(IDXGISwapChain3 * pSwapChain)
@@ -483,7 +481,7 @@ START_M_IMGUI_IMPL_Dx12_NAMESPACE
         {
             D3D12_DESCRIPTOR_HEAP_DESC desc = {};
             desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-            desc.NumDescriptors = this->buffer_count;
+            desc.NumDescriptors = this->buffer_count > 1 ? this->buffer_count : 2;
             desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
             if (hr = this->pd3dDevice->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&this->pd3dSrvDescHeap)); hr != S_OK)
             {

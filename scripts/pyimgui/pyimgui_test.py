@@ -97,13 +97,13 @@ def test():
                     changed, show_windows[4] = imgui.Checkbox("Show metrics window", show_windows[4])
 
     try:
-        get_cat_image('./auto_src/cat.jpg')
-        cat_img_path = './auto_src/cat.jpg'
+        if not os.path.isfile(cat_img_path := './auto_src/cat.jpg'):
+            get_cat_image(cat_img_path)
     except Exception as e:
         print(f"Failed to get cat image: {e}")
         cat_img_path = None
 
-    wnd = pyimgui.Dx11Window(draw_func)
+    wnd = pyimgui.Dx12Window(draw_func)
     wnd.Serve()
 
 
