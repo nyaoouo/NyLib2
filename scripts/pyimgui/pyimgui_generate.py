@@ -429,6 +429,7 @@ def load_requirements(auto_src_dir, backends):
 
 
 def pybind11_build(*a, debug=0, **kw):
+    ensure_env.ensure_msvc()
     required('pybind11')
     if sys.version_info < (3, 12):
         os.environ['SETUPTOOLS_USE_DISTUTILS'] = 'stdlib'
@@ -465,7 +466,7 @@ def stub_gen(module_name, output_dir):
     )
 
 
-def generate(backends, debug=False):
+def generate(backends, debug=0):
     cwd = pathlib.Path(__file__).parent
     src_dir = cwd / 'src'
     auto_src_dir = cwd / 'auto_src'
@@ -520,7 +521,7 @@ def main():
         'dx10',
         'dx11',
         'dx12',
-    ], debug=True)
+    ], debug=1)
     import pyimgui_test
     pyimgui_test.test()
 
