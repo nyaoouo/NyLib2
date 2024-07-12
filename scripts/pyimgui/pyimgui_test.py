@@ -1,6 +1,15 @@
 import contextlib
 import os
 import pathlib
+import threading
+
+
+def get_cat_image(dst):
+    import urllib.request
+    url = 'https://cataas.com/cat'
+    with urllib.request.urlopen(url) as response:
+        with open(dst, 'wb') as f:
+            f.write(response.read())
 
 
 def test():
@@ -20,6 +29,8 @@ def test():
             datas['font'] = io.Fonts.AddFontFromFileTTF(str(font_file), 16, None, io.Fonts.GetGlyphRangesChineseFull())
             io.Fonts.Build()
             wnd.InvalidateDeviceObjects()
+        if cat_img_path:
+            datas['test_image'] = wnd.CreateTexture(cat_img_path)
         datas['is_init'] = True
 
     def draw_func():
@@ -54,6 +65,19 @@ def test():
                             pr = datas.pop('Profiler')
                             pr.disable()
                             pstats.Stats(pr).sort_stats(pstats.SortKey.CUMULATIVE).print_stats()
+                    if img := datas.get('test_image'):
+                        img_h = 200
+                        img_w = img.width * img_h // img.height
+                        imgui.Image(datas['test_image'].handle, imgui.ImVec2(img_w, img_h))
+                        if (t_ := datas.get('update_img_thread')) and t_.is_alive():
+                            imgui.Text("Updating cat image...")
+                        elif imgui.Button("new cat image"):
+                            def work():
+                                get_cat_image(cat_img_path)
+                                wnd.CallBeforeFrameOnce(lambda: datas.update({'test_image': wnd.CreateTexture(cat_img_path)}))
+
+                            datas['update_img_thread'] = t_ = threading.Thread(target=work)
+                            t_.start()
 
                     imgui.Text("中文字符")
                     imgui.Text("This is another useful text.")
@@ -72,7 +96,14 @@ def test():
                     changed, show_windows[3] = imgui.Checkbox("Show ID stack tool window", show_windows[3])
                     changed, show_windows[4] = imgui.Checkbox("Show metrics window", show_windows[4])
 
-    wnd = pyimgui.Dx12Window(draw_func)
+    try:
+        get_cat_image('./auto_src/cat.jpg')
+        cat_img_path = './auto_src/cat.jpg'
+    except Exception as e:
+        print(f"Failed to get cat image: {e}")
+        cat_img_path = None
+
+    wnd = pyimgui.Dx11Window(draw_func)
     wnd.Serve()
 
 

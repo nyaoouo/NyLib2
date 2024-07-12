@@ -414,6 +414,8 @@ def load_requirements(auto_src_dir, backends):
         subprocess.check_call([ensure_env.ensure_git(), 'submodule', 'update', '--init', '--recursive'], cwd=cimgui_dir)
     if not (auto_src_dir / 'detours').is_dir():
         subprocess.check_call([ensure_env.ensure_git(), 'clone', 'https://github.com/microsoft/Detours.git', auto_src_dir / 'detours'], cwd=auto_src_dir)
+    if not (auto_src_dir / 'stb').is_dir():
+        subprocess.check_call([ensure_env.ensure_git(), 'clone', 'https://github.com/nothings/stb.git', auto_src_dir / 'stb'], cwd=auto_src_dir)
 
     ensure_env.ensure_msys2_file('/clang64/bin/gcc.exe')
 
@@ -493,6 +495,7 @@ def generate(backends, debug=0):
             imgui_dir / 'backends',
             src_dir,
             auto_src_dir,
+            auto_src_dir / 'stb',
         ])),
         extra_objects=[],
         extra_compile_args=[

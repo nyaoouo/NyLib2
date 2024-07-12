@@ -1,5 +1,7 @@
 #include "./Impl_Win32.h"
+#include "./Helper_Dx11.h"
 #include <vector>
+#include <d3d11.h>
 #pragma comment(lib, "d3d11.lib")
 
 #define M_IMGUI_IMPL_Dx11_NAMESPACE M_IMGUI_IMPL_NAMESPACE::Impl_Dx11
@@ -13,10 +15,9 @@
 
 START_M_IMGUI_IMPL_Dx11_NAMESPACE
 {
-    class Dx11Render: public RenderBase
+    class Dx11Render : public RenderBase
     {
     public:
-
         ID3D11Device *pd3dDevice = nullptr;
         ID3D11DeviceContext *pd3dDeviceContext = nullptr;
         IDXGISwapChain *pSwapChain = nullptr;
@@ -72,9 +73,15 @@ START_M_IMGUI_IMPL_Dx11_NAMESPACE
 
     inline void pybind_setup_mImguiImpl_Dx11(pybind11::module_ m)
     {
+        M_IMGUI_HELPER_Dx11_NAMESPACE::pybind_setup_helper_Dx11(m);
         py::class_<Dx11Render, RenderBase>(m, "_Dx11Render", py::dynamic_attr())
             .def_static("InvalidateDeviceObjects", &ImGui_ImplDX11_InvalidateDeviceObjects)
-            .def_static("CreateDeviceObjects", &ImGui_ImplDX11_CreateDeviceObjects);
+            .def_static("CreateDeviceObjects", &ImGui_ImplDX11_CreateDeviceObjects)
+            .def("CreateTexture", [](Dx11Render &self, const char *filename)
+                 { return new M_IMGUI_HELPER_Dx11_NAMESPACE::Dx11TextureHelper(self.pd3dDevice, filename); }, py::arg("filename"), py::return_value_policy::move)
+            .def("CreateTexture", [](Dx11Render &self)
+                 { return new M_IMGUI_HELPER_Dx11_NAMESPACE::Dx11TextureHelper(self.pd3dDevice); }, py::return_value_policy::move);
+
         py::class_<Dx11Window, Dx11Render>(m, "Dx11Window", py::dynamic_attr())
             .def(py::init<py::function>(), py::arg("renderCallback") = py::none())
             .def_readwrite("ClearColor", &Dx11Window::ClearColor)

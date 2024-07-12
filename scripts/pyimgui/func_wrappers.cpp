@@ -433,5 +433,17 @@ void _(py::module &m)
          .def("Columns", [](int count, std::optional<const char *> &id, bool border)
               { igColumns(count, (id ? *id : NULL), border); }, py::arg("count") = 1, py::arg("id") = py::none(), py::arg("border") = true)
          /*END:_GFUNC_:igColumns*/
+         /*START:_GFUNC_:igImage*/
+         .def("Image", [](size_t user_texture_id, const ImVec2 image_size, const ImVec2 uv0, const ImVec2 uv1, const ImVec4 tint_col, const ImVec4 border_col)
+              { igImage((ImTextureID)user_texture_id, image_size, uv0, uv1, tint_col, border_col); }, py::arg("user_texture_id"), py::arg("image_size"), py::arg("uv0") = ImVec2(0, 0), py::arg("uv1") = ImVec2(1, 1), py::arg("tint_col") = ImVec4(1, 1, 1, 1), py::arg("border_col") = ImVec4(0, 0, 0, 0))
+         /*END:_GFUNC_:igImage*/
+         /*START:_GFUNC_:igImageButton*/
+         .def("ImageButton", [](const char *str_id, size_t user_texture_id, const ImVec2 image_size, const ImVec2 uv0, const ImVec2 uv1, const ImVec4 bg_col, const ImVec4 tint_col)
+              {auto __ret = igImageButton(str_id, (ImTextureID) user_texture_id, image_size, uv0, uv1, bg_col, tint_col);return __ret; }, py::arg("str_id"), py::arg("user_texture_id"), py::arg("image_size"), py::arg("uv0") = ImVec2(0, 0), py::arg("uv1") = ImVec2(1, 1), py::arg("bg_col") = ImVec4(0, 0, 0, 0), py::arg("tint_col") = ImVec4(1, 1, 1, 1))
+         /*END:_GFUNC_:igImageButton*/
+         /*START:_GFUNC_:igImageButtonEx*/
+         .def("ImageButtonEx", [](ImGuiID id, size_t texture_id, const ImVec2 image_size, const ImVec2 uv0, const ImVec2 uv1, const ImVec4 bg_col, const ImVec4 tint_col, ImGuiButtonFlags flags)
+              {auto __ret = igImageButtonEx(id, (ImTextureID) texture_id, image_size, uv0, uv1, bg_col, tint_col, flags);return __ret; }, py::arg("id"), py::arg("texture_id"), py::arg("image_size"), py::arg("uv0"), py::arg("uv1"), py::arg("bg_col"), py::arg("tint_col"), py::arg("flags") = 0)
+         /*END:_GFUNC_:igImageButtonEx*/
          .def();
 }

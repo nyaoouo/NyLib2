@@ -29,6 +29,13 @@ START_M_IMGUI_IMPL_Dx12_NAMESPACE
     class Dx12Render : public RenderBase
     {
     public:
+
+        ID3D12Device *pd3dDevice = nullptr;
+        IDXGISwapChain3 *pSwapChain = nullptr;
+        ID3D12DescriptorHeap *pd3dRtvDescHeap = nullptr;
+        ID3D12DescriptorHeap *pd3dSrvDescHeap = nullptr;
+        ID3D12CommandQueue *pd3dCommandQueue = nullptr;
+        ID3D12GraphicsCommandList *pd3dCommandList = nullptr;
     };
 
     class Dx12Window : public Dx12Render
@@ -46,15 +53,9 @@ START_M_IMGUI_IMPL_Dx12_NAMESPACE
 
         FrameContext frameContext[NUM_FRAMES_IN_FLIGHT] = {};
         UINT frameIndex = 0;
-        ID3D12Device *pd3dDevice = nullptr;
-        ID3D12DescriptorHeap *pd3dRtvDescHeap = nullptr;
-        ID3D12DescriptorHeap *pd3dSrvDescHeap = nullptr;
-        ID3D12CommandQueue *pd3dCommandQueue = nullptr;
-        ID3D12GraphicsCommandList *pd3dCommandList = nullptr;
         ID3D12Fence *fence = nullptr;
         HANDLE fenceEvent = nullptr;
         UINT64 fenceLastSignaledValue = 0;
-        IDXGISwapChain3 *pSwapChain = nullptr;
         bool SwapChainOccluded = false;
         HANDLE hSwapChainWaitableObject = nullptr;
         ID3D12Resource *mainRenderTargetResource[NUM_BACK_BUFFERS] = {};
@@ -90,15 +91,8 @@ START_M_IMGUI_IMPL_Dx12_NAMESPACE
             ID3D12Resource *MainRenderTargetResource = nullptr;
             D3D12_CPU_DESCRIPTOR_HANDLE MainRenderTargetDescriptor;
         };
-
-        ID3D12Device *pd3dDevice = nullptr;
-        ID3D12DescriptorHeap *pd3dRtvDescHeap = nullptr;
-        ID3D12DescriptorHeap *pd3dSrvDescHeap = nullptr;
-        ID3D12CommandQueue *pd3dCommandQueue = nullptr;
-        ID3D12GraphicsCommandList *pd3dCommandList = nullptr;
         ID3D12Fence *fence = nullptr;
         UINT64 fenceLastSignaledValue = 0;
-        IDXGISwapChain3 *pSwapChain = nullptr;
         UINT buffer_count = -1;
         FrameContext *frameContext = nullptr;
 
