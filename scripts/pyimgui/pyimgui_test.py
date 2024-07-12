@@ -72,7 +72,7 @@ def test():
                     changed, show_windows[3] = imgui.Checkbox("Show ID stack tool window", show_windows[3])
                     changed, show_windows[4] = imgui.Checkbox("Show metrics window", show_windows[4])
 
-    wnd = pyimgui.Dx11Window(draw_func)
+    wnd = pyimgui.Dx12Window(draw_func)
     wnd.Serve()
 
 

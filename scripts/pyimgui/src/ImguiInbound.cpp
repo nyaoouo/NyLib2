@@ -352,7 +352,6 @@ START_IMGUI_INBOUND_NAMESPACE
                                         swapChain->Release();
                                         _mSBreak_();
                                     } while (0);
-                                    commandAllocator->Release();
                                 } while (0);
                                 commandAllocator->Release();
                             } while (0);

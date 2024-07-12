@@ -166,7 +166,6 @@ START_M_IMGUI_IMPL_Dx11_NAMESPACE
         }
         ImGui_ImplWin32_Init(this->hwnd);
         ImGui_ImplDX11_Init(this->pd3dDevice, this->pd3dDeviceContext);
-        std::exception *err = nullptr;
         do
         {
             // Poll and handle messages (inputs, window resize, etc.)
@@ -332,13 +331,6 @@ START_M_IMGUI_IMPL_Dx11_NAMESPACE
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;  // Enable Gamepad Controls
         io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;     // Enable Docking
         io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;   // Enable Multi-Viewport / Platform Windows
-        // io.ConfigViewportsNoAutoMerge = true;
-        // io.ConfigViewportsNoTaskBarIcon = true;
-        // io.ConfigViewportsNoDefaultParent = true;
-        // io.ConfigDockingAlwaysTabBar = true;
-        // io.ConfigDockingTransparentPayload = true;
-        // io.ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleFonts;     // FIXME-DPI: Experimental. THIS CURRENTLY DOESN'T WORK AS EXPECTED. DON'T USE IN USER APP!
-        // io.ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleViewports; // FIXME-DPI: Experimental.
 
         // igStyleColorsDark(NULL);
         igStyleColorsLight(NULL);
