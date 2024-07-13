@@ -129,9 +129,9 @@ START_M_IMGUI_IMPL_Dx12_NAMESPACE
             .def_static("InvalidateDeviceObjects", &ImGui_ImplDX12_InvalidateDeviceObjects)
             .def_static("CreateDeviceObjects", &ImGui_ImplDX12_CreateDeviceObjects)
             .def("CreateTexture", [](Dx12Render &self, const char *filename)
-                 { return self.CreateTexture(filename); }, py::return_value_policy::move)
+                 { return self.CreateTexture(filename); }, py::return_value_policy::take_ownership)
             .def("CreateTexture", [](Dx12Render &self)
-                 { return self.CreateTexture(); }, py::return_value_policy::move);
+                 { return self.CreateTexture(); }, py::return_value_policy::take_ownership);
         py::class_<Dx12Window, Dx12Render>(m, "Dx12Window")
             .def(py::init<py::function>())
             .def_readwrite("ClearColor", &Dx12Window::ClearColor)

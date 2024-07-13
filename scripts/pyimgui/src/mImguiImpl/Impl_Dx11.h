@@ -78,9 +78,9 @@ START_M_IMGUI_IMPL_Dx11_NAMESPACE
             .def_static("InvalidateDeviceObjects", &ImGui_ImplDX11_InvalidateDeviceObjects)
             .def_static("CreateDeviceObjects", &ImGui_ImplDX11_CreateDeviceObjects)
             .def("CreateTexture", [](Dx11Render &self, const char *filename)
-                 { return new M_IMGUI_HELPER_Dx11_NAMESPACE::Dx11TextureHelper(self.pd3dDevice, filename); }, py::arg("filename"), py::return_value_policy::move)
+                 { return new M_IMGUI_HELPER_Dx11_NAMESPACE::Dx11TextureHelper(self.pd3dDevice, filename); }, py::arg("filename"), py::return_value_policy::take_ownership)
             .def("CreateTexture", [](Dx11Render &self)
-                 { return new M_IMGUI_HELPER_Dx11_NAMESPACE::Dx11TextureHelper(self.pd3dDevice); }, py::return_value_policy::move);
+                 { return new M_IMGUI_HELPER_Dx11_NAMESPACE::Dx11TextureHelper(self.pd3dDevice); }, py::return_value_policy::take_ownership);
 
         py::class_<Dx11Window, Dx11Render>(m, "Dx11Window", py::dynamic_attr())
             .def(py::init<py::function>(), py::arg("renderCallback") = py::none())
