@@ -9,30 +9,33 @@ import time
 def get_cat_image(dst, cb=None):
     import urllib.request
     url = 'https://cataas.com/cat'
+    buffer = io.BytesIO()
     with urllib.request.urlopen(url) as response:
         chunk = 128
         content_length = response.getheader('Content-Length')
         content_length = int(content_length) if content_length else None
         if cb:
             cb(0, content_length)
-        with open(dst, 'wb') as f:
-            while True:
-                read_chunk_start = time.time()
-                data = response.read(chunk)
-                if not data:
-                    break
-                read_chunk_used = time.time() - read_chunk_start
-                if read_chunk_used < 0.5:
-                    chunk *= 2
-                elif read_chunk_used > 2:
-                    chunk //= 2
-                f.write(data)
-                if cb:
-                    cb(f.tell(), content_length)
-            if content_length and f.tell() != content_length:
-                raise ValueError(f"Downloaded file size mismatch: {f.tell()} != {content_length}")
+        while True:
+            read_chunk_start = time.time()
+            data = response.read(chunk)
+            if not data:
+                break
+            read_chunk_used = time.time() - read_chunk_start
+            if read_chunk_used < 0.5:
+                chunk *= 2
+            elif read_chunk_used > 2:
+                chunk //= 2
+            buffer.write(data)
             if cb:
-                cb(f.tell(), content_length)
+                cb(buffer.tell(), content_length)
+        if content_length and buffer.tell() != content_length:
+            raise ValueError(f"Downloaded file size mismatch: {f.tell()} != {content_length}")
+        if cb:
+            cb(buffer.tell(), content_length)
+    buffer.seek(0)
+    with open(dst, 'wb') as f:
+        f.write(buffer.read())
     return dst
 
 
