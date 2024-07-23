@@ -433,6 +433,7 @@ def load_requirements(auto_src_dir, backends):
 def pybind11_build(*a, debug=0, **kw):
     ensure_env.ensure_msvc()
     required('pybind11')
+    required('setuptools') # manually install setuptools
     if sys.version_info < (3, 12):
         os.environ['SETUPTOOLS_USE_DISTUTILS'] = 'stdlib'
     from setuptools import Distribution
