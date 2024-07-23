@@ -80,8 +80,16 @@ def test():
                             self.profile_string = None
                         elif show:
                             imgui.Text(self.profile_string)
+                viewport = imgui.GetMainViewport()
+                cls = imgui.ImGuiWindowClass()
+                cls.DockNodeFlagsOverrideSet = imgui.ImGuiDockNodeFlags_NoDocking
+                imgui.SetNextWindowClass(cls)
+                imgui.SetNextWindowPos(viewport.Pos)
+                imgui.SetNextWindowSize(viewport.Size)
                 with imgui_ctx.Begin(
-                        f"Hello, world (fps: {imgui_io.Framerate:.1f}) ###HelloWorld",
+                        # f"Hello, world (fps: {imgui_io.Framerate:.1f}) ###HelloWorld",
+                        "##FullWindow",
+                        flags=imgui.ImGuiWindowFlags_NoDecoration | imgui.ImGuiWindowFlags_NoMove | imgui.ImGuiWindowFlags_NoSavedSettings | imgui.ImGuiWindowFlags_NoBringToFrontOnFocus
                 ) as (show, window_open):
                     if not window_open:
                         wnd.Close()
