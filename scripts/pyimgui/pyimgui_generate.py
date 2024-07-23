@@ -85,13 +85,46 @@ def generate_pyimgui(cimgui_dir, output_dir, backends):
 
     typedefs_dict = {n: solve_typedef(t) for n, t in typedefs_dict.items() if not (t.startswith('struct ') or re.search(r"\(\*\)\((.*)\)$", t))}
 
-    enum_defs = CodeWriter(0)
+    enum_defs = CodeWriter(1)
+    enum_casts = CodeWriter(0)
+    enum_defs.write("auto IntEnum = py::module_::import(\"enum\").attr(\"IntEnum\");\n")
+    enum_casts.write("""
+#define ENUM_CAST(T) \\
+namespace PYBIND11_NAMESPACE { namespace detail { \\
+    template <> struct type_caster<T> { \\
+    public: \\
+        PYBIND11_TYPE_CASTER(T, const_name("T")); \\
+        bool load(handle src, bool convert) { \\
+            PyObject *source = src.ptr(); \\
+            PyObject *tmp = PyNumber_Long(source); \\
+            if (!tmp) return false; \\
+            value = (T)PyLong_AsLong(tmp); \\
+            Py_DECREF(tmp); \\
+            return !PyErr_Occurred(); \\
+        } \\
+        static handle cast(T src, return_value_policy policy, handle parent) { \\
+            return PyLong_FromLong(src); \\
+        } \\
+    }; \\
+}}\n
+""")
     for enum_type, enum_items in struct_and_enums['enums'].items():
-        enum_defs.write(f"py::enum_<{enum_type}>(m, \"{enum_type}\")")
+        # enum_defs.write(f"py::enum_<{enum_type}>(m, \"{enum_type}\")")
+        # with enum_defs.push_indent():
+        #     for item in enum_items:
+        #         enum_defs.write(f".value(\"{item['name']}\", {item['name']})")
+        #     enum_defs.write(".export_values();")
+        enum_defs.write(f"m.attr(\"{enum_type}\") = IntEnum(\"{enum_type}\", py::dict(\n")
         with enum_defs.push_indent():
-            for item in enum_items:
-                enum_defs.write(f".value(\"{item['name']}\", {item['name']})")
-            enum_defs.write(".export_values();")
+            for i, item in enumerate(enum_items):
+                enum_defs.write(f"py::arg(\"{item['name']}\") = {item['name']}")
+                enum_defs.write(",\n" if i < len(enum_items) - 1 else "\n")
+            # enum_defs.write(f"py::arg(\"__module__\") = m.attr(\"__name__\")\n")
+        enum_defs.write("\n));\n")
+        enum_defs.write(f"auto  enum_{enum_type} = m.attr(\"{enum_type}\");\n")
+        for i, item in enumerate(enum_items):
+            enum_defs.write(f"m.attr(\"{item['name']}\") = enum_{enum_type}.attr(\"{item['name']}\");\n")
+        enum_casts.write(f"ENUM_CAST({enum_type});\n")
 
     def export_template_create(writer, template_name):
         writer.write(f"template <typename T>\n")
@@ -313,6 +346,7 @@ def generate_pyimgui(cimgui_dir, output_dir, backends):
         (
             core_dir / 'enums.cpp',
             "#include \"./enums.h\"\n"
+            f"{enum_casts.getvalue()}\n"
             "namespace mNameSpace{ namespace PyImguiCore{\n"
             f"void pybind_setup_pyimgui_enums(pybind11::module_ m) {{ {enum_defs.getvalue()} }}"
             "}}\n"
@@ -433,7 +467,7 @@ def load_requirements(auto_src_dir, backends):
 def pybind11_build(*a, debug=0, **kw):
     ensure_env.ensure_msvc()
     required('pybind11')
-    required('setuptools') # manually install setuptools
+    required('setuptools')  # manually install setuptools
     if sys.version_info < (3, 12):
         os.environ['SETUPTOOLS_USE_DISTUTILS'] = 'stdlib'
     from setuptools import Distribution
