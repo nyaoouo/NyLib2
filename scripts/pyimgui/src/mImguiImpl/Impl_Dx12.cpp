@@ -32,7 +32,7 @@ START_M_IMGUI_IMPL_Dx12_NAMESPACE
             ::PostQuitMessage(0);
             return 0;
         }
-        return ::DefWindowProcW(hWnd, msg, wParam, lParam);
+        return ::DefWindowProc(hWnd, msg, wParam, lParam);
     }
 
     void Dx12Window::CreateDeviceD3D()
@@ -291,9 +291,11 @@ START_M_IMGUI_IMPL_Dx12_NAMESPACE
 
     void Dx12Window::Serve()
     {
-        WNDCLASSEX wc = {sizeof(wc), CS_CLASSDC, Dx12ImguiWndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, _T("mImguiWindow"), nullptr};
+        WNDCLASSEX wc = {sizeof(wc), CS_CLASSDC, Dx12ImguiWndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, _T("mImguiWindowDx12"), nullptr};
         ::RegisterClassEx(&wc);
-        this->hwnd = ::CreateWindow(wc.lpszClassName, _T("mImguiWindow"), WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, nullptr, nullptr, wc.hInstance, nullptr);
+        this->hwnd = ::CreateWindow(wc.lpszClassName, _T(""), WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, nullptr, nullptr, wc.hInstance, nullptr);
+        if (this->hwnd == nullptr)
+            _throwV_("Failed to create window, error code: {}", GetLastError());
 
         try
         {
@@ -309,6 +311,7 @@ START_M_IMGUI_IMPL_Dx12_NAMESPACE
         // Show the window
         ::ShowWindow(this->hwnd, SW_SHOWDEFAULT);
         ::UpdateWindow(this->hwnd);
+        ::SetWindowTextA(this->hwnd, this->title.c_str());
 
         // Setup Dear ImGui context
         igCreateContext(NULL);
@@ -319,7 +322,7 @@ START_M_IMGUI_IMPL_Dx12_NAMESPACE
         io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;     // Enable Docking
         io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;   // Enable Multi-Viewport / Platform Windows
 
-        igStyleColorsDark(NULL);
+        igStyleColorsLight(NULL);
 
         // When viewports are enabled we tweak WindowRounding/WindowBg so platform windows can look identical to regular ones.
         ImGuiStyle &style = *igGetStyle();

@@ -544,12 +544,17 @@ def generate(backends, debug=0):
     )
     stub_gen('pyimgui', str(cwd))
 
-    nylib_path = cwd.parent.parent / 'nylib'
-    for file in cwd.glob('pyimgui.*.pyd'):
-        shutil.copy(file, nylib_path / file.name)
-    if (nylib_path / 'pyimgui').is_dir():
-        shutil.rmtree(nylib_path / 'pyimgui')
-    shutil.copytree(cwd / 'pyimgui', nylib_path / 'pyimgui')
+    import pyimgui
+    pyimgui_file = pathlib.Path(pyimgui.__file__).resolve()
+    for dst_dir in (
+            cwd.parent.parent / 'nylib',
+            cwd / ('debug' if debug else 'release')
+    ):
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy(pyimgui_file, dst_dir / pyimgui_file.name)
+        if (dst_dir / 'pyimgui').is_dir():
+            shutil.rmtree(dst_dir / 'pyimgui')
+        shutil.copytree(cwd / 'pyimgui', dst_dir / 'pyimgui')
 
 
 def main():

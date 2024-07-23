@@ -27,6 +27,21 @@ START_M_IMGUI_IMPL_NAMESPACE
         std::optional<py::function> renderCallback;
         size_t renderCallback_argc = 0;
         HWND hwnd = nullptr;
+        std::string title = "";
+
+        std::string GetTitle() { 
+            if (this->hwnd == nullptr) return this->title;
+            char buf[256];
+            GetWindowTextA(this->hwnd, buf, 256);
+            this->title = buf;
+            return this->title;
+         }
+        void SetTitle(std::string title)
+        {
+            this->title = title;
+            if (this->hwnd != nullptr)
+                SetWindowTextA(this->hwnd, title.c_str());
+        }
 
         ImGuiContext *ctx = nullptr;
 
@@ -107,6 +122,7 @@ START_M_IMGUI_IMPL_NAMESPACE
         py::class_<RenderBase>(m, "_RenderBase", py::dynamic_attr())
             .def_property("renderCallback", [](RenderBase &self)
                           { return self.renderCallback; }, &RenderBase::SetRenderCallback)
+            .def_property("title", &RenderBase::GetTitle, &RenderBase::SetTitle)
             .def("CallBeforeFrameOnce", [](RenderBase &self, py::function func)
                  { 
                     if (PyFuncArgc(func) >1 ) _throwV_("Invalid CallBeforeFrameOnce argc");

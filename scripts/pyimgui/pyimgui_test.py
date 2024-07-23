@@ -167,6 +167,10 @@ def test():
                             _, wnd.ClearColor = imgui.ColorEdit4("Clear color", wnd.ClearColor)
                             changed, self.test_string = imgui.InputText("Test string", self.test_string)
                             imgui.Text(f"Test string: {self.test_string}")
+
+                            changed, new_title = imgui.InputText("Window title", wnd.title)
+                            if changed: wnd.title = new_title
+
                         changed, self.show_about_window = imgui.Checkbox("Show about window", self.show_about_window)
                         changed, self.show_debug_log_window = imgui.Checkbox("Show debug log window", self.show_debug_log_window)
                         changed, self.show_demo_window = imgui.Checkbox("Show demo window", self.show_demo_window)
@@ -174,6 +178,7 @@ def test():
                         changed, self.show_metrics_window = imgui.Checkbox("Show metrics window", self.show_metrics_window)
 
     wnd = pyimgui.Dx11Window(TestWindow())
+    wnd.title = "Hello, world!"
     wnd.Serve()
 
     return TestWindow()

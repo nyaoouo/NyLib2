@@ -122,9 +122,11 @@ START_M_IMGUI_IMPL_Dx11_NAMESPACE
 
     void Dx11Window::Serve()
     {
-        WNDCLASSEX wc = {sizeof(wc), CS_CLASSDC, Dx11ImguiWndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, _T("mImguiWindow"), nullptr};
+        WNDCLASSEX wc = {sizeof(wc), CS_CLASSDC, Dx11ImguiWndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, _T("mImguiWindowDx11"), nullptr};
         ::RegisterClassEx(&wc);
-        this->hwnd = ::CreateWindow(wc.lpszClassName, _T("mImguiWindow"), WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, nullptr, nullptr, wc.hInstance, nullptr);
+        this->hwnd = ::CreateWindow(wc.lpszClassName, _T(""), WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, nullptr, nullptr, wc.hInstance, nullptr);
+        if (this->hwnd == nullptr)
+            _throwV_("Failed to create window, error code: {}", GetLastError());
 
         try
         {
@@ -140,6 +142,7 @@ START_M_IMGUI_IMPL_Dx11_NAMESPACE
 
         ::ShowWindow(this->hwnd, SW_SHOWDEFAULT);
         ::UpdateWindow(this->hwnd);
+        ::SetWindowTextA(this->hwnd, this->title.c_str());
 
         this->ctx = igCreateContext(NULL);
         ImGuiIO *io = igGetIO();
@@ -148,15 +151,8 @@ START_M_IMGUI_IMPL_Dx11_NAMESPACE
         io->ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;  // Enable Gamepad Controls
         io->ConfigFlags |= ImGuiConfigFlags_DockingEnable;     // Enable Docking
         io->ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;   // Enable Multi-Viewport / Platform Windows
-        // io->ConfigViewportsNoAutoMerge = true;
-        // io->ConfigViewportsNoTaskBarIcon = true;
-        // io->ConfigViewportsNoDefaultParent = true;
-        // io->ConfigDockingAlwaysTabBar = true;
-        // io->ConfigDockingTransparentPayload = true;
-        // io->ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleFonts;     // FIXME-DPI: Experimental. THIS CURRENTLY DOESN'T WORK AS EXPECTED. DON'T USE IN USER APP!
-        // io->ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleViewports; // FIXME-DPI: Experimental.
-        // ImFontAtlas_AddFontFromFileTTF(io->Fonts, "c:\\Windows\\Fonts\\msyh.ttc", 18.0f, nullptr, ImFontAtlas_GetGlyphRangesChineseFull(io->Fonts));
-        // igStyleColorsDark(NULL);
+        
+        
         igStyleColorsLight(NULL);
 
         ImGuiStyle *style = igGetStyle();

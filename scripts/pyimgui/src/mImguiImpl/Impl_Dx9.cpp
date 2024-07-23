@@ -112,9 +112,11 @@ START_M_IMGUI_IMPL_Dx9_NAMESPACE
 
     void Dx9Window::Serve()
     {
-        WNDCLASSEX wc = {sizeof(wc), CS_CLASSDC, Dx9ImguiWndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, _T("mImguiWindow"), nullptr};
+        WNDCLASSEX wc = {sizeof(wc), CS_CLASSDC, Dx9ImguiWndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, _T("mImguiWindowDx9"), nullptr};
         ::RegisterClassEx(&wc);
-        this->hwnd = ::CreateWindow(wc.lpszClassName, _T("mImguiWindow"), WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, nullptr, nullptr, wc.hInstance, nullptr);
+        this->hwnd = ::CreateWindow(wc.lpszClassName, _T(""), WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, nullptr, nullptr, wc.hInstance, nullptr);
+        if (this->hwnd == nullptr)
+            _throwV_("Failed to create window, error code: {}", GetLastError());
 
         try
         {
@@ -129,6 +131,7 @@ START_M_IMGUI_IMPL_Dx9_NAMESPACE
 
         ::ShowWindow(this->hwnd, SW_SHOWDEFAULT);
         ::UpdateWindow(this->hwnd);
+        ::SetWindowTextA(this->hwnd, this->title.c_str());
 
         this->ctx = igCreateContext(NULL);
         ImGuiIO *io = igGetIO();
@@ -219,12 +222,12 @@ START_M_IMGUI_IMPL_Dx9_NAMESPACE
                 igUpdatePlatformWindows();
                 igRenderPlatformWindowsDefault(NULL, NULL);
             }
-            
+
             HRESULT result = this->pd3dDevice->Present(NULL, NULL, NULL, NULL);
             if (result == D3DERR_DEVICELOST || result == D3DERR_DEVICEHUNG || result == D3DERR_DEVICEREMOVED)
                 this->DeviceLost = true;
         } while (true);
-        
+
         ImGui_ImplDX9_Shutdown();
         ImGui_ImplWin32_Shutdown();
         igDestroyContext(NULL);
