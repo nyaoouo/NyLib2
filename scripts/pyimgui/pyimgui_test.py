@@ -3,14 +3,37 @@ import io
 import os
 import pathlib
 import threading
+import time
 
 
-def get_cat_image(dst):
+def get_cat_image(dst, cb=None):
     import urllib.request
     url = 'https://cataas.com/cat'
     with urllib.request.urlopen(url) as response:
+        chunk = 128
+        content_length = response.getheader('Content-Length')
+        content_length = int(content_length) if content_length else None
+        if cb:
+            cb(0, content_length)
         with open(dst, 'wb') as f:
-            f.write(response.read())
+            while True:
+                read_chunk_start = time.time()
+                data = response.read(chunk)
+                if not data:
+                    break
+                read_chunk_used = time.time() - read_chunk_start
+                if read_chunk_used < 0.5:
+                    chunk *= 2
+                elif read_chunk_used > 2:
+                    chunk //= 2
+                f.write(data)
+                if cb:
+                    cb(f.tell(), content_length)
+            if content_length and f.tell() != content_length:
+                raise ValueError(f"Downloaded file size mismatch: {f.tell()} != {content_length}")
+            if cb:
+                cb(f.tell(), content_length)
+    return dst
 
 
 def test():
@@ -36,16 +59,28 @@ def test():
             self.test_image_path = None
             self.is_init = False
 
-            self.get_test_image()
+            self.load_progress = None
+            threading.Thread(target=self.get_test_image).start()
 
         def get_test_image(self, force_reload=False):
             self.test_image_path = './auto_src/cat.jpg'
+            self.load_progress = "0 (unknown total)"
             try:
                 if force_reload or not os.path.isfile(self.test_image_path):
-                    get_cat_image(self.test_image_path)
+                    def _cb(cur, total):
+                        if total:
+                            self.load_progress = cur / total
+                        else:
+                            self.load_progress = f"(N/A) {cur}/?"
+
+                    get_cat_image(self.test_image_path, _cb)
             except Exception as e:
                 print(f"Failed to get cat image: {e}")
                 self.test_image_path = None
+            else:
+                wnd.CallBeforeFrameOnce(lambda: setattr(self, 'test_image', wnd.CreateTexture(self.test_image_path)))
+            finally:
+                self.load_progress = None
 
         def do_init(self):
             io = imgui.GetIO()
@@ -54,8 +89,6 @@ def test():
                 self.font = io.Fonts.AddFontFromFileTTF(str(font_file), 16, None, io.Fonts.GetGlyphRangesChineseFull())
                 io.Fonts.Build()
                 wnd.InvalidateDeviceObjects()
-            if self.test_image_path:
-                self.test_image = wnd.CreateTexture(self.test_image_path)
             self.is_init = True
 
         def __call__(self):
@@ -106,20 +139,19 @@ def test():
                                 pstats.Stats(self.profiler, stream=buf).sort_stats(pstats.SortKey.CUMULATIVE).print_stats()
                                 self.profile_string = buf.getvalue()
                                 self.profiler = None
+
+                        clicked = False
                         if self.test_image:
                             img_h = 200
                             img_w = self.test_image.width * img_h // self.test_image.height
                             clicked = imgui.ImageButton("##img_button", self.test_image.handle, imgui.ImVec2(img_w, img_h))
-                            if (t_ := getattr(self, 'update_img_thread', None)) and t_.is_alive():
-                                imgui.Text("Updating cat image...")
-                            elif imgui.Button("new cat image (or click image)") or clicked:
-                                def work():
-                                    self.get_test_image(force_reload=True)
-                                    wnd.CallBeforeFrameOnce(lambda: setattr(self, 'test_image', wnd.CreateTexture(self.test_image_path)))
-                                    # self.test_image.LoadTextureFromFile(self.test_image_path)
-
-                                self.update_img_thread = t_ = threading.Thread(target=work)
-                                t_.start()
+                        if self.load_progress is not None:
+                            if isinstance(self.load_progress, float):
+                                imgui.ProgressBar(self.load_progress, imgui.ImVec2(200, 0), f"Updating cat image: {self.load_progress:.2%}")
+                            else:
+                                imgui.Text(f"Updating cat image: {self.load_progress}")
+                        elif imgui.Button("new cat image (or click image)") or clicked:
+                            threading.Thread(target=self.get_test_image, args=(True,)).start()
 
                         imgui.Text("中文字符")
                         imgui.Text("This is another useful text.")
