@@ -538,6 +538,8 @@ def generate(backends, debug=0):
             '/DIMGUI_DISABLE_OBSOLETE_FUNCTIONS=1',
             '/DIMGUI_IMPL_API=extern \"C\"',
             '/D_AMD64_=1',
+            '/DUNICODE',
+            '/D_UNICODE',
             '/utf-8',
         ],
         debug=debug,
@@ -558,15 +560,22 @@ def generate(backends, debug=0):
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--debug', action='store_true')
+    parser.add_argument('--skip', action='store_true')
+    args = parser.parse_args()
+
     generate([
         'win32',
         'dx9',
         'dx10',
         'dx11',
         'dx12',
-    ], debug=1)
-    import pyimgui_test
-    pyimgui_test.test()
+    ], debug=args.debug)
+    if not args.skip:
+        import pyimgui_test
+        pyimgui_test.test()
 
 
 if __name__ == '__main__':
