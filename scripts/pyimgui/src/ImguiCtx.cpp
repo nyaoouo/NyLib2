@@ -79,7 +79,7 @@ START_IMGUI_CTX_NAMESPACE
         m.def("BeginTable", [](const char *str_id, int columns, ImGuiTableFlags flags, const ImVec2 outer_size, float inner_width)
               {
                auto res_ = igBeginTable(str_id,columns,flags,outer_size,inner_width);
-               PyCtxWrapper res = {py::cast(res_), igEndTable};
+               PyCtxWrapper res = {py::cast(res_), res_? igEndTable: [](){} };
                return res; }, py::arg("str_id"), py::arg("columns"), py::arg("flags") = 0, py::arg("outer_size") = ImVec2(0, 0), py::arg("inner_width") = 0.0f, py::return_value_policy::move);
         m.def("BeginTabBar", [](const char *str_id, ImGuiTabBarFlags flags)
               {
@@ -176,7 +176,7 @@ START_IMGUI_CTX_NAMESPACE
                  igPushID_Int(int_id);
                  PyCtxWrapper res = {py::none(), igPopID};
                  return res; }, py::arg("int_id"), py::return_value_policy::move);
-                 
+
     }
 }
 END_IMGUI_CTX_NAMESPACE

@@ -30,7 +30,7 @@ def get_cat_image(dst, cb=None):
             if cb:
                 cb(buffer.tell(), content_length)
         if content_length and buffer.tell() != content_length:
-            raise ValueError(f"Downloaded file size mismatch: {f.tell()} != {content_length}")
+            raise ValueError(f"Downloaded file size mismatch: {buffer.tell()} != {content_length}")
         if cb:
             cb(buffer.tell(), content_length)
     buffer.seek(0)
@@ -170,6 +170,17 @@ def test():
 
                             changed, new_title = imgui.InputText("Window title", wnd.title)
                             if changed: wnd.title = new_title
+                            with imgui_ctx.BeginTable(
+                                    "test_table",
+                                    2,
+                                    flags=imgui.ImGuiTableFlags_BordersInnerV | imgui.ImGuiTableFlags_BordersOuterV | imgui.ImGuiTableFlags_BordersOuterH | imgui.ImGuiTableFlags_RowBg
+                            ) as show:
+                                if show:
+                                    for i in range(10):
+                                        imgui.TableNextRow()
+                                        for j in range(2):
+                                            imgui.TableNextColumn()
+                                            imgui.Text(f"Cell {i}, {j}")
 
                         changed, self.show_about_window = imgui.Checkbox("Show about window", self.show_about_window)
                         changed, self.show_debug_log_window = imgui.Checkbox("Show debug log window", self.show_debug_log_window)
