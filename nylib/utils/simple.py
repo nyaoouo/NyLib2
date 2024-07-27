@@ -1,3 +1,4 @@
+import functools
 import threading
 
 aligned4 = lambda v: (v + 0x3) & (~0x3)
@@ -14,3 +15,10 @@ class Counter:
         with self.lock:
             self.value += 1
             return self.value
+
+
+def clean_cached_property(instance):
+    for k in dir(instance.__class__):
+        v = getattr(instance.__class__, k)
+        if isinstance(v, functools.cached_property):
+            instance.__dict__.pop(k, None)
