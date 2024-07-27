@@ -46,7 +46,7 @@ class MonoTypeEnum(enum.IntEnum):
 
 
 class MonoMetaTableEnum(enum.IntEnum):
-    MODULE = enum.auto()
+    MODULE = 0
     TYPEREF = enum.auto()
     TYPEDEF = enum.auto()
     FIELD_POINTER = enum.auto()
@@ -94,7 +94,7 @@ class MonoMetaTableEnum(enum.IntEnum):
 
 
 class MONO_TYPEDEF(enum.IntEnum):
-    FLAGS = enum.auto()
+    FLAGS = 0
     NAME = enum.auto()
     NAMESPACE = enum.auto()
     EXTENDS = enum.auto()
@@ -104,13 +104,13 @@ class MONO_TYPEDEF(enum.IntEnum):
 
 
 class MONO_METHOD(enum.IntEnum):
-    MONO_METHOD_RVA = enum.auto()
-    MONO_METHOD_IMPLFLAGS = enum.auto()
-    MONO_METHOD_FLAGS = enum.auto()
-    MONO_METHOD_NAME = enum.auto()
-    MONO_METHOD_SIGNATURE = enum.auto()
-    MONO_METHOD_PARAMLIST = enum.auto()
-    MONO_METHOD_SIZE = enum.auto()
+    RVA = 0
+    IMPLFLAGS = enum.auto()
+    FLAGS = enum.auto()
+    NAME = enum.auto()
+    SIGNATURE = enum.auto()
+    PARAMLIST = enum.auto()
+    SIZE = enum.auto()
 
 
 class MonoTokenType(enum.IntEnum):
