@@ -445,5 +445,9 @@ void _(py::module &m)
          .def("ImageButtonEx", [](ImGuiID id, size_t texture_id, const ImVec2 image_size, const ImVec2 uv0, const ImVec2 uv1, const ImVec4 bg_col, const ImVec4 tint_col, ImGuiButtonFlags flags)
               {auto __ret = igImageButtonEx(id, (ImTextureID) texture_id, image_size, uv0, uv1, bg_col, tint_col, flags);return __ret; }, py::arg("id"), py::arg("texture_id"), py::arg("image_size"), py::arg("uv0"), py::arg("uv1"), py::arg("bg_col"), py::arg("tint_col"), py::arg("flags") = 0)
          /*END:_GFUNC_:igImageButtonEx*/
-         .def();
+         /*START:_GFUNC_:igCalcTextSize*/
+         .def("CalcTextSize", [](const char *text, std::optional<const char *> &text_end, bool hide_text_after_double_hash, float wrap_width)
+               {ImVec2 __out_0 = {};igCalcTextSize(&__out_0, text, (text_end ? *text_end : NULL), hide_text_after_double_hash, wrap_width);return __out_0; }, py::arg("text"), py::arg("text_end") = py::none(), py::arg("hide_text_after_double_hash") = false, py::arg("wrap_width") = -1.0f, py::return_value_policy::move);
+         /*END:_GFUNC_:igCalcTextSize*/
+     .def();
 }

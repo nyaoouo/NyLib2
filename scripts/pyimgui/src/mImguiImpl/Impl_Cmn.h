@@ -29,7 +29,7 @@ START_M_IMGUI_IMPL_NAMESPACE
         HWND hwnd = nullptr;
         std::string title = "";
 
-        std::string GetTitle() { 
+        std::string GetTitle() {
             if (this->hwnd == nullptr) return this->title;
             char buf[256];
             GetWindowTextA(this->hwnd, buf, 256);
@@ -45,7 +45,8 @@ START_M_IMGUI_IMPL_NAMESPACE
 
         ImGuiContext *ctx = nullptr;
 
-        inline void ProcessCallBeforeFrameOnce()
+        template <typename T>
+        inline void ProcessCallBeforeFrameOnce(T* self)
         {
             auto gstate = PyGILState_Ensure();
             try
@@ -61,7 +62,7 @@ START_M_IMGUI_IMPL_NAMESPACE
                         func();
                         break;
                     case 1:
-                        func(this);
+                        func(self);
                         break;
                     default:
                         _throwV_("Invalid callBeforeFrameOnce argc {}", argc);
@@ -77,7 +78,8 @@ START_M_IMGUI_IMPL_NAMESPACE
             PyGILState_Release(gstate);
         }
 
-        inline void ProcessRenderCallback()
+        template <typename T>
+        inline void ProcessRenderCallback(T* self)
         {
             auto gstate = PyGILState_Ensure();
             try
@@ -87,7 +89,7 @@ START_M_IMGUI_IMPL_NAMESPACE
                 if (this->renderCallback_argc == 0)
                     this->renderCallback.value()();
                 else if (this->renderCallback_argc == 1)
-                    this->renderCallback.value()(this);
+                    this->renderCallback.value()(self);
                 else
                     _throwV_("Invalid renderCallback_argc {}", this->renderCallback_argc);
             }
@@ -124,7 +126,7 @@ START_M_IMGUI_IMPL_NAMESPACE
                           { return self.renderCallback; }, &RenderBase::SetRenderCallback)
             .def_property("title", &RenderBase::GetTitle, &RenderBase::SetTitle)
             .def("CallBeforeFrameOnce", [](RenderBase &self, py::function func)
-                 { 
+                 {
                     if (PyFuncArgc(func) >1 ) _throwV_("Invalid CallBeforeFrameOnce argc");
                     self.callBeforeFrameOnce.push_back(func); })
             .def("Close", &RenderBase::Close);

@@ -363,14 +363,14 @@ START_M_IMGUI_IMPL_Dx12_NAMESPACE
             }
             this->SwapChainOccluded = false;
 
-            this->ProcessCallBeforeFrameOnce();
+            this->ProcessCallBeforeFrameOnce(this);
 
             // Start the Dear ImGui frame
             ImGui_ImplDX12_NewFrame();
             ImGui_ImplWin32_NewFrame();
             igNewFrame();
 
-            this->ProcessRenderCallback();
+            this->ProcessRenderCallback(this);
 
             // Rendering
             igRender();
@@ -632,7 +632,7 @@ START_M_IMGUI_IMPL_Dx12_NAMESPACE
     {
         if (!this->pd3dCommandQueue)
             return;
-        this->ProcessCallBeforeFrameOnce();
+        this->ProcessCallBeforeFrameOnce(this);
 
         ImGui_ImplDX12_NewFrame();
         ImGui_ImplWin32_NewFrame();
@@ -640,7 +640,7 @@ START_M_IMGUI_IMPL_Dx12_NAMESPACE
 
         try
         {
-            this->ProcessRenderCallback();
+            this->ProcessRenderCallback(this);
         }
         catch (std::exception &e)
         {

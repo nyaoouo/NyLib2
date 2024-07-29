@@ -178,17 +178,26 @@ namespace PYBIND11_NAMESPACE { namespace detail { \\
             for argt in func['argsT'][real_arg_off:]:
                 if re.search(r"\(\*\)\((.*)\)$", argt['type']):
                     return f"\n/* TODO:func pointer arg {func['ov_cimguiname']} {func.get('ret')} {func['signature']}*/", set()
-                if argt['type'].endswith('*') and argt['type'][:-1].strip().rsplit(' ', 1)[-1] in struct_and_enums['structs']:
+                a = "%s"
+                c = "%s"
+                if argt['type'].endswith('*') and (type_ := argt['type'][:-1]).strip().rsplit(' ', 1)[-1] in struct_and_enums['structs']:
+                    if type_ == 'ImGuiKey':
+                        type_ = 'int'
+                        c = f"(ImGuiKey)(%s)"
                     if func.get("defaults", {}).get(argt['name']) in ('nullptr', 'NULL'):
-                        a = f"std::optional<{argt['type'][:-1]}>& {argt['name']}"
-                        c = f"({argt['name']} ? &*{argt['name']} : nullptr)"
+                        a %= f"std::optional<{type_}>& {argt['name']}"
+                        c %= f"({argt['name']} ? &*{argt['name']} : nullptr)"
                         def_arg_map[argt['name']] = "py::none()"
                     else:
-                        a = f"{argt['type'][:-1]}& {argt['name']}"
-                        c = f"&{argt['name']}"
+                        a %= f"{type_}& {argt['name']}"
+                        c %= f"&{argt['name']}"
                 else:
-                    a = f"{argt['type']} {argt['name']}"
-                    c = argt['name']
+                    type_ = argt['type'].strip()
+                    if type_ == 'ImGuiKey':
+                        type_ = 'int'
+                        c = f"(ImGuiKey)(%s)"
+                    a %= f"{type_} {argt['name']}"
+                    c %= argt['name']
                 func_args.append((a, c))
             func_args_s = ', '.join(a for a, c in func_args)
             has_return = int(func.get('ret', 'void') != 'void')

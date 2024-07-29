@@ -191,14 +191,14 @@ START_M_IMGUI_IMPL_Dx9_NAMESPACE
                 this->ResizeWidth = this->ResizeHeight = 0;
             }
 
-            this->ProcessCallBeforeFrameOnce();
+            this->ProcessCallBeforeFrameOnce(this);
 
             // Start the Dear ImGui frame
             ImGui_ImplDX9_NewFrame();
             ImGui_ImplWin32_NewFrame();
             igNewFrame();
 
-            this->ProcessRenderCallback();
+            this->ProcessRenderCallback(this);
 
             igEndFrame();
 

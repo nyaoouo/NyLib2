@@ -46,6 +46,9 @@ def test():
     import pyimgui.imgui as imgui
     import pyimgui.imgui.ctx as imgui_ctx
     class TestWindow:
+        wnd: pyimgui.Dx11Window | pyimgui.Dx12Window
+        last_io: imgui.ImGuiIO
+
         def __init__(self):
             self.show_about_window = False
             self.show_debug_log_window = False
@@ -63,7 +66,6 @@ def test():
             self.is_init = False
 
             self.load_progress = None
-            threading.Thread(target=self.get_test_image).start()
 
         def get_test_image(self, force_reload=False):
             self.test_image_path = './auto_src/cat.jpg'
@@ -81,22 +83,26 @@ def test():
                 print(f"Failed to get cat image: {e}")
                 self.test_image_path = None
             else:
-                wnd.CallBeforeFrameOnce(lambda: setattr(self, 'test_image', wnd.CreateTexture(self.test_image_path)))
+                self.wnd.CallBeforeFrameOnce(lambda: setattr(self, 'test_image', self.wnd.CreateTexture(self.test_image_path)))
             finally:
                 self.load_progress = None
 
         def do_init(self):
+            self.is_init = True
             io = imgui.GetIO()
             font_dir = pathlib.Path(os.environ['WINDIR']) / 'fonts'
             if (font_file := font_dir / 'msyh.ttc').is_file():
                 self.font = io.Fonts.AddFontFromFileTTF(str(font_file), 16, None, io.Fonts.GetGlyphRangesChineseFull())
                 io.Fonts.Build()
-                wnd.InvalidateDeviceObjects()
-            self.is_init = True
+                self.wnd.InvalidateDeviceObjects()
+            threading.Thread(target=self.get_test_image).start()
 
-        def __call__(self):
+        def __call__(self, wnd: pyimgui.Dx11Window | pyimgui.Dx12Window):
+            self.wnd = wnd
+            self.last_io = imgui.GetIO()
             if not self.is_init:
-                return wnd.CallBeforeFrameOnce(self.do_init)
+                return self.wnd.CallBeforeFrameOnce(self.do_init)
+            func_last = []
             with imgui_ctx.PushFont(self.font) if self.font else contextlib.nullcontext():
                 if self.show_about_window:
                     self.show_about_window = imgui.ShowAboutWindow()
@@ -128,7 +134,7 @@ def test():
                         flags=imgui.ImGuiWindowFlags_NoDecoration | imgui.ImGuiWindowFlags_NoMove | imgui.ImGuiWindowFlags_NoSavedSettings | imgui.ImGuiWindowFlags_NoBringToFrontOnFocus
                 ) as (show, window_open):
                     if not window_open:
-                        wnd.Close()
+                        self.wnd.Close()
                     if show:
                         if not self.profiler:
                             if imgui.Button("Start profiler"):
@@ -164,12 +170,21 @@ def test():
                         window_pos = imgui.GetWindowPos()
                         imgui.Text(f"Window pos: {window_pos.x}, {window_pos.y}")
                         if imgui.CollapsingHeader("Test"):
-                            _, wnd.ClearColor = imgui.ColorEdit4("Clear color", wnd.ClearColor)
+                            _, self.wnd.ClearColor = imgui.ColorEdit4("Clear color", self.wnd.ClearColor)
                             changed, self.test_string = imgui.InputText("Test string", self.test_string)
-                            imgui.Text(f"Test string: {self.test_string}")
+                            imgui.Text(f"Test string: ")
+                            imgui.SameLine()
 
-                            changed, new_title = imgui.InputText("Window title", wnd.title)
-                            if changed: wnd.title = new_title
+                            text_size = imgui.CalcTextSize(self.test_string)
+                            draw_list = imgui.GetWindowDrawList()
+                            pos = imgui.GetCursorScreenPos()
+                            imgui.Text(self.test_string)
+                            draw_list.AddRect(pos, imgui.ImVec2(pos.x + text_size.x, pos.y + text_size.y), imgui.GetColorU32(imgui.ImVec4(1, 0, 0, 1)))
+
+                            imgui.Text(f"pos: {pos.x}, {pos.y} size: {text_size.x}, {text_size.y}")
+
+                            changed, new_title = imgui.InputText("Window title", self.wnd.title)
+                            if changed: self.wnd.title = new_title
                             with imgui_ctx.BeginTable(
                                     "test_table",
                                     2,
@@ -188,6 +203,8 @@ def test():
                         changed, self.show_id_stack_tool_window = imgui.Checkbox("Show ID stack tool window", self.show_id_stack_tool_window)
                         changed, self.show_metrics_window = imgui.Checkbox("Show metrics window", self.show_metrics_window)
 
+            for f in func_last:
+                f()
     wnd = pyimgui.Dx11Window(TestWindow())
     wnd.title = "Hello, world!"
     wnd.Serve()

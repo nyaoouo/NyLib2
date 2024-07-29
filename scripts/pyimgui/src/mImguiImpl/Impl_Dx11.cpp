@@ -151,8 +151,8 @@ START_M_IMGUI_IMPL_Dx11_NAMESPACE
         io->ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;  // Enable Gamepad Controls
         io->ConfigFlags |= ImGuiConfigFlags_DockingEnable;     // Enable Docking
         io->ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;   // Enable Multi-Viewport / Platform Windows
-        
-        
+
+
         igStyleColorsLight(NULL);
 
         ImGuiStyle *style = igGetStyle();
@@ -196,14 +196,14 @@ START_M_IMGUI_IMPL_Dx11_NAMESPACE
                 CreateRenderTarget();
             }
 
-            this->ProcessCallBeforeFrameOnce();
+            this->ProcessCallBeforeFrameOnce(this);
 
             // Start the Dear ImGui frame
             ImGui_ImplDX11_NewFrame();
             ImGui_ImplWin32_NewFrame();
             igNewFrame();
 
-            this->ProcessRenderCallback();
+            this->ProcessRenderCallback(this);
 
             igEndFrame();
             igRender();
@@ -355,7 +355,7 @@ START_M_IMGUI_IMPL_Dx11_NAMESPACE
     {
         this->pd3dDeviceContext->OMSetRenderTargets(1, &this->mainRenderTargetView, nullptr);
 
-        this->ProcessCallBeforeFrameOnce();
+        this->ProcessCallBeforeFrameOnce(this);
 
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
@@ -363,7 +363,7 @@ START_M_IMGUI_IMPL_Dx11_NAMESPACE
 
         try
         {
-            this->ProcessRenderCallback();
+            this->ProcessRenderCallback(this);
         }
         catch (std::exception &e)
         {

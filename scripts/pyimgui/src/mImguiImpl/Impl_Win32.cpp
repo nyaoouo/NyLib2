@@ -11,6 +11,37 @@ START_M_IMGUI_IMPL_WIN32_NAMESPACE
 	{
 		if (ImGui_ImplWin32_WndProcHandler(hwnd, uMsg, wParam, lParam) > 0)
 			return 1L;
+		
+		// dont pass mouse and keyboard events if imgui is capturing
+
+		//mouses
+		switch (uMsg)
+		{
+		case WM_LBUTTONDOWN:
+		case WM_LBUTTONUP:
+		case WM_RBUTTONDOWN:
+		case WM_RBUTTONUP:
+		case WM_MBUTTONDOWN:
+		case WM_MBUTTONUP:
+		case WM_XBUTTONDOWN:
+		case WM_XBUTTONUP:
+		case WM_MOUSEWHEEL:
+		case WM_MOUSEHWHEEL:
+			if (igGetIO()->WantCaptureMouse)
+				return 1L;
+			break;
+		case WM_KEYDOWN:
+		case WM_KEYUP:
+		case WM_SYSKEYDOWN:
+		case WM_SYSKEYUP:
+		case WM_CHAR:
+			if (igGetIO()->WantCaptureKeyboard)
+				return 1L;
+			break;
+		}
+		
+
+
 		return ::CallWindowProc(oWndProc, hwnd, uMsg, wParam, lParam);
 	}
 
