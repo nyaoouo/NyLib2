@@ -36,7 +36,7 @@ class MonoMethodInspector(_MonoInspector[MonoMethod]):
         return [
             [
                 *[
-                    (f"{i}: {param.type.name} {param.name}", param.type)
+                    (f"{i}({MonoTypeEnum(param.type.type).name}): {param.type.name} {param.name}", param.type)
                     for i, param in enumerate(self.target.params)
                 ],
                 (f"=> {self.target.return_type.name}", self.target.return_type),

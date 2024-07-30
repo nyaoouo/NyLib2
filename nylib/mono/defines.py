@@ -4,6 +4,26 @@ import enum
 from nylib import winapi
 
 
+class _MonoObj:
+    def __new__(cls, ptr):
+        if not ptr:
+            return None
+        return super().__new__(cls)
+
+    def __init__(self, ptr):
+        self.ptr = ptr
+
+    def __eq__(self, other):
+        if isinstance(other, _MonoObj):
+            return self.ptr == other.ptr
+        return False
+
+    def __str__(self):
+        if hasattr(self, 'name'):
+            return f"{self.__class__.__name__}({self.name})"
+        return f"{self.__class__.__name__}({self.ptr:#x})"
+
+
 class MonoTypeEnum(enum.IntEnum):
     END = 0x00  # End of List
     VOID = 0x01
@@ -166,6 +186,7 @@ class _MonoApi:
             self.func_ptr = None
             self.c_func = None
         else:
+            if restype is ctypes.c_void_p: restype = ctypes.c_size_t  # auto cast to pyint
             self.c_func = ctypes.CFUNCTYPE(restype, *argtypes)(self.func_ptr)
 
     def __bool__(self):

@@ -3,26 +3,8 @@ import functools
 import typing
 
 from .defines import *
-
-
-class _MonoObj:
-    def __new__(cls, ptr):
-        if not ptr:
-            return None
-        return super().__new__(cls)
-
-    def __init__(self, ptr):
-        self.ptr = ptr
-
-    def __eq__(self, other):
-        if isinstance(other, _MonoObj):
-            return self.ptr == other.ptr
-        return False
-
-    def __str__(self):
-        if hasattr(self, 'name'):
-            return f"{self.__class__.__name__}({self.name})"
-        return f"{self.__class__.__name__}({self.ptr:#x})"
+from .defines import _MonoObj
+from .type_cast import py2mono, mono2py
 
 
 class MonoObject(_MonoObj):
@@ -171,6 +153,12 @@ class MonoMethod(_MonoObj):
             return MonoType(api.il2cpp_method_get_return_type(self.ptr))
         return MonoType(api.mono_signature_get_return_type(api.mono_method_signature(self.ptr)))
 
+    @functools.cached_property
+    def signature(self):
+        s_ret = self.return_type.name
+        s_params = ', '.join(param.type.name for param in self.params)
+        return f"{s_ret} {self.name}({s_params})"
+
     def get_reflection_method(self, cls: 'MonoClass' = None):
         api = MonoApi.get_instance()
         if api.is_il2cpp:
@@ -197,8 +185,33 @@ class MonoMethod(_MonoObj):
         disassembly = api.mono_disasm_code(None, self.ptr, il_code, il_code + code)
         return disassembly.decode('utf-8')
 
-    def invoke(self, this=None, *args, **kwargs):
-        pass
+    def invoke(self, this: int | MonoObject = None, *args):
+        if this is None:
+            this = 0
+        elif isinstance(this, MonoObject):
+            this = this.ptr
+
+        param_count = self.param_count
+        if len(args) != param_count:
+            raise ValueError(f'args length not match, expect {param_count}, got {len(args)}')
+
+        p_params = None
+        if args:
+            keeper = []
+            params = (ctypes.c_size_t * param_count)()
+            for i, (param, arg) in enumerate(zip(self.params, args)):
+                params[i] = py2mono(param.type.type, arg, keeper)
+            p_params = ctypes.cast(params, ctypes.c_void_p)
+
+        c_exception = ctypes.c_void_p(0)
+        api = MonoApi.get_instance()
+        raw_res = api.mono_runtime_invoke(self.ptr, this, p_params, c_exception)
+        if c_exception.value:
+            if exc := api.mono_object_to_string(c_exception, ctypes.byref(c_exception)):
+                exc = api.mono_string_to_utf8(exc)
+                raise RuntimeError(exc.decode('utf-8'))
+            raise RuntimeError('unknown exception')
+        return mono2py(self.return_type.type, raw_res)
 
 
 class MonoVtable(_MonoObj):
@@ -392,17 +405,12 @@ class Mono:
         self.is_il2cpp = self.api.is_il2cpp
         self.domain = self.api.mono_get_root_domain()
 
-        self.mono_selfthread = None
-        self.is_attached = False
-        self.uwp_mode = False
-
-        self.connect_thread_to_mono_runtime()
+        # self.mono_selfthread = None
+        # self.is_attached = False
+        # self.uwp_mode = False
 
     def connect_thread_to_mono_runtime(self):
-        self.mono_selfthread = None
-        if self.api.mono_thread_attach and self.api.mono_domain_get:
-            self.mono_selfthread = self.api.mono_thread_attach(self.api.mono_get_root_domain())
-        self.is_attached = bool(self.mono_selfthread)
+        return self.api.mono_thread_attach(self.api.mono_get_root_domain())
 
     @functools.cached_property
     def domains(self) -> tuple[MonoDomain, ...]:
@@ -424,3 +432,8 @@ class Mono:
             c_iterator = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p)(lambda assembly: res.append(MonoAssembly(assembly)))
             self.api.mono_assembly_foreach(c_iterator, None)
         return tuple(res)
+
+    def find_class(self, classname: str, namespace: str = '') -> MonoClass | None:
+        for assembly in self.assemblies:
+            if cls := assembly.image.find_class(classname, namespace):
+                return cls
