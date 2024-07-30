@@ -6,11 +6,12 @@ START_IMGUI_CTX_NAMESPACE
 {
     void pybind_setup_ImguiCtx(pybind11::module_ m)
     {
-        m.def("Begin", [](const char *name, bool open, ImGuiWindowFlags flags)
+        m.def("Begin", [](const char *name, std::optional<bool> open, ImGuiWindowFlags flags)
               {
-               auto is_collapsed = igBegin(name, &open, flags);
-               PyCtxWrapper res = {py::make_tuple(is_collapsed,open), igEnd};
-               return res; }, py::arg("name") = "", py::arg("open") = true, py::arg("flags") = 0, py::return_value_policy::move);
+               auto p_open = (open ? &*open : nullptr);
+               auto is_collapsed = igBegin(name, p_open, flags);
+               PyCtxWrapper res = {py::make_tuple(is_collapsed, open ? *p_open: true), igEnd};
+               return res; }, py::arg("name") = "", py::arg("open") = py::none(), py::arg("flags") = 0, py::return_value_policy::move);
         m.def("BeginChild", [](const char *str_id, const ImVec2 &size, ImGuiWindowFlags child_flags, ImGuiWindowFlags window_flags)
               {
               auto is_collapsed = igBeginChild_Str(str_id, size, child_flags, window_flags);
@@ -84,13 +85,14 @@ START_IMGUI_CTX_NAMESPACE
         m.def("BeginTabBar", [](const char *str_id, ImGuiTabBarFlags flags)
               {
                auto res_ = igBeginTabBar(str_id,flags);
-               PyCtxWrapper res = {py::cast(res_), igEndTabBar};
+               PyCtxWrapper res = {py::cast(res_), res_? igEndTabBar: [](){}};
                return res; }, py::arg("str_id"), py::arg("flags") = 0, py::return_value_policy::move);
-        m.def("BeginTabItem", [](const char *label, bool p_open, ImGuiTabItemFlags flags)
+        m.def("BeginTabItem", [](const char *label, std::optional<bool> open, ImGuiTabItemFlags flags)
               {
-               auto res_ = igBeginTabItem(label,&p_open,flags);
-               PyCtxWrapper res = {py::make_tuple(res_,p_open), igEndTabItem};
-               return res; }, py::arg("label"), py::arg("p_open"), py::arg("flags") = 0, py::return_value_policy::move);
+               auto p_open = (open ? &*open : nullptr);
+               auto res_ = igBeginTabItem(label, p_open, flags);
+               PyCtxWrapper res = {py::make_tuple(res_, open ? *p_open: false), res_? igEndTabItem: [](){}};
+               return res; }, py::arg("label"), py::arg("p_open") = py::none(), py::arg("flags") = 0, py::return_value_policy::move);
         m.def("BeginDragDropSource", [](ImGuiDragDropFlags flags)
               {
                auto res_ = igBeginDragDropSource(flags);

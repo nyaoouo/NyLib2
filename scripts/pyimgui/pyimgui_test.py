@@ -170,6 +170,18 @@ def test():
                         window_pos = imgui.GetWindowPos()
                         imgui.Text(f"Window pos: {window_pos.x}, {window_pos.y}")
                         if imgui.CollapsingHeader("Test"):
+
+                            with imgui_ctx.BeginChild("TabTest", imgui.ImVec2(300, 100),child_flags=imgui.ImGuiChildFlags_Border) as show_child:
+                                if show_child:
+                                    with imgui_ctx.BeginTabBar("##tabs") as show_tabbar:
+                                        if show_tabbar:
+                                            with imgui_ctx.BeginTabItem("Tab1") as (show_tab, _):
+                                                if show_tab:
+                                                    imgui.Text("Tab1")
+                                            with imgui_ctx.BeginTabItem("Tab2") as (show_tab, _):
+                                                if show_tab:
+                                                    imgui.Text("Tab2")
+
                             _, self.wnd.ClearColor = imgui.ColorEdit4("Clear color", self.wnd.ClearColor)
                             changed, self.test_string = imgui.InputText("Test string", self.test_string)
                             imgui.Text(f"Test string: ")
@@ -205,6 +217,7 @@ def test():
 
             for f in func_last:
                 f()
+
     wnd = pyimgui.Dx11Window(TestWindow())
     wnd.title = "Hello, world!"
     wnd.Serve()
