@@ -30,7 +30,7 @@ def py2mono(t: MonoTypeEnum | int, v, keeper):
 
 
 def mono2py(t: MonoTypeEnum | int, v):
-    return _Mono2Py[t](v)
+    return _Mono2Py[t](v) if t in _Mono2Py else v
 
 
 def _simple_map(t, ct):
