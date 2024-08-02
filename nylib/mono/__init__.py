@@ -1,4 +1,5 @@
 import ctypes
+import enum
 import functools
 import typing
 
@@ -7,13 +8,13 @@ from .defines import _MonoObj
 from .type_cast import py2mono, mono2py
 
 
-class MonoObject(_MonoObj):
+class MonoObject_(_MonoObj):
     def init(self):
         MonoApi.get_instance().mono_runtime_object_init(self.ptr)
 
     @functools.cached_property
     def cls(self):
-        return MonoClass(MonoApi.get_instance().mono_object_get_class(self.ptr))
+        return MonoClass_(MonoApi.get_instance().mono_object_get_class(self.ptr))
 
     def unbox(self):
         return MonoApi.get_instance().mono_object_unbox(self.ptr)
@@ -26,7 +27,7 @@ class MonoMethodHeader(_MonoObj):
         return res, code.value
 
 
-class MonoReflectionType(_MonoObj):
+class MonoReflectionType_(_MonoObj):
     pass
 
 
@@ -38,11 +39,11 @@ class MonoType(_MonoObj):
     @functools.cached_property
     def cls(self):
         # mono_class_from_mono_type?
-        return MonoClass(MonoApi.get_instance().mono_type_get_class(self.ptr))
+        return MonoClass_(MonoApi.get_instance().mono_type_get_class(self.ptr))
 
     @functools.cached_property
     def cls_from_ptr(self):
-        return MonoClass(MonoApi.get_instance().mono_ptr_class_get(self.ptr))
+        return MonoClass_(MonoApi.get_instance().mono_ptr_class_get(self.ptr))
 
     @functools.cached_property
     def type_from_ptr(self):
@@ -56,9 +57,9 @@ class MonoType(_MonoObj):
     def reflect_type(self):
         api = MonoApi.get_instance()
         if api.is_il2cpp:
-            return MonoReflectionType(api.il2cpp_type_get_object(self.ptr))
+            return MonoReflectionType_(api.il2cpp_type_get_object(self.ptr))
         else:
-            return MonoReflectionType(api.mono_type_get_object(api.mono_get_root_domain(), self.ptr))
+            return MonoReflectionType_(api.mono_type_get_object(api.mono_get_root_domain(), self.ptr))
 
 
 class MonoField(_MonoObj):
@@ -72,7 +73,7 @@ class MonoField(_MonoObj):
 
     @functools.cached_property
     def parent(self):
-        return MonoApi.get_instance().mono_field_get_parent(self.ptr)
+        return MonoClass_(MonoApi.get_instance().mono_field_get_parent(self.ptr))
 
     @functools.cached_property
     def offset(self):
@@ -81,6 +82,37 @@ class MonoField(_MonoObj):
     @functools.cached_property
     def flags(self):
         return MonoApi.get_instance().mono_field_get_flags(self.ptr)
+
+    def get_value_addr(self, instance: 'MonoObject_' = None):
+        if self.flags & MONO_FIELD_ATTR_STATIC:
+            assert self.offset >= 0, "special static field not supported"
+            return self.parent.static_field_data + self.offset
+        else:
+            if instance is None:
+                raise ValueError('instance required')
+            return instance.ptr + self.offset
+
+
+class MonoProperty(_MonoObj):
+    @functools.cached_property
+    def name(self) -> str:
+        return MonoApi.get_instance().mono_property_get_name(self.ptr).decode('utf-8')
+
+    @functools.cached_property
+    def flags(self):
+        return MonoApi.get_instance().mono_property_get_flags(self.ptr)
+
+    @functools.cached_property
+    def get_method(self):
+        return MonoMethod(MonoApi.get_instance().mono_property_get_get_method(self.ptr))
+
+    @functools.cached_property
+    def set_method(self):
+        return MonoMethod(MonoApi.get_instance().mono_property_get_set_method(self.ptr))
+
+    @functools.cached_property
+    def parent(self):
+        return MonoClass_(MonoApi.get_instance().mono_property_get_parent(self.ptr))
 
 
 class MonoReflectionMethod(_MonoObj):
@@ -105,11 +137,11 @@ class MonoMethod(_MonoObj):
 
     @functools.cached_property
     def flags(self):
-        return MonoApi.get_instance().mono_method_get_flags(self.ptr)
+        return MonoApi.get_instance().mono_method_get_flags(self.ptr, None)
 
     @functools.cached_property
     def cls(self):
-        return MonoClass(MonoApi.get_instance().mono_method_get_class(self.ptr))
+        return MonoClass_(MonoApi.get_instance().mono_method_get_class(self.ptr))
 
     @functools.cached_property
     def header(self):
@@ -159,7 +191,7 @@ class MonoMethod(_MonoObj):
         s_params = ', '.join(param.type.name for param in self.params)
         return f"{s_ret} {self.name}({s_params})"
 
-    def get_reflection_method(self, cls: 'MonoClass' = None):
+    def get_reflection_method(self, cls: 'MonoClass_' = None):
         api = MonoApi.get_instance()
         if api.is_il2cpp:
             return api.il2cpp_method_get_object(self.ptr, cls.ptr if cls else None)
@@ -185,10 +217,10 @@ class MonoMethod(_MonoObj):
         disassembly = api.mono_disasm_code(None, self.ptr, il_code, il_code + code)
         return disassembly.decode('utf-8')
 
-    def invoke(self, this: int | MonoObject = None, *args):
+    def invoke(self, this: int | MonoObject_ = None, *args):
         if this is None:
             this = 0
-        elif isinstance(this, MonoObject):
+        elif isinstance(this, MonoObject_):
             this = this.ptr
 
         param_count = self.param_count
@@ -198,7 +230,7 @@ class MonoMethod(_MonoObj):
         p_params = None
         if args:
             keeper = []
-            params = (ctypes.c_size_t * param_count)()
+            params = (ctypes.c_size_t * (param_count + 1))()
             for i, (param, arg) in enumerate(zip(self.params, args)):
                 params[i] = py2mono(param.type.type, arg, keeper)
             p_params = ctypes.cast(params, ctypes.c_void_p)
@@ -220,14 +252,14 @@ class MonoVtable(_MonoObj):
         return MonoApi.get_instance().mono_vtable_get_static_field_data(self.ptr)
 
 
-class MonoClass(_MonoObj):
+class MonoClass_(_MonoObj):
     def new_object(self):
         api = MonoApi.get_instance()
         if api.is_il2cpp:
-            return MonoObject(api.mono_object_new(self.ptr, self.ptr))
+            return MonoObject_(api.mono_object_new(self.ptr, self.ptr))
         else:
             domain = (api.mono_get_root_domain or api.mono_domain_get)()
-            return MonoObject(api.mono_object_new(domain, self.ptr))
+            return MonoObject_(api.mono_object_new(domain, self.ptr))
 
     @functools.cached_property
     def namespace(self) -> str:
@@ -247,7 +279,7 @@ class MonoClass(_MonoObj):
 
     @functools.cached_property
     def parent(self):
-        return MonoClass(MonoApi.get_instance().mono_class_get_parent(self.ptr))
+        return MonoClass_(MonoApi.get_instance().mono_class_get_parent(self.ptr))
 
     @functools.cached_property
     def vtable(self):
@@ -266,7 +298,7 @@ class MonoClass(_MonoObj):
 
     @functools.cached_property
     def nesting_type(self):
-        return MonoClass(MonoApi.get_instance().mono_class_get_nesting_type(self.ptr))
+        return MonoClass_(MonoApi.get_instance().mono_class_get_nesting_type(self.ptr))
 
     @functools.cached_property
     def rank(self):
@@ -275,7 +307,7 @@ class MonoClass(_MonoObj):
     @functools.cached_property
     def element_class(self):
         if self.rank:
-            return MonoClass(MonoApi.get_instance().mono_class_get_element_class(self.ptr))
+            return MonoClass_(MonoApi.get_instance().mono_class_get_element_class(self.ptr))
 
     @functools.cached_property
     def nested_types(self):
@@ -361,21 +393,21 @@ class MonoImage(_MonoObj):
         return MonoApi.get_instance().mono_image_rva_map(self.ptr, i)
 
     @functools.cached_property
-    def clss(self) -> tuple[MonoClass, ...]:
+    def clss(self) -> tuple[MonoClass_, ...]:
         api = MonoApi.get_instance()
         res = []
         if api.is_il2cpp:
             for i in range(api.il2cpp_image_get_class_count(self.ptr)):
-                res.append(MonoClass(api.il2cpp_image_get_class(self.ptr, i)))
+                res.append(MonoClass_(api.il2cpp_image_get_class(self.ptr, i)))
         else:
-            tdef = api.mono_image_get_table_info(self.ptr, MonoMetaTableEnum.TYPEDEF)
+            tdef = api.mono_image_get_table_info(self.ptr, MONO_TABLE_TYPEDEF)
             for i in range(api.mono_table_info_get_rows(tdef)):
-                res.append(MonoClass(api.mono_class_get(self.ptr, MonoTokenType.TYPE_DEF | (i + 1))))
+                res.append(MonoClass_(api.mono_class_get(self.ptr, MONO_TABLE_TYPEDEF | (i + 1))))
         return tuple(res)
 
-    def find_class(self, classname: str, namespace: str = '') -> MonoClass | None:
+    def find_class(self, classname: str, namespace: str = '') -> MonoClass_ | None:
         api = MonoApi.get_instance()
-        return MonoClass((api.mono_class_from_name_case or api.mono_class_from_name)(
+        return MonoClass_((api.mono_class_from_name_case or api.mono_class_from_name)(
             self.ptr, namespace.encode('utf-8'), classname.encode('utf-8')
         ))
 
@@ -433,7 +465,7 @@ class Mono:
             self.api.mono_assembly_foreach(c_iterator, None)
         return tuple(res)
 
-    def find_class(self, classname: str, namespace: str = '') -> MonoClass | None:
+    def find_class(self, classname: str, namespace: str = '') -> MonoClass_ | None:
         for assembly in self.assemblies:
             if cls := assembly.image.find_class(classname, namespace):
                 return cls
