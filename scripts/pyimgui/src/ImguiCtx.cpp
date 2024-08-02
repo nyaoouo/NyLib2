@@ -35,27 +35,27 @@ START_IMGUI_CTX_NAMESPACE
         m.def("BeginCombo", [](const char *label, const char *preview_value, ImGuiComboFlags flags)
               {
                auto is_open = igBeginCombo(label, preview_value, flags);
-               PyCtxWrapper res = {py::cast(is_open), igEndCombo};
+               PyCtxWrapper res = {py::cast(is_open), is_open ? igEndCombo: [](){}};
                return res; }, py::arg("label"), py::arg("preview_value"), py::arg("flags") = 0, py::return_value_policy::move);
         m.def("BeginListBox", [](const char *label, const ImVec2 &size)
               {
                auto is_open = igBeginListBox(label, size);
-               PyCtxWrapper res = {py::cast(is_open), igEndListBox};
+               PyCtxWrapper res = {py::cast(is_open), is_open ? igEndListBox: [](){}};
                return res; }, py::arg("label"), py::arg("size") = ImVec2(0, 0), py::return_value_policy::move);
         m.def("BeginMainMenuBar", []()
               {
                auto is_open = igBeginMainMenuBar();
-               PyCtxWrapper res = {py::cast(is_open), igEndMainMenuBar};
+               PyCtxWrapper res = {py::cast(is_open), is_open ? igEndMainMenuBar: [](){}};
                return res; }, py::return_value_policy::move);
         m.def("BeginMenuBar", []()
               {
                auto is_open = igBeginMenuBar();
-               PyCtxWrapper res = {py::cast(is_open), igEndMenuBar};
+               PyCtxWrapper res = {py::cast(is_open), is_open ? igEndMenuBar: [](){}};
                return res; }, py::return_value_policy::move);
         m.def("BeginMenu", [](const char *label, bool enabled)
               {
                auto is_open = igBeginMenu(label, enabled);
-               PyCtxWrapper res = {py::cast(is_open), igEndMenu};
+               PyCtxWrapper res = {py::cast(is_open), is_open ? igEndMenu: [](){}};
                return res; }, py::arg("label"), py::arg("enabled") = true, py::return_value_policy::move);
         m.def("BeginTooltip", []()
               {
@@ -69,39 +69,39 @@ START_IMGUI_CTX_NAMESPACE
                return res; }, py::return_value_policy::move);
         m.def("BeginPopup", [](const char *str_id, ImGuiWindowFlags flags)
               {
-               auto res_ = igBeginPopup(str_id, flags);
-               PyCtxWrapper res = {py::cast(res_), igEndPopup};
+               auto is_open = igBeginPopup(str_id, flags);
+               PyCtxWrapper res = {py::cast(is_open), is_open ? igEndPopup: [](){}};
                return res; }, py::arg("str_id"), py::arg("flags") = 0, py::return_value_policy::move);
         m.def("BeginPopupModal", [](const char *name, bool *p_open, ImGuiWindowFlags flags)
               {
-               auto res_ = igBeginPopupModal(name, p_open, flags);
-               PyCtxWrapper res = {py::cast(res_), igEndPopup};
+               auto is_open = igBeginPopupModal(name, p_open, flags);
+               PyCtxWrapper res = {py::cast(is_open), is_open ? igEndPopup: [](){}};
                return res; }, py::arg("name"), py::arg("p_open"), py::arg("flags") = 0, py::return_value_policy::move);
         m.def("BeginTable", [](const char *str_id, int columns, ImGuiTableFlags flags, const ImVec2 outer_size, float inner_width)
               {
-               auto res_ = igBeginTable(str_id,columns,flags,outer_size,inner_width);
-               PyCtxWrapper res = {py::cast(res_), res_? igEndTable: [](){} };
+               auto is_open = igBeginTable(str_id,columns,flags,outer_size,inner_width);
+               PyCtxWrapper res = {py::cast(is_open), is_open? igEndTable: [](){} };
                return res; }, py::arg("str_id"), py::arg("columns"), py::arg("flags") = 0, py::arg("outer_size") = ImVec2(0, 0), py::arg("inner_width") = 0.0f, py::return_value_policy::move);
         m.def("BeginTabBar", [](const char *str_id, ImGuiTabBarFlags flags)
               {
-               auto res_ = igBeginTabBar(str_id,flags);
-               PyCtxWrapper res = {py::cast(res_), res_? igEndTabBar: [](){}};
+               auto is_open = igBeginTabBar(str_id,flags);
+               PyCtxWrapper res = {py::cast(is_open), is_open? igEndTabBar: [](){}};
                return res; }, py::arg("str_id"), py::arg("flags") = 0, py::return_value_policy::move);
         m.def("BeginTabItem", [](const char *label, std::optional<bool> open, ImGuiTabItemFlags flags)
               {
                auto p_open = (open ? &*open : nullptr);
-               auto res_ = igBeginTabItem(label, p_open, flags);
-               PyCtxWrapper res = {py::make_tuple(res_, open ? *p_open: false), res_? igEndTabItem: [](){}};
+               auto is_open = igBeginTabItem(label, p_open, flags);
+               PyCtxWrapper res = {py::make_tuple(is_open, open ? *p_open: false), is_open? igEndTabItem: [](){}};
                return res; }, py::arg("label"), py::arg("p_open") = py::none(), py::arg("flags") = 0, py::return_value_policy::move);
         m.def("BeginDragDropSource", [](ImGuiDragDropFlags flags)
               {
-               auto res_ = igBeginDragDropSource(flags);
-               PyCtxWrapper res = {py::cast(res_), igEndDragDropSource};
+               auto is_open = igBeginDragDropSource(flags);
+               PyCtxWrapper res = {py::cast(is_open), is_open? igEndDragDropSource: [](){}};
                return res; }, py::arg("flags") = 0, py::return_value_policy::move);
         m.def("BeginDragDropTarget", []()
               {
-               auto res_ = igBeginDragDropTarget();
-               PyCtxWrapper res = {py::cast(res_), igEndDragDropTarget};
+               auto is_open = igBeginDragDropTarget();
+               PyCtxWrapper res = {py::cast(is_open), is_open? igEndDragDropTarget: [](){}};
                return res; }, py::return_value_policy::move);
         m.def("BeginDisabled", [](bool disabled)
               {
