@@ -35,7 +35,7 @@ START_M_IMGUI_IMPL_NAMESPACE
             GetWindowTextA(this->hwnd, buf, 256);
             this->title = buf;
             return this->title;
-         }
+        }
         void SetTitle(std::string title)
         {
             this->title = title;
@@ -125,6 +125,26 @@ START_M_IMGUI_IMPL_NAMESPACE
             .def_property("renderCallback", [](RenderBase &self)
                           { return self.renderCallback; }, &RenderBase::SetRenderCallback)
             .def_property("title", &RenderBase::GetTitle, &RenderBase::SetTitle)
+            .def_property("window_size", [](RenderBase &self)
+                          {
+                              RECT rect;
+                              GetClientRect(self.hwnd, &rect);
+                              return py::make_tuple(rect.right - rect.left, rect.bottom - rect.top);
+                          },
+                          [](RenderBase &self, py::tuple size)
+                          {
+                              SetWindowPos(self.hwnd, nullptr, 0, 0, size[0].cast<int>(), size[1].cast<int>(), SWP_NOMOVE | SWP_NOZORDER);
+                          })
+            .def_property("window_pos", [](RenderBase &self)
+                          {
+                              RECT rect;
+                              GetWindowRect(self.hwnd, &rect);
+                              return py::make_tuple(rect.left, rect.top);
+                          },
+                          [](RenderBase &self, py::tuple pos)
+                          {
+                              SetWindowPos(self.hwnd, nullptr, pos[0].cast<int>(), pos[1].cast<int>(), 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+                          })
             .def("CallBeforeFrameOnce", [](RenderBase &self, py::function func)
                  {
                     if (PyFuncArgc(func) >1 ) _throwV_("Invalid CallBeforeFrameOnce argc");

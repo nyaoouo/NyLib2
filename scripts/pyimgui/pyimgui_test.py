@@ -61,6 +61,8 @@ def test():
 
             self.font = None
             self.test_string = 'Hello, world!'
+            self.combo_items = ['item1', 'item2', 'item3']
+            self.combo_selected = '-'
             self.test_image = None
             self.test_image_path = None
             self.is_init = False
@@ -181,6 +183,13 @@ def test():
                                             with imgui_ctx.BeginTabItem("Tab2") as (show_tab, _):
                                                 if show_tab:
                                                     imgui.Text("Tab2")
+
+                            with imgui_ctx.BeginCombo("Combo", self.combo_selected) as show_combo:
+                                if show_combo:
+                                    for item in self.combo_items:
+                                        if imgui.Selectable(item):
+                                            self.combo_selected = item
+
 
                             _, self.wnd.ClearColor = imgui.ColorEdit4("Clear color", self.wnd.ClearColor)
                             changed, self.test_string = imgui.InputText("Test string", self.test_string)
