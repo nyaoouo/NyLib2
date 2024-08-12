@@ -57,17 +57,32 @@ def inline_hook(p: 'Process', a, hook_bytes, entrance_offset=0, skip_original=0)
     return alloc, orig_code
 
 
-def asm(code, addr=0, data_size=0, ks=None):
+def asm(code, addr=0, data_size=0, ks=None, cs=None):
     codes = [l_ for l_ in (l.strip() for l in re.split(r'[\n;\r]', code)) if l_]
     counter = 0
+    inst_count = 0
+    inst2lbl = {}
     for i in range(len(codes)):
         line = codes[i]
+        if m := re.match(r"(\w+):", line):  # label
+            inst2lbl.setdefault(inst_count, []).append(m.group(1))
+            continue
+        inst_count += 1
         if m := re.search(r'\W(__data__)\W', line):
             counter = (id_ := counter) + 1
             prepend_lbl = f'__read_data_{id_}__'
             # replace __data__ with rip-prepend_lbl+start-data_size
             codes[i] = line[:m.start(1)] + f'(rip-{prepend_lbl}+__start__-{data_size:#x})' + line[m.end(1):] + f';{prepend_lbl}:'
-    return (ks or ks_).asm('__start__:;' + ';'.join(codes), addr, True)[0]
+    bytecode = (ks or ks_).asm('__start__:;' + ';'.join(codes), addr, True)[0]
+    labels = {}
+    if inst2lbl:
+        for i, inst in enumerate((cs or cs_).disasm(bytecode, addr)):
+            if i in inst2lbl:
+                for lbl in inst2lbl.pop(i):
+                    labels[lbl] = inst.address
+                if not inst2lbl:
+                    break
+    return bytecode, labels
 
 
 class InlineHook:
@@ -77,7 +92,11 @@ class InlineHook:
 
     def __init__(self, process: 'Process', code, addr, data_size=0, skip_original=0):
         self.process = process
-        self.code = code if isinstance(code, bytes) else asm(code, addr, data_size)
+        if isinstance(code, bytes):
+            self.code = code
+            self.labels = {}
+        else:
+            self.code, self.labels = asm(code, addr, data_size)
         self.addr = addr
         self.data_size = data_size
         self.skip_original = skip_original
