@@ -25,7 +25,7 @@ class _MonoInspector(imguiutils.Inspector[_T]):
             self.selected_inspector = MonoFieldInspector(t)
         elif isinstance(t, MonoMethod):
             self.selected_inspector = MonoMethodInspector(t)
-        elif isinstance(t, MonoClass):
+        elif isinstance(t, MonoClass_):
             self.selected_inspector = MonoClassInspector(t)
         elif isinstance(t, MonoImage):
             self.selected_inspector = MonoImageInspector(t)
@@ -56,7 +56,7 @@ class MonoFieldInspector(_MonoInspector[MonoField]):
         ]
 
 
-class MonoClassInspector(_MonoInspector[MonoClass]):
+class MonoClassInspector(_MonoInspector[MonoClass_]):
     def init_items(self):
         return [
             [(f"{field.type.name} {field.name}", field) for field in self.target.fields],
