@@ -12,20 +12,24 @@ ks_ = keystone.Ks(keystone.KS_ARCH_X86, keystone.KS_MODE_64)
 cs_ = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
 
 
-def read_code(p: 'Process', a, min_size=1, min_line=0, cs=None) -> tuple[list[bytes], int]:
+def read_code(p: 'Process', a, min_size=1, min_line=0, cs=None) -> tuple[list[capstone.CsInsn], int]:
     cs = cs or cs_
     ret = []
     proceed = 0
     disasm = cs.disasm(p.read(a, max(min_size + 0x10, 0x100)), a)
+    out_of_code = False
     while proceed < min_size or len(ret) < min_line:
         if (i := next(disasm, None)) is None:
             disasm = cs.disasm(p.read(a + proceed, 0x100), a + proceed)
             continue
-        b = i.bytes
-        if b == b'\xcc':  # int3
-            raise ValueError("int3 found at %x" % i.address)
-        ret.append(b)
-        proceed += len(b)
+        if not out_of_code:
+            if i.mnemonic == 'int3':
+                out_of_code = True
+        else:
+            if i.mnemonic != 'int3':
+                raise ValueError(f'Code at {a + proceed:#x} cross to another function')
+        ret.append(i)
+        proceed += i.size
     return ret, proceed
 
 
@@ -44,10 +48,12 @@ def create_inline_hook(p: 'Process', a, hook_bytes, entrance_offset=0, skip_orig
 
     return_at = a + len(jump_code)
     hook_bytes_ = hook_bytes
-    hook_bytes_ += b''.join(orig_codes[skip_original:])
+    for i in orig_codes[skip_original:]:
+        # todo: rebuild relative address
+        hook_bytes_ += i.bytes
     hook_bytes_ += b'\xff\x25\x00\x00\x00\x00' + struct.pack('<Q', return_at)  # jmp qword ptr [rip];dq return_at
     p.write(alloc, b'\0' * entrance_offset + hook_bytes_)
-    return alloc, jump_code, b''.join(orig_codes)
+    return alloc, jump_code, b''.join(i.bytes for i in orig_codes)
 
 
 def inline_hook(p: 'Process', a, hook_bytes, entrance_offset=0, skip_original=0):
