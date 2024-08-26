@@ -1,3 +1,6 @@
+from ..utils.pip import required
+required('setuptools', 'keystone-engine', 'capstone')
+
 import re
 import struct
 import typing
