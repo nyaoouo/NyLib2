@@ -29,7 +29,7 @@ class Process:
     def alloc(self, size: int, protect=0x40, address=0):
         return winapi.VirtualAllocEx(self.handle, address, size, 0x1000 | 0x2000, protect)  # MEM_COMMIT|MEM_RESERVE
 
-    def free(self, address: int, size: int):
+    def free(self, address: int, size: int = 0):
         return winapi.VirtualFreeEx(self.handle, address, size, 0x4000)  # MEM_DECOMMIT
 
     def virtual_query(self, address: int):
