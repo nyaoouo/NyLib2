@@ -4,6 +4,7 @@ this module allow to use custom native accessors, so it can be used to access me
 """
 
 import ctypes
+import functools
 import operator
 import struct
 import typing
@@ -14,9 +15,21 @@ from ..utils import mv_from_mem
 
 _T = typing.TypeVar("_T")
 struct_u64 = struct.Struct("Q")
+struct_ptr = struct_u64
 
 
-class CData:
+def size_padded(size: int, pad_size: int) -> int:
+    if pad_size < 2: return size
+    v = pad_size - 1
+    return (size + v) & ~v
+
+
+class CDataMeta(type):
+    def __mul__(cls: typing.Type[_T], n: int) -> 'typing.Type[Array[_T]]':
+        return Array[cls, n]
+
+
+class CData(metaclass=CDataMeta):
     _accessor_: 'CAccessor'
     _address_: int
     _size_: int
@@ -37,6 +50,27 @@ class CData:
             self._is_self_allocated_ = True
         else:
             raise ValueError("Can't self handle")
+
+
+def check_finalize(t: typing.Type[CData] | CData):
+    if not isinstance(t, type):
+        t = type(t)
+    if isinstance(t, Struct):
+        if not hasattr(t, "_fields_"):
+            finalize_struct(t)
+
+
+def sizeof(t: typing.Type[CData] | CData) -> int:
+    check_finalize(t)
+    return t._size_
+
+
+def padsizeof(t: typing.Type[CData] | CData) -> int:
+    check_finalize(t)
+    return t._pad_size_
+
+
+_CData_T = typing.TypeVar("_CData_T", bound=CData)
 
 
 class SimpleCData(CData, typing.Generic[_T]):
@@ -65,7 +99,7 @@ class SimpleCData(CData, typing.Generic[_T]):
             pass
         else:
             if isinstance(value, SimpleCData): value = value.value
-            value = struct.pack(self._struct_, value)
+            value = self._struct_.pack(value)
         self._accessor_.write(self._address_, value)
 
     def _op_(self, other, op):
@@ -172,6 +206,131 @@ c_char = c_int8
 c_uchar = c_uint8
 c_wchar = c_uint16
 c_void_p = c_uint64
+
+
+class Pointer(CData, typing.Generic[_CData_T]):
+    _pad_size_ = _size_ = c_size_t._size_
+    _type_: typing.Type[_CData_T]
+    _can_self_handle_ = True
+
+    def __init__(self, value=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if value: self.value = value
+
+    @property
+    def value(self) -> _CData_T:
+        return struct_ptr.unpack(self._accessor_.read(self._address_, struct_ptr.size))[0]
+
+    @value.setter
+    def value(self, value: _CData_T):
+        if isinstance(value, bytes):
+            pass
+        else:
+            if isinstance(value, SimpleCData): value = value.value
+            value = struct_ptr.pack(value)
+        self._accessor_.write(self._address_, value)
+
+    @property
+    def content(self) -> _CData_T:
+        return self[0]
+
+    @functools.cached_property
+    def element_size_padded(self) -> int:
+        return size_padded(sizeof(self._type_), padsizeof(self._type_))
+
+    def __getitem__(self, item: int) -> _CData_T:
+        return self._type_(_address_=self.value + item * self.element_size_padded, _accessor_=self._accessor_)
+
+    def __class_getitem__(cls, t: typing.Type[_CData_T]) -> 'Pointer[_CData_T]':
+        return type(f'p_{t.__name__}', (cls,), {"_type_": t})
+
+
+class Array(CData, typing.Generic[_CData_T]):
+    _type_: typing.Type[_CData_T]
+    _length_: int
+
+    def __getitem__(self, item: int) -> _CData_T:
+        if self._length_ >= 0 and item >= self._length_: raise IndexError
+        return self._type_(_address_=self._address_ + item * self.element_size_padded, _accessor_=self._accessor_)
+
+    def __iter__(self) -> typing.Iterator[_CData_T]:
+        ptr = self._address_
+        ps = self.element_size_padded
+        if self._length_ < 0:
+            while True:
+                yield self._type_(_address_=ptr, _accessor_=self._accessor_)
+                ptr += ps
+        else:
+            for _ in range(self._length_):
+                yield self._type_(_address_=ptr, _accessor_=self._accessor_)
+                ptr += ps
+
+    @functools.cached_property
+    def element_size_padded(self) -> int:
+        return size_padded(sizeof(self._type_), padsizeof(self._type_))
+
+    def __class_getitem__(cls, t: typing.Type[_CData_T] | tuple[typing.Type[_CData_T], int]) -> 'typing.Type[Array[_CData_T]]':
+        if isinstance(t, tuple):
+            t, length = t
+            size = size_padded(sizeof(t), padsizeof(t)) * length
+            can_self_handle = t._can_self_handle_
+        else:
+            length = -1
+            size = 0
+            can_self_handle = False
+        return type(f'a_{t.__name__}', (cls,), {
+            "_type_": t,
+            "_length_": length,
+            "_size_": size,
+            "_pad_size_": t._pad_size_,
+            "_can_self_handle_": can_self_handle
+        })
+
+
+def finalize_struct(cls):
+    size = 0
+    fields = []
+    pad_size = 1
+    for name, t in cls.__dict__.items():
+        if isinstance(t, Field):
+            assert not hasattr(t, "name"), "Field name is reserved"
+            t.name = name
+            if t.offset < 0:
+                t.offset = size = size_padded(size, padsizeof(t.t))
+                size += sizeof(t.t)
+            else:
+                size = max(t.offset + sizeof(t.t), size)
+            pad_size = max(pad_size, padsizeof(t.t))
+            fields.append(t)
+
+    cls._fields_ = fields
+    cls._size_ = size
+    cls._pad_size_ = pad_size
+
+
+class Struct(CData):
+    _fields_: 'list[Field]'
+    _can_self_handle_ = True
+
+
+class Field(typing.Generic[_T]):
+    name: str
+
+    def __init__(self, t: typing.Type[_T], offset: int = -1):
+        self.t = t
+        self.offset = offset
+
+    def __get__(self, instance: Struct, owner) -> _T:
+        if self.offset < 0: finalize_struct(owner)
+        return self.t(_address_=instance._address_ + self.offset, _accessor_=instance._accessor_)
+
+
+class SField(Field[_T]):
+    def __init__(self, t: typing.Type[SimpleCData[_T]], offset: int = -1):
+        super().__init__(t, offset)
+
+    def __get__(self, instance: Struct, owner) -> _T:
+        return super().__get__(instance, owner).value
 
 
 class FuncDecl:
