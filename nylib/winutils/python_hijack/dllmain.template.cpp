@@ -24,6 +24,9 @@ static WCHAR pyMain[MAX_PATH] = { 0 };
 #define DEFAULT_PYDLL L"/*REPLACE_PY_DLL_HERE*/"
 #define DEFAULT_PYMAIN L"/*REPLACE_PY_MAIN_HERE*/"
 
+extern "C" void __declspec(dllexport) WINAPI __nylib_hijack()
+{
+}
 
 /*REPLACE_DEF_EXPORT_HERE*/
 

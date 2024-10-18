@@ -12,7 +12,7 @@ DLLMAIN_TEMPLATE = '''
 
 
 def iter_pe_exported(pe_path):
-    from ..utils.pip import required
+    from ...utils.pip import required
     required('pefile')
     import pefile
     pe = pefile.PE(pe_path)
@@ -71,20 +71,19 @@ def create_src(pe_path, dst_dir, default_config):
     (dst / 'dllasm.asm').write_text(dllasm_text, 'utf-8')
 
 
-def orig_name(pe_path):
-    return pathlib.Path(pe_path).with_suffix('.pyHijack.dll')
-
-
-def hijack(pe_path, build_dir=None, default_config=None):
-    from ..winutils import msvc, ensure_env
-    from ..process import Process
+def hijack(pe_path, build_dir=None, default_config=None, dst_dir=None):
+    from .. import msvc, ensure_env
+    from ...process import Process
 
     ensure_env.ensure_msvc()
 
-    pe_path = pathlib.Path(pe_path).absolute()
-    default_orig = orig_name(pe_path)
-    if default_orig.exists():
-        raise FileExistsError(f"Original file already exists: {default_orig}")
+    need_move_orig = False
+    orig_path = pe_path = pathlib.Path(pe_path).absolute()
+    dst_dir = pathlib.Path(dst_dir) if dst_dir is not None else pe_path.parent
+    dst_path = dst_dir / pe_path.name
+    if dst_path == orig_path:
+        need_move_orig = True
+        orig_path = orig_path.with_suffix('.pyHijack' + orig_path.suffix)
 
     plat_spec = 'x86_amd64'  # TODO: check
     build_env = msvc.load_vcvarsall(plat_spec)
@@ -93,7 +92,7 @@ def hijack(pe_path, build_dir=None, default_config=None):
     if default_config is None:
         default_config = {}
     default_config = {
-                         'orig': str(default_orig),
+                         'orig': str(orig_path),
                          'create_console': '1',  # empty string to hide console
                          'python_dll': Process.current.get_ldr_data(py_dll).FullDllName.value,
                          'python_main': '.\\main.py',
@@ -118,14 +117,16 @@ def hijack(pe_path, build_dir=None, default_config=None):
             tmp_dir / 'dllmain.cpp', tmp_dir / 'dllasm.obj',
             '/link', '/DLL', '/OUT:' + str(tmp_dir / 'hijacked.dll')
         ], cwd=tmp_dir, env=build_env, check=True, shell=True)
-        shutil.copy(pe_path, default_config['orig'])
-        pe_path.unlink()
-        shutil.copy(tmp_dir / 'hijacked.dll', pe_path)
+        if need_move_orig:
+            pe_path.rename(orig_path)
+        # (tmp_dir / 'hijacked.dll').rename(dst_path)
+        with open(dst_path, 'wb') as f:
+            f.write((tmp_dir / 'hijacked.dll').read_bytes())
     finally:
         if build_dir is None:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    cgh_path = pe_path.with_name('pyHijack.ini')
+    cgh_path = dst_path.with_name('pyHijack.ini')
     config = configparser.ConfigParser()
     config['Hijack'] = default_config
     config['Python'] = {
