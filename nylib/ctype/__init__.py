@@ -55,7 +55,7 @@ class CData(metaclass=CDataMeta):
 def check_finalize(t: typing.Type[CData] | CData):
     if not isinstance(t, type):
         t = type(t)
-    if isinstance(t, Struct):
+    if issubclass(t, Struct):
         if not hasattr(t, "_fields_"):
             finalize_struct(t)
 
@@ -317,6 +317,7 @@ class Field(typing.Generic[_T]):
     name: str
 
     def __init__(self, t: typing.Type[_T], offset: int = -1):
+        assert issubclass(t, CData), "Field type must be subclass of CData"
         self.t = t
         self.offset = offset
 
@@ -327,10 +328,14 @@ class Field(typing.Generic[_T]):
 
 class SField(Field[_T]):
     def __init__(self, t: typing.Type[SimpleCData[_T]], offset: int = -1):
+        assert issubclass(t, SimpleCData), "Field type must be subclass of SimpleCData"
         super().__init__(t, offset)
 
     def __get__(self, instance: Struct, owner) -> _T:
         return super().__get__(instance, owner).value
+
+    def __set__(self, instance: Struct, value: _T):
+        super().__get__(instance, instance.__class__).value = value
 
 
 class FuncDecl:
