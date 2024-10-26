@@ -5,7 +5,7 @@ import struct
 import typing
 from .namespace import Namespace
 from ..pattern import CachedRawMemoryPatternScanner, StaticPatternSearcher
-
+from .. import ctype as m_ctype
 from .. import winapi, winutils
 
 _T = typing.TypeVar('_T')
@@ -19,6 +19,7 @@ class Process:
         self.handle = winapi.OpenProcess(da, False, process_id) if handle is None else handle
         self._cached_scanners = {}
         self._ldr_cache = {}
+        self.ctype_accessor = m_ctype.CAccessorProcess(self)
 
     @classmethod
     def from_name(cls, name: str | bytes):
@@ -63,8 +64,11 @@ class Process:
             except WindowsError as e:
                 if e.winerror != 299: raise
             return bytes(value)
+        if issubclass(type_, m_ctype.CData):
+            return type_(_accessor_=self.ctype_accessor, _address_=address)
         value = type_()
-        winapi.ReadProcessMemory(self.handle, address, ctypes.byref(value), ctypes.sizeof(value), None)
+        success_size = ctypes.c_size_t()
+        winapi.ReadProcessMemory(self.handle, address, ctypes.byref(value), ctypes.sizeof(value), ctypes.byref(success_size))
         return value
 
     def write(self, address, value):
@@ -188,11 +192,19 @@ class Process:
         if isinstance(value, str): value = value.encode(encoding)
         return self.write(address, value)
 
+    @property
+    def process_basic_information(self):
+        if not hasattr(self, '_process_basic_information'):
+            self._process_basic_information = winapi.PROCESS_BASIC_INFORMATION()
+        winapi.NtQueryInformationProcess(self.handle, 0, ctypes.byref(self._process_basic_information), ctypes.sizeof(self._process_basic_information), None)
+        return self._process_basic_information
+
+    @property
+    def peb(self):
+        return self.read(self.process_basic_information.PebBaseAddress, winapi.PEB)
+
     def enum_ldr_data(self):
-        pbi = winapi.PROCESS_BASIC_INFORMATION()
-        winapi.NtQueryInformationProcess(self.handle, 0, ctypes.byref(pbi), ctypes.sizeof(pbi), None)
-        peb = self.read(pbi.PebBaseAddress, winapi.PEB)
-        ldr = self.read(peb.Ldr, winapi.PEB_LDR_DATA)
+        ldr = self.read(self.peb.Ldr, winapi.PEB_LDR_DATA)
         p_data = p_end = ldr.InMemoryOrderModuleList.Flink
         offset = winapi.LDR_DATA_TABLE_ENTRY.InMemoryOrderLinks.offset
         while True:
@@ -294,7 +306,7 @@ class Process:
         if block: winapi.WaitForSingleObject(thread_h, -1)
         return thread_h
 
-    def call(self, func_ptr, *args: int | float | bytes | bool, push_stack_depth=0x28, block=True):
+    def call(self, func_ptr, *args: int | float | bytes | bool, push_stack_depth=0x28, block=True, read_xmm=False, get_bytes=False):
         _MOV_RBX = b'\x48\xBB'  # MOV rbx, n
         _INT_ARG = (
             b'\x48\xB9',  # MOV rcx, n
@@ -332,18 +344,24 @@ class Process:
                 else:
                     raise TypeError(f'not support arg type {type(a)} at pos {i}')
             shell += (
-                    b"\x48\xBB" + struct.pack('q', func_ptr) +  # MOV rbx, func_ptr
-                    b"\xFF\xD3"  # CALL rbx
-                    b"\x48\xBB" + struct.pack('q', return_address) +  # MOV rbx, return_address
-                    b"\x48\x89\x03"  # MOV [rbx], rax
-                    b"\x5B"  # POP rbx
-                    b"\x48\x83\xc4" + struct.pack('B', push_stack_depth) +  # ADD rsp, 0x28
-                    b"\x48\x89\xEC"  # MOV rsp, rbp
-                    b"\x5D"  # POP rbp
-                    b"\xC3"  # RET
-            )
+                             b"\x48\xBB" + struct.pack('q', func_ptr) +  # MOV rbx, func_ptr
+                             b"\xFF\xD3"  # CALL rbx
+                             b"\x48\xBB" + struct.pack('q', return_address)  # MOV rbx, return_address
+                     ) + (
+                         b"\xf2\x0f\x11\x03"  # MOVSD [rbx], xmm0
+                         if read_xmm else
+                         b"\x48\x89\x03"  # MOV [rbx], rax
+                     ) + (
+                             b"\x5B"  # POP rbx
+                             b"\x48\x83\xc4" + struct.pack('B', push_stack_depth) +  # ADD rsp, 0x28
+                             b"\x48\x89\xEC"  # MOV rsp, rbp
+                             b"\x5D"  # POP rbp
+                             b"\xC3"  # RET
+                     )
             code_address = name_space.store(shell)
             self._call(code_address, block=block)
+            if get_bytes:
+                return self.read(return_address, 8)
             return self.read_u64(return_address)
 
 
