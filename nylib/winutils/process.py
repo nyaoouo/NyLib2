@@ -1,5 +1,6 @@
 import ctypes
 import sys
+import shlex
 
 from .. import winapi
 
@@ -46,3 +47,47 @@ def enable_privilege():
         tkp.count = 1
         tkp.Privileges[0].Attributes = 2
         winapi.AdjustTokenPrivileges(hProcess, 0, ctypes.byref(tkp), 0, None, None)
+
+
+class create_suspend_process:
+    def __init__(self, cmd, **kwargs):
+        if isinstance(cmd, (list, tuple)):
+            cmd = shlex.join(cmd)
+        if isinstance(cmd, str):
+            cmd = cmd.encode(winapi.DEFAULT_ENCODING)
+        assert isinstance(cmd, bytes), type(cmd)
+        self.cmd = cmd
+        self.process_information = None
+        self.startup_info = winapi.STARTUPINFOA(**kwargs)
+
+    def start(self):
+        assert not self.process_information, "Process already started"
+        self.process_information = winapi.PROCESS_INFORMATION()
+        winapi.CreateProcessA(
+            None, self.cmd,
+            None, None, 0,
+            4 | 8,  # CREATE_SUSPENDED | DETACHED_PROCESS
+            None, None,
+            ctypes.byref(self.startup_info), ctypes.byref(self.process_information)
+        )
+        return self
+
+    def resume(self):
+        assert self.process_information, "Process not started"
+        winapi.ResumeThread(self.process_information.hThread)
+
+    def wait(self):
+        assert self.process_information, "Process not started"
+        winapi.WaitForSingleObject(self.process_information.hProcess, -1)
+
+    def __del__(self):
+        if self.process_information:
+            winapi.CloseHandle(self.process_information.hProcess)
+            winapi.CloseHandle(self.process_information.hThread)
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # self.wait()
+        self.resume()

@@ -172,6 +172,7 @@ class OVERLAPPED(ctypes.Structure):
         ("hEvent", ctypes.c_void_p)
     ]
 
+
 class ProcessEntry32(ctypes.Structure):
     _fields_ = [
         ('dwSize', ctypes.c_ulong),
@@ -184,4 +185,40 @@ class ProcessEntry32(ctypes.Structure):
         ('pcPriClassBase', ctypes.c_ulong),
         ('dwFlags', ctypes.c_ulong),
         ('szExeFile', ctypes.c_char * ctypes.wintypes.MAX_PATH)
+    ]
+
+
+class STARTUPINFOA(ctypes.Structure):
+    _fields_ = [
+        ('cb', ctypes.c_ulong),
+        ('lpReserved', ctypes.c_char_p),
+        ('lpDesktop', ctypes.c_char_p),
+        ('lpTitle', ctypes.c_char_p),
+        ('dwX', ctypes.c_ulong),
+        ('dwY', ctypes.c_ulong),
+        ('dwXSize', ctypes.c_ulong),
+        ('dwYSize', ctypes.c_ulong),
+        ('dwXCountChars', ctypes.c_ulong),
+        ('dwYCountChars', ctypes.c_ulong),
+        ('dwFillAttribute', ctypes.c_ulong),
+        ('dwFlags', ctypes.c_ulong),
+        ('wShowWindow', ctypes.wintypes.WORD),
+        ('cbReserved2', ctypes.wintypes.WORD),
+        ('lpReserved2', ctypes.c_char_p),
+        ('hStdInput', ctypes.c_void_p),
+        ('hStdOutput', ctypes.c_void_p),
+        ('hStdError', ctypes.c_void_p),
+    ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.cb = ctypes.sizeof(self)
+
+
+class PROCESS_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ('hProcess', ctypes.c_void_p),
+        ('hThread', ctypes.c_void_p),
+        ('dwProcessId', ctypes.c_ulong),
+        ('dwThreadId', ctypes.c_ulong),
     ]
