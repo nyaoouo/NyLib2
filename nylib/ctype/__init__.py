@@ -13,6 +13,9 @@ from .memory_manage import MemoryManager
 from .. import winapi
 from ..utils import mv_from_mem
 
+if typing.TYPE_CHECKING:
+    from ..process import Process
+
 _T = typing.TypeVar("_T")
 struct_u64 = struct.Struct("Q")
 struct_ptr = struct_u64
@@ -41,10 +44,10 @@ class CData(metaclass=CDataMeta):
         if self._is_self_allocated_:
             self._accessor_.free(self._address_)
 
-    def __init__(self, *args, **kwargs):
-        self._accessor_ = kwargs["_accessor_"] if "_accessor_" in kwargs else CAccessorLocal.get_instance()
-        if "_address_" in kwargs:
-            self._address_ = kwargs["_address_"]
+    def __init__(self, *args, _address_=None, _accessor_=None, **kwargs):
+        self._accessor_ = _accessor_ or CAccessorLocal.get_instance()
+        if _address_ is not None:
+            self._address_ = _address_
         elif self._can_self_handle_:
             self._address_ = self._accessor_.alloc(self._size_)
             self._is_self_allocated_ = True
@@ -75,12 +78,13 @@ _CData_T = typing.TypeVar("_CData_T", bound=CData)
 
 class SimpleCData(CData, typing.Generic[_T]):
     _can_self_handle_ = True
-    _struct_: str | struct.Struct
+    _struct_: struct.Struct
+    _struct__: str
     _ctype_: typing.Type
     _is_xmm_: bool = False
 
     def __init_subclass__(cls, **kwargs):
-        if isinstance(s := getattr(cls, "_struct_", None), str):
+        if s := getattr(cls, "_struct__", None):
             cls._struct_ = struct.Struct(s)
         if getattr(cls, "_struct_", None):
             cls._pad_size_ = cls._size_ = cls._struct_.size
@@ -142,55 +146,139 @@ class SimpleCData(CData, typing.Generic[_T]):
 
 
 class c_uint8(SimpleCData[int]):
-    _struct_ = "B"
+    _struct__ = "B"
     _ctype_ = ctypes.c_uint8
 
 
 class c_uint16(SimpleCData[int]):
-    _struct_ = "H"
+    _struct__ = "H"
     _ctype_ = ctypes.c_uint16
 
 
 class c_uint32(SimpleCData[int]):
-    _struct_ = "I"
+    _struct__ = "I"
     _ctype_ = ctypes.c_uint32
 
 
 class c_uint64(SimpleCData[int]):
-    _struct_ = "Q"
+    _struct__ = "Q"
     _ctype_ = ctypes.c_uint64
 
 
 class c_int8(SimpleCData[int]):
-    _struct_ = "b"
+    _struct__ = "b"
     _ctype_ = ctypes.c_int8
 
 
 class c_int16(SimpleCData[int]):
-    _struct_ = "h"
+    _struct__ = "h"
     _ctype_ = ctypes.c_int16
 
 
 class c_int32(SimpleCData[int]):
-    _struct_ = "i"
+    _struct__ = "i"
     _ctype_ = ctypes.c_int32
 
 
 class c_int64(SimpleCData[int]):
-    _struct_ = "q"
+    _struct__ = "q"
     _ctype_ = ctypes.c_int64
 
 
 class c_float(SimpleCData[float]):
-    _struct_ = "f"
+    _struct__ = "f"
     _ctype_ = ctypes.c_float
     _is_xmm_ = True
 
 
 class c_double(SimpleCData[float]):
-    _struct_ = "d"
+    _struct__ = "d"
     _ctype_ = ctypes.c_double
     _is_xmm_ = True
+
+
+class c_char(SimpleCData[bytes]):
+    _pad_size_ = _size_ = 1
+
+    def __class_getitem__(cls, size: int):
+        return type(f'c_char_{size}', (c_char,), {"_size_": size})
+
+    @property
+    def value(self) -> bytes:
+        return self._accessor_.read(self._address_, self._size_)
+
+    @value.setter
+    def value(self, value: bytes):
+        if len(value) >= self._size_:
+            value = value[:self._size_]
+        self._accessor_.write(self._address_, value)
+
+
+class c_char_zt(SimpleCData[bytes]):
+    _pad_size_ = _size_ = 1
+
+    def __class_getitem__(cls, size: int):
+        return type(f'c_char_zt_{size}', (c_char_zt,), {"_size_": size})
+
+    @property
+    def value(self) -> bytes:
+        res = self._accessor_.read(self._address_, self._size_)
+        if (i := res.find(0)) >= 0:
+            res = res[:i]
+        return res
+
+    @value.setter
+    def value(self, value: bytes):
+        if len(value) >= self._size_:
+            value = value[:self._size_]
+        self._accessor_.write(self._address_, value)
+
+
+class c_wchar(SimpleCData[str]):
+    encoding = "utf-16-le"
+    _pad_size_ = _size_ = 2
+
+    def __class_getitem__(cls, item: int | tuple[int, str]):
+        if isinstance(item, tuple):
+            size, encoding = item
+            return type(f'c_wchar_{size}', (c_wchar,), {"_size_": size, "encoding": encoding})
+        return type(f'c_wchar_{item}', (c_wchar,), {"_size_": item})
+
+    @property
+    def value(self) -> str:
+        return self._accessor_.read(self._address_, self._size_).decode(self.encoding)
+
+    @value.setter
+    def value(self, value: str):
+        if len(value) >= self._size_:
+            value = value[:self._size_]
+        self._accessor_.write(self._address_, value.encode(self.encoding))
+
+
+class c_wchar_zt(SimpleCData[str]):
+    encoding = "utf-16-le"
+    _pad_size_ = _size_ = 2
+
+    def __class_getitem__(cls, item: int | tuple[int, str]):
+        if isinstance(item, tuple):
+            size, encoding = item
+            return type(f'c_wchar_zt_{size}', (c_wchar_zt,), {"_size_": size, "encoding": encoding})
+        return type(f'c_wchar_zt_{item}', (c_wchar_zt,), {"_size_": item})
+
+    @property
+    def value(self) -> str:
+        res = self._accessor_.read(self._address_, self._size_)
+        for i in range(0, len(res), 2):
+            if res[i:i + 2] == b"\x00\x00":
+                res = res[:i]
+                break
+        return res.decode(self.encoding)
+
+    @value.setter
+    def value(self, value: str):
+        if len(value) >= self._size_:
+            value = value[:self._size_]
+        self._accessor_.write(self._address_, value.encode(self.encoding))
 
 
 c_size_t = c_uint64
@@ -202,9 +290,6 @@ c_int = c_int32
 c_uint = c_uint32
 c_short = c_int16
 c_ushort = c_uint16
-c_char = c_int8
-c_uchar = c_uint8
-c_wchar = c_uint16
 c_void_p = c_uint64
 
 
@@ -291,6 +376,7 @@ def finalize_struct(cls):
     size = 0
     fields = []
     pad_size = 1
+    bit_offset = 0
     for name, t in cls.__dict__.items():
         if isinstance(t, Field):
             assert not hasattr(t, "name"), "Field name is reserved"
@@ -304,7 +390,7 @@ def finalize_struct(cls):
             fields.append(t)
 
     cls._fields_ = fields
-    cls._size_ = size
+    cls._size_ = max(size, getattr(cls, "_size_", 0))
     cls._pad_size_ = pad_size
 
 
@@ -336,6 +422,26 @@ class SField(Field[_T]):
 
     def __set__(self, instance: Struct, value: _T):
         super().__get__(instance, instance.__class__).value = value
+
+
+class BField(Field[int]):
+    rev_mask: int = -1  # fill when finalize ~(self.bit_mask << self.bit_offset)
+
+    def __init__(self, t: typing.Type[SimpleCData[int]], bit_size: int = 1, offset: int = -1, bit_offset: int = -1):
+        assert issubclass(t, SimpleCData), "Field type must be subclass of SimpleCData"
+        super().__init__(t, offset)
+        self.bit_size = bit_size
+        self.bit_offset = bit_offset
+        self.bit_mask = (1 << bit_size) - 1
+
+    def __get__(self, instance: Struct, owner) -> int:
+        if self.bit_offset < 0: finalize_struct(owner)
+        return (super().__get__(instance, owner).value >> self.bit_offset) & self.bit_mask
+
+    def __set__(self, instance: Struct, value: int):
+        if self.bit_offset < 0 or self.bit_size < 0: finalize_struct(instance.__class__)
+        _value = super().__get__(instance, instance.__class__)
+        _value.value = (_value.value & self.rev_mask) | ((value & self.bit_mask) << self.bit_offset)
 
 
 class FuncDecl:
@@ -471,7 +577,7 @@ class CAccessorLocal(CAccessor):
         key = id(func_decl_t)
         if not (ptr := self._shells.get(key)):
             shell = func_decl_t.shell
-            self._shells[key] = ptr = self.alloc_exec(len(shell))
+            self._shells[key] = ptr = self.shell_buffer.alloc(len(shell))
             self.write(ptr, shell)
 
         res_t = func_decl.restype
@@ -502,3 +608,47 @@ class CAccessorLocal(CAccessor):
     def free_exec(self, address: int):
         del self._alloc_exec[address]
         winapi.VirtualFreeEx(-1, address, 0, 0x8000)
+
+
+class CAccessorProcess(CAccessor):
+    def __init__(self, process: 'Process'):
+        self.process = process
+        self._shells = {}
+        self.shell_buffer = MemoryManager(self.alloc_exec, self.free_exec)
+
+    def read(self, address: int, size: int) -> bytes:
+        return self.process.read(address, size)
+
+    def write(self, address: int, value: bytes):
+        self.process.write(address, value)
+
+    def call(self, func_decl: FuncDecl, address: int, *args):
+        func_decl_t = type(func_decl)
+        key = id(func_decl_t)
+        if not (ptr := self._shells.get(key)):
+            shell = func_decl_t.shell
+            self._shells[key] = ptr = self.shell_buffer.alloc(len(shell))
+            self.write(ptr, shell)
+
+        param = func_decl.make_param(address, *args)
+        self.write(buf := self.alloc(len(param)), param)
+
+        res_t = func_decl.restype
+        res_is_xmm = res_t is c_float or res_t is c_double
+        # TODO: use better shell
+        res = self.process.call(ptr, buf, read_xmm=res_is_xmm, get_bytes=True)
+        if issubclass(res_t, SimpleCData):
+            return res_t._struct_.unpack_from(res)[0]
+        return res_t(_address_=res, _accessor_=self)
+
+    def alloc(self, size: int) -> int:
+        return self.process.alloc(size, protect=0x04)
+
+    def free(self, address: int):
+        self.process.free(address)
+
+    def alloc_exec(self, size: int) -> int:
+        return self.process.alloc(size, protect=0x40)
+
+    def free_exec(self, address: int):
+        self.process.free(address)
