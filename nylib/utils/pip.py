@@ -1,4 +1,5 @@
 import logging
+import os
 import socket
 import urllib.request
 import urllib.error
@@ -126,15 +127,17 @@ def is_installed(*_a):
         if required == 0: return True
     return False
 
-
-def required(*_a):
-    """
-    This function checks if the specified packages are installed.
-    If not, it installs them.
-    Use arguments same as `pip install`.
-    :param _a:
-    :return: True if all packages are installed.
-    """
-    if not is_installed(*_a):
-        return install(*_a)
-    return True
+if os.environ.get('PYTHON_PIP_ALL_REQ_INSTALLED'):
+    required = lambda *_a: True
+else:
+    def required(*_a):
+        """
+        This function checks if the specified packages are installed.
+        If not, it installs them.
+        Use arguments same as `pip install`.
+        :param _a:
+        :return: True if all packages are installed.
+        """
+        if not is_installed(*_a):
+            return install(*_a)
+        return True

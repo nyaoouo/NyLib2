@@ -203,6 +203,10 @@ class Process:
     def peb(self):
         return self.read(self.process_basic_information.PebBaseAddress, winapi.PEB)
 
+    @property
+    def process_parameters(self):
+        return self.read(self.peb.ProcessParameters, winapi.RTL_USER_PROCESS_PARAMETERS)
+
     def enum_ldr_data(self):
         ldr = self.read(self.peb.Ldr, winapi.PEB_LDR_DATA)
         p_data = p_end = ldr.InMemoryOrderModuleList.Flink

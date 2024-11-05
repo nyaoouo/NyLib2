@@ -159,7 +159,33 @@ class PEB(ctypes.Structure):
         ("Mutant", ctypes.c_void_p),
         ("ImageBaseAddress", ctypes.c_void_p),
         ("Ldr", ctypes.c_void_p),
-        # ...
+        ("ProcessParameters", ctypes.c_void_p),
+    ]
+
+
+class CURDIR(ctypes.Structure):
+    _fields_ = [
+        ("DosPath", UNICODE_STRING),
+        ("Handle", ctypes.c_void_p),
+    ]
+
+
+class RTL_USER_PROCESS_PARAMETERS(ctypes.Structure):
+    _fields_ = [
+        ("MaximumLength", ctypes.c_ulong),
+        ("Length", ctypes.c_ulong),
+        ("Flags", ctypes.c_ulong),
+        ("DebugFlags", ctypes.c_ulong),
+        ("ConsoleHandle", ctypes.c_void_p),
+        ("ConsoleFlags", ctypes.c_ulong),
+        ("StandardInput", ctypes.c_void_p),
+        ("StandardOutput", ctypes.c_void_p),
+        ("StandardError", ctypes.c_void_p),
+        ("CurrentDirectory", CURDIR),
+        ("DllPath", UNICODE_STRING),
+        ("ImagePathName", UNICODE_STRING),
+        ("CommandLine", UNICODE_STRING),
+        ("Environment", ctypes.c_void_p),
     ]
 
 
