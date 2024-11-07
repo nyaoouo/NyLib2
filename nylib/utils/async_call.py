@@ -10,7 +10,7 @@ class AsyncCallManager:
         def __init__(self, func, args, kwargs, start=True):
             self.result = _NONE
             self.error = _NONE
-            self.thread = threading.Thread(target=self._run, args=(func, args, kwargs))
+            self.thread = threading.Thread(target=self._run, args=(func, args, kwargs), daemon=True)
             self.event = threading.Event()
             if start:
                 self.thread.start()
@@ -58,3 +58,8 @@ class AsyncCallManager:
         if not self.is_done(call_id):
             raise RuntimeError(f"call {call_id} is not done")
         return self.calls.pop(call_id).wait(0)
+
+    def terminate(self, call_id):
+        if call_id in self.calls:
+            self.calls[call_id].terminate()
+            self.calls.pop(call_id)
