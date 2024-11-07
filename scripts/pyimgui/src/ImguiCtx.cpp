@@ -153,6 +153,11 @@ START_IMGUI_CTX_NAMESPACE
                  igPushItemWidth(item_width);
                  PyCtxWrapper res = {py::none(), igPopItemWidth};
                  return res; }, py::arg("item_width"), py::return_value_policy::move);
+        m.def("PushItemFlag", [](ImGuiItemFlags option,bool enabled)
+                {
+                 igPushItemFlag(option,enabled);
+                 PyCtxWrapper res = {py::none(), igPopItemFlag};
+                 return res; }, py::arg("option"), py::arg("enabled"), py::return_value_policy::move);
         m.def("PushTextWrapPos", [](float wrap_local_pos_x)
                 {
                  igPushTextWrapPos(wrap_local_pos_x);
