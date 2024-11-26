@@ -55,6 +55,22 @@ class CData(metaclass=CDataMeta):
             raise ValueError("Can't self handle")
 
 
+_CData_T = typing.TypeVar("_CData_T", bound=CData)
+
+
+def cdata_from_buffer_copy(buf: bytes, t: typing.Type[_CData_T], _accessor_: 'CAccessor' = None) -> _CData_T:
+    obj = t(_accessor_=_accessor_)
+    obj._accessor_.write(obj._address_, buf)
+    return obj
+
+
+def cdata_from_buffer(buf: bytearray, t: typing.Type[_CData_T]) -> _CData_T:
+    buf_ = (ctypes.c_char * len(buf)).from_buffer(buf)
+    obj = t(_address_=ctypes.addressof(buf_), _accessor_=CAccessorLocal.get_instance())
+    obj._raw_buf_ = buf_
+    return obj
+
+
 def check_finalize(t: typing.Type[CData] | CData):
     if not isinstance(t, type):
         t = type(t)
@@ -71,9 +87,6 @@ def sizeof(t: typing.Type[CData] | CData) -> int:
 def padsizeof(t: typing.Type[CData] | CData) -> int:
     check_finalize(t)
     return t._pad_size_
-
-
-_CData_T = typing.TypeVar("_CData_T", bound=CData)
 
 
 class SimpleCData(CData, typing.Generic[_T]):
@@ -373,21 +386,58 @@ class Array(CData, typing.Generic[_CData_T]):
 
 
 def finalize_struct(cls):
-    size = 0
     fields = []
-    pad_size = 1
-    bit_offset = 0
+
     for name, t in cls.__dict__.items():
         if isinstance(t, Field):
             assert not hasattr(t, "name"), "Field name is reserved"
             t.name = name
-            if t.offset < 0:
-                t.offset = size = size_padded(size, padsizeof(t.t))
-                size += sizeof(t.t)
-            else:
-                size = max(t.offset + sizeof(t.t), size)
-            pad_size = max(pad_size, padsizeof(t.t))
             fields.append(t)
+
+    size = 0
+    pad_size = 1
+    i = 0
+    while i < len(fields):
+        field = fields[i]
+        field_size = sizeof(field.t)
+        if field.offset < 0:
+            field.offset = size = size_padded(size, padsizeof(field.t))
+            size += field_size
+        else:
+            size = max(field.offset + field_size, size)
+        pad_size = max(pad_size, padsizeof(field.t))
+        i += 1
+        if isinstance(field, BField):
+            bit_max = field_size * 8
+            if field.bit_offset < 0:
+                field.bit_offset = 0
+            bit_cur = field.bit_offset + field.bit_size
+            while i < len(fields):
+                next_field = fields[i]
+                if not isinstance(next_field, BField): break
+                if next_field.t != field.t: break
+                if next_field.offset > field.offset:
+                    break
+                elif next_field.offset < 0:
+                    if next_field.bit_offset < 0:
+                        if bit_cur + next_field.bit_size > bit_max: break
+                        next_field.bit_offset = bit_cur
+                    else:
+                        if next_field.bit_offset > next_field.bit_offset: break
+                    next_field.offset = field.offset
+                elif next_field.offset < field.offset:
+                    assert next_field.bit_offset >= 0, "Bit offset must be set for backward bit field"
+                    break
+                else:  # next_field.offset == field.offset
+                    if next_field.bit_offset < 0:
+                        if bit_cur + next_field.bit_size > bit_max:
+                            raise ValueError("Bit field overflow")
+                        next_field.bit_offset = bit_cur
+                    else:
+                        if next_field.bit_offset > next_field.bit_offset:
+                            raise ValueError("Bit field overflow")
+                bit_cur = max(bit_cur, next_field.bit_offset + next_field.bit_size)
+                i += 1
 
     cls._fields_ = fields
     cls._size_ = max(size, getattr(cls, "_size_", 0))
