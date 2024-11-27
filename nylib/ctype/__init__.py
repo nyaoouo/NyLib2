@@ -64,9 +64,9 @@ def cdata_from_buffer_copy(buf: bytes, t: typing.Type[_CData_T], _accessor_: 'CA
     return obj
 
 
-def cdata_from_buffer(buf: bytearray, t: typing.Type[_CData_T]) -> _CData_T:
+def cdata_from_buffer(buf: bytearray, t: typing.Type[_CData_T], offset=0) -> _CData_T:
     buf_ = (ctypes.c_char * len(buf)).from_buffer(buf)
-    obj = t(_address_=ctypes.addressof(buf_), _accessor_=CAccessorLocal.get_instance())
+    obj = t(_address_=ctypes.addressof(buf_) + offset, _accessor_=CAccessorLocal.get_instance())
     obj._raw_buf_ = buf_
     return obj
 
