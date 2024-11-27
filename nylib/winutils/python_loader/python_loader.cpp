@@ -71,10 +71,9 @@ void __LoadPython()
     }
     {
         AllocConsole();
-        FILE* fp;
-        freopen_s(&fp, "CONOUT$", "w", stdout);
-        freopen_s(&fp, "CONOUT$", "w", stderr);
-        freopen_s(&fp, "CONIN$", "r", stdin);
+        freopen("CONOUT$", "w", stdout);
+        freopen("CONOUT$", "w", stderr);
+        freopen("CONIN$", "r", stdin);
     }
     HMODULE hModule = LoadLibraryW(g_cfg->pyDll);
     if (hModule == NULL)

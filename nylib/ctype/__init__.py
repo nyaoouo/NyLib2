@@ -343,6 +343,25 @@ class Pointer(CData, typing.Generic[_CData_T]):
         return type(f'p_{t.__name__}', (cls,), {"_type_": t})
 
 
+class c_char_p(Pointer[c_char]):
+    def __init__(self, value=None, *args, **kwargs):
+        if value is not None:
+            if isinstance(value, str):
+                value = value.encode("utf-8") + b"\x00"
+            elif isinstance(value, bytes):
+                if value[-1] != 0: value += b"\x00"
+            else:
+                raise ValueError("Value must be bytes or str")
+        super().__init__(None, *args, **kwargs)
+        if value is not None:
+            self.value = a = self._accessor_.alloc(len(value))
+            self._accessor_.write(a, value)
+
+    @property
+    def content(self) -> bytes:
+        return ctypes.string_at(self.value)
+
+
 class Array(CData, typing.Generic[_CData_T]):
     _type_: typing.Type[_CData_T]
     _length_: int
@@ -547,18 +566,41 @@ class FastCall(FuncDecl):
     def make_param(self, address, *args):
         assert len(args) == len(self.argtypes)
         buf = bytearray(0x50 + self.stack_size)
+        data = bytearray()
+        need_fix_ptr = []
         struct_u64.pack_into(buf, 0, address)
         if self.stack_size:
             struct_u64.pack_into(buf, 0x48, self.stack_size)
         for i, (arg, t) in enumerate(zip(args, self.argtypes)):
-            if i < 4:
-                if t._is_xmm_:
-                    t._struct_.pack_into(buf, 0x28 + i * 8, arg)
+            if issubclass(t, SimpleCData):
+                if i < 4:
+                    if t._is_xmm_:
+                        t._struct_.pack_into(buf, 0x28 + i * 8, arg)
+                    else:
+                        t._struct_.pack_into(buf, 0x8 + i * 8, arg)
                 else:
-                    t._struct_.pack_into(buf, 0x8 + i * 8, arg)
-            else:
-                t._struct_.pack_into(buf, (0x50 - 0x20) + i * 8, arg)
-        return buf
+                    t._struct_.pack_into(buf, (0x50 - 0x20) + i * 8, arg)
+                continue
+            off = 0x8 + i * 8 if i < 4 else (0x50 - 0x20) + i * 8
+            if issubclass(t, c_char_p) and isinstance(arg, (str, bytes)):
+                if isinstance(arg, str):
+                    arg = arg.encode("utf-8") + b"\x00"
+                elif arg[-1] != 0:
+                    arg += b"\x00"
+                struct_u64.pack_into(buf, off, len(buf) + len(data))
+                data += arg
+                need_fix_ptr.append(off)
+            elif issubclass(t, Pointer):
+                if isinstance(arg, Pointer):
+                    struct_u64.pack_into(buf, off, arg.value)
+                elif isinstance(arg, CData):
+                    struct_u64.pack_into(buf, off, arg._address_)
+                elif isinstance(arg, int):
+                    struct_u64.pack_into(buf, off, arg)
+                else:
+                    raise ValueError("Invalid argument")
+
+        return buf + data, need_fix_ptr
 
 
 class CFunction(CData):  # TODO: pointer? or shell?
@@ -620,9 +662,11 @@ class CAccessorLocal(CAccessor):
         mv_from_mem(address, len(value), 0x200)[:] = value
 
     def call(self, func_decl: FuncDecl, address: int, *args):
-        param = func_decl.make_param(address, *args)
+        param, need_fix_ptr = func_decl.make_param(address, *args)
         buf = (ctypes.c_char * len(param)).from_buffer(param)
-
+        a_buf = ctypes.addressof(buf)
+        for off in need_fix_ptr:
+            struct_u64.pack_into(param, off, a_buf + struct_u64.unpack_from(param, off)[0])
         func_decl_t = type(func_decl)
         key = id(func_decl_t)
         if not (ptr := self._shells.get(key)):
@@ -680,13 +724,16 @@ class CAccessorProcess(CAccessor):
             self._shells[key] = ptr = self.shell_buffer.alloc(len(shell))
             self.write(ptr, shell)
 
-        param = func_decl.make_param(address, *args)
-        self.write(buf := self.alloc(len(param)), param)
+        param, need_fix_ptr = func_decl.make_param(address, *args)
+        abuf = self.alloc(len(param))
+        for off in need_fix_ptr:
+            struct_u64.pack_into(param, off, abuf + struct_u64.unpack_from(param, off)[0])
+        self.write(abuf, param)
 
         res_t = func_decl.restype
         res_is_xmm = res_t is c_float or res_t is c_double
         # TODO: use better shell
-        res = self.process.call(ptr, buf, read_xmm=res_is_xmm, get_bytes=True)
+        res = self.process.call(ptr, abuf, read_xmm=res_is_xmm, get_bytes=True)
         if issubclass(res_t, SimpleCData):
             return res_t._struct_.unpack_from(res)[0]
         return res_t(_address_=res, _accessor_=self)
