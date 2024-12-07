@@ -89,7 +89,12 @@ def padsizeof(t: typing.Type[CData] | CData) -> int:
     return t._pad_size_
 
 
-class SimpleCData(CData, typing.Generic[_T]):
+class SimpleCDataMeta(CDataMeta):
+    def __mul__(cls: 'typing.Type[SimpleCData[_T]]', n: int) -> 'typing.Type[SArray[_T]]':
+        return SArray[cls, n]
+
+
+class SimpleCData(CData, typing.Generic[_T], metaclass=SimpleCDataMeta):
     _can_self_handle_ = True
     _struct_: struct.Struct
     _struct__: str
@@ -367,7 +372,7 @@ class Array(CData, typing.Generic[_CData_T]):
     _length_: int
 
     def __getitem__(self, item: int) -> _CData_T:
-        if self._length_ >= 0 and item >= self._length_: raise IndexError
+        if 0 <= self._length_ <= item: raise IndexError
         return self._type_(_address_=self._address_ + item * self.element_size_padded, _accessor_=self._accessor_)
 
     def __iter__(self) -> typing.Iterator[_CData_T]:
@@ -396,6 +401,54 @@ class Array(CData, typing.Generic[_CData_T]):
             size = 0
             can_self_handle = False
         return type(f'a_{t.__name__}', (cls,), {
+            "_type_": t,
+            "_length_": length,
+            "_size_": size,
+            "_pad_size_": t._pad_size_,
+            "_can_self_handle_": can_self_handle
+        })
+
+
+class SArray(CData, typing.Generic[_T]):
+    _type_: typing.Type[SimpleCData[_T]]
+    _length_: int
+
+    def _raw_get(self, item: int) -> SimpleCData[_T]:
+        if 0 <= self._length_ <= item: raise IndexError
+        return self._type_(_address_=self._address_ + item * self.element_size_padded, _accessor_=self._accessor_)
+
+    def __getitem__(self, item: int) -> _T:
+        return self._raw_get(item).value
+
+    def __setitem__(self, item: _T, value):
+        self._raw_get(item).value = value
+
+    def __iter__(self) -> typing.Iterator[_T]:
+        ptr = self._address_
+        ps = self.element_size_padded
+        if self._length_ < 0:
+            while True:
+                yield self._type_(_address_=ptr, _accessor_=self._accessor_).value
+                ptr += ps
+        else:
+            for _ in range(self._length_):
+                yield self._type_(_address_=ptr, _accessor_=self._accessor_).value
+                ptr += ps
+
+    @functools.cached_property
+    def element_size_padded(self) -> int:
+        return size_padded(sizeof(self._type_), padsizeof(self._type_))
+
+    def __class_getitem__(cls, t: typing.Type[SimpleCData[_T]] | tuple[typing.Type[SimpleCData[_T]], int]) -> 'typing.Type[SArray[_T]]':
+        if isinstance(t, tuple):
+            t, length = t
+            size = size_padded(sizeof(t), padsizeof(t)) * length
+            can_self_handle = t._can_self_handle_
+        else:
+            length = -1
+            size = 0
+            can_self_handle = False
+        return type(f'sa_{t.__name__}', (cls,), {
             "_type_": t,
             "_length_": length,
             "_size_": size,
