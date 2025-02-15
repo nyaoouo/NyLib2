@@ -1,8 +1,9 @@
 import dataclasses
+
 import time
 
-from nylib.pyimgui import imgui
-from nylib.pyimgui.imgui import ctx as imgui_ctx
+from ..pyimgui import imgui
+from ..pyimgui.imgui import ctx as imgui_ctx
 
 
 class Alerts:

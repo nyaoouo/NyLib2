@@ -1,22 +1,21 @@
-import os.path
 import pathlib
 
-from nylib.pyimgui import imgui
-from nylib.pyimgui.imgui import ctx as imgui_ctx
-from .utils import PushDisabledButtonStyle
 from .alerts import Alerts
+from .utils import PushDisabledButtonStyle
+from ..pyimgui import imgui
+from ..pyimgui.imgui import ctx as imgui_ctx
 
 PATH_SEP = "/"  # os.path.sep
 
 
 class FileDialog:
-    def __init__(self, title, filters: list[tuple[str, str]] = None, on_ok=None, on_cancel=None, initial_dir=None, must_exist=False, allow_dir=False):
+    def __init__(self, title, filters: list[tuple[str, str]] = None, on_ok=None, on_cancel=None, initial_dir=None, ask_save_file=False, select_dir=False):
         self.title = title
         self.filters = filters
         self._on_ok = on_ok
         self._on_cancel = on_cancel
-        self.must_exist = must_exist
-        self.allow_dir = allow_dir
+        self.ask_save_file = ask_save_file
+        self.select_dir = select_dir
 
         self.input = ''
         self.input_filter = ''
@@ -85,10 +84,14 @@ class FileDialog:
             self.filtered_files = [f for f in self.filtered_files if f.suffix == allowed]
 
     def on_ok(self, fp):
-        if fp.is_dir() and not self.allow_dir:
+        if fp.is_dir() and not self.select_dir:
             self.go_path(fp)
             return
-        if self.must_exist and not fp.exists():
+        if self.ask_save_file:
+            if fp.exists():
+                self.alerts.add(f"File {fp} already exists", Alerts.ERROR)  # todo: ask to overwrite
+                return
+        elif not fp.exists():
             self.alerts.add(f"File {fp} does not exist", Alerts.ERROR)
             return
         if self._on_ok:

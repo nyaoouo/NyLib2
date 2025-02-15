@@ -30,6 +30,7 @@ def PushDisabledButtonStyle(color: imgui.ImVec4 = None):
     with ctx.PushStyleColor(imgui.ImGuiCol_Button, bg_col):
         with ctx.PushStyleColor(imgui.ImGuiCol_ButtonActive, bg_col):
             with ctx.PushStyleColor(imgui.ImGuiCol_ButtonHovered, bg_col):
+                # hook for imgui.Button and imgui.Selectable to override the return value?
                 yield
 
 
