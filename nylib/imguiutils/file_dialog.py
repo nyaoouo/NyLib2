@@ -4,20 +4,27 @@ from .alerts import Alerts
 from .utils import PushDisabledButtonStyle
 from ..pyimgui import imgui
 from ..pyimgui.imgui import ctx as imgui_ctx
+from ..utils.handles import Handles
 
 PATH_SEP = "/"  # os.path.sep
 
+color_disabled = imgui.ImVec4(0.5, 0.5, 0.5, 1)
+
+handles = Handles()
+
 
 class FileDialog:
-    def __init__(self, title, filters: list[tuple[str, str]] = None, on_ok=None, on_cancel=None, initial_dir=None, ask_save_file=False, select_dir=False):
-        self.title = title
+    def __init__(self, title=None, filters: list[tuple[str, str]] = None, on_ok=None, on_cancel=None, initial_dir=None, initial_value=None, ask_save_file=False, select_dir=False):
+        self.handle = handles.get()
+        self.title = (title or "") + f"###__file_dialog_{self.handle}"
+
         self.filters = filters
         self._on_ok = on_ok
         self._on_cancel = on_cancel
         self.ask_save_file = ask_save_file
         self.select_dir = select_dir
 
-        self.input = ''
+        self.input = initial_value or ''
         self.input_filter = ''
         self.selected_filter = 0
         self.dir = pathlib.Path(initial_dir or '.').resolve()
@@ -33,6 +40,14 @@ class FileDialog:
         self.filtered_dirs = []
 
         self.alerts = Alerts()
+
+    def __free_handle(self):
+        if self.handle:
+            handles.free(self.handle)
+            self.handle = None
+
+    def __del__(self):
+        self.__free_handle()
 
     def go_path(self, path, push_history=True):
         path = pathlib.Path(path).resolve()
@@ -94,14 +109,17 @@ class FileDialog:
         elif not fp.exists():
             self.alerts.add(f"File {fp} does not exist", Alerts.ERROR)
             return
+        self.__free_handle()
         if self._on_ok:
             self._on_ok(fp)
 
     def on_cancel(self):
+        self.__free_handle()
         if self._on_cancel:
             self._on_cancel()
 
     def render(self):
+        if not self.handle: return False
         with imgui_ctx.Begin(self.title, True, imgui.ImGuiWindowFlags_NoDocking) as (show, window_open):
             if not window_open:
                 self.on_cancel()
@@ -113,7 +131,6 @@ class FileDialog:
             self.update_path()
             want_submit = False
             with imgui_ctx.PushStyleVar(imgui.ImGuiStyleVar_ItemSpacing, imgui.ImVec2(3, 3)):
-                color_disabled = imgui.ImVec4(0.5, 0.5, 0.5, 1)
                 if self.history_ptr + 1 < len(self.history):
                     if imgui.Button('<') or imgui.IsKeyPressed(imgui.ImGuiKey_AppBack):
                         self.go_back()
@@ -154,8 +171,12 @@ class FileDialog:
             want_submit_, self.input = imgui.InputText('##input', self.input, imgui.ImGuiInputTextFlags_EnterReturnsTrue)
             want_submit |= want_submit_
             imgui.SameLine()
-            if imgui.Button('OK') or want_submit:
-                self.on_ok(self.dir / self.input)
+            if self.input:
+                if imgui.Button('OK') or want_submit:
+                    self.on_ok(self.dir / self.input)
+            else:
+                with PushDisabledButtonStyle(color_disabled):
+                    imgui.Button('OK')
             imgui.SameLine()
             if imgui.Button('Cancel'):
                 self.on_cancel()
