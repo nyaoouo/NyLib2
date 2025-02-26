@@ -14,9 +14,14 @@ color_disabled = imgui.ImVec4(0.5, 0.5, 0.5, 1)
 handles = Handles()
 
 
-def window_file_name_matcher(pattern):
-    pattern = re.escape(pattern).replace(r'\*', '.*').replace(r'\?', '.')
+def _window_file_name_matcher(pattern: str):
+    pattern = re.escape(pattern.strip()).replace(r'\*', '.*').replace(r'\?', '.')
     return re.compile("^" + pattern + "$", re.IGNORECASE).match
+
+
+def window_file_name_matcher(pattern: str):
+    patterns = [_window_file_name_matcher(p) for p in pattern.split(';')]
+    return lambda name: any(p(name) for p in patterns)
 
 
 basic_filter = "All Files(*)", None
@@ -178,7 +183,9 @@ class FileDialog:
                             want_submit = True
                         else:
                             self.input = f.name
+            window_width = imgui.GetWindowWidth()
             max_filter_width = max(imgui.CalcTextSize(desc).x for desc, _ in self.filters) + 20
+            max_filter_width = min(max_filter_width, window_width // 5)
             with imgui_ctx.PushItemWidth(max_filter_width):
                 self.selected_filter = self.selected_filter if self.selected_filter < len(self.filters) else 0
                 with imgui_ctx.BeginCombo('##preset_filter', self.filters[self.selected_filter][0]) as show:
