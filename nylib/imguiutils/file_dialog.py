@@ -1,4 +1,5 @@
 import pathlib
+import re
 
 from .alerts import Alerts
 from .utils import PushDisabledButtonStyle
@@ -13,12 +14,21 @@ color_disabled = imgui.ImVec4(0.5, 0.5, 0.5, 1)
 handles = Handles()
 
 
+def window_file_name_matcher(pattern):
+    pattern = re.escape(pattern).replace(r'\*', '.*').replace(r'\?', '.')
+    return re.compile("^" + pattern + "$", re.IGNORECASE).match
+
+
+basic_filter = "All Files(*)", None
+
+
 class FileDialog:
     def __init__(self, title=None, filters: list[tuple[str, str]] = None, on_ok=None, on_cancel=None, initial_dir=None, initial_value=None, ask_save_file=False, select_dir=False):
         self.handle = handles.get()
         self.title = (title or "") + f"###__file_dialog_{self.handle}"
 
-        self.filters = filters
+        self.filters = [(f"{fn}({pattern})", window_file_name_matcher(pattern)) for fn, pattern in filters] if filters else []
+        self.filters.append(basic_filter)
         self._on_ok = on_ok
         self._on_cancel = on_cancel
         self.ask_save_file = ask_save_file
@@ -95,8 +105,8 @@ class FileDialog:
             self.filtered_files = self.files
             self.filtered_dirs = self.dirs
         if self.filters and self.selected_filter <= len(self.filters):
-            allowed = self.filters[self.selected_filter - 1][1]
-            self.filtered_files = [f for f in self.filtered_files if f.suffix == allowed]
+            if matcher := self.filters[self.selected_filter][1]:
+                self.filtered_files = [f for f in self.filtered_files if matcher(f.name)]
 
     def on_ok(self, fp):
         if fp.is_dir() and not self.select_dir:
@@ -168,7 +178,20 @@ class FileDialog:
                             want_submit = True
                         else:
                             self.input = f.name
-            want_submit_, self.input = imgui.InputText('##input', self.input, imgui.ImGuiInputTextFlags_EnterReturnsTrue)
+            max_filter_width = max(imgui.CalcTextSize(desc).x for desc, _ in self.filters) + 20
+            with imgui_ctx.PushItemWidth(max_filter_width):
+                self.selected_filter = self.selected_filter if self.selected_filter < len(self.filters) else 0
+                with imgui_ctx.BeginCombo('##preset_filter', self.filters[self.selected_filter][0]) as show:
+                    if show:
+                        for i, (desc, _) in enumerate(self.filters):
+                            if imgui.Selectable(f"{desc}##sel_preset_filter_{i}", i == self.selected_filter):
+                                self.selected_filter = i
+                                self.update_filter()
+            imgui.SameLine()
+            style = imgui.GetStyle()
+            other_width = imgui.CalcTextSize('OKCancel').x + style.ItemSpacing.x * 4 + style.FramePadding.x * 6
+            with imgui_ctx.PushItemWidth(imgui.GetWindowWidth() - other_width - max_filter_width):
+                want_submit_, self.input = imgui.InputText('##input', self.input, imgui.ImGuiInputTextFlags_EnterReturnsTrue)
             want_submit |= want_submit_
             imgui.SameLine()
             if self.input:

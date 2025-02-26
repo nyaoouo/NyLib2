@@ -83,7 +83,7 @@ class Alerts:
                                     to_remove.append(i)
                             else:
                                 a.is_hovered = False
-            if a.timeout and a.timeout < now:
+            if not a.is_hovered and a.timeout and a.timeout < now:
                 to_remove.append(i)
             pos.y += a_size.y + self.margin
         for i in reversed(to_remove):
