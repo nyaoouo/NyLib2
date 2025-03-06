@@ -233,7 +233,7 @@ def ensure_msys2_file(fp, shell=True):
         ensure_msys2_file.cache = {}
     elif fp in ensure_msys2_file.cache:
         return ensure_msys2_file.cache[fp]
-    fp_ = os.path.join(_find_msys2_dir(), fp.lstrip('/\\'))
+    fp_ = os.path.join(ensure_msys2(), fp.lstrip('/\\'))
     if not os.path.exists(fp_):
         ensure_msys2()
         if not hasattr(ensure_msys2_file, 'db_loaded'):
