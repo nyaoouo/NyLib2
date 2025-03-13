@@ -23,15 +23,18 @@ class TmpFileWritter:
         return self.tmp_file
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if exc_type: return False
         self.tmp_file.close()
         file_path = pathlib.Path(self.file_path)
+        tmp_file_path = pathlib.Path(self.tmp_file_path)
+        if exc_type:
+            if tmp_file_path.exists():
+                tmp_file_path.unlink()
+            return False
         bak_file_path = None
         if file_path.exists():
             n = 1
             while (bak_file_path := file_path.with_suffix(f'.bak{n}')).exists():
                 n += 1
             shutil.move(file_path, bak_file_path)
-        tmp_file_path = pathlib.Path(self.tmp_file_path)
         shutil.move(tmp_file_path, file_path)
         if bak_file_path: bak_file_path.unlink()
