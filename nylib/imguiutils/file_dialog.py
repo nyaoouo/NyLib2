@@ -1,5 +1,6 @@
 import pathlib
 import re
+import sys
 
 from .alerts import Alerts
 from .utils import PushDisabledButtonStyle
@@ -210,5 +211,7 @@ class FileDialog:
             imgui.SameLine()
             if imgui.Button('Cancel'):
                 self.on_cancel()
+            if sys.platform == 'win32':
+                imgui.Text('Submit Drive Letter to change drive, e.g. "C:/"')
             self.alerts.render()
             return True
