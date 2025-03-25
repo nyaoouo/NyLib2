@@ -88,6 +88,10 @@ time_units = [
 
 
 def fmt_sec(sec: float):
+    if sec < 0:
+        return '-' + fmt_sec(-sec)
+    if sec == 0:
+        return "0s"
     size, name = 1e-13, "Sv"
     for _size, _name in time_units:
         if sec < _size:

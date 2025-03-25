@@ -7,7 +7,7 @@ import typing
 
 from .pipe import PipeServer, PipeServerHandler, PipeClient
 from ..utils.simple import Counter
-from ..utils.threading import ResEventList
+from ..utils.threading_ import ResEventList
 
 _T = typing.TypeVar('_T')
 

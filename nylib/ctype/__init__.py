@@ -58,13 +58,15 @@ class CData(metaclass=CDataMeta):
 _CData_T = typing.TypeVar("_CData_T", bound=CData)
 
 
-def cdata_from_buffer_copy(buf: bytes, t: typing.Type[_CData_T], _accessor_: 'CAccessor' = None) -> _CData_T:
+def cdata_from_buffer_copy(buf: bytes, t: typing.Type[_CData_T], _accessor_: 'CAccessor' = None, offset=0) -> _CData_T:
+    check_finalize(t)
     obj = t(_accessor_=_accessor_)
-    obj._accessor_.write(obj._address_, buf)
+    obj._accessor_.write(obj._address_, buf[offset:offset + sizeof(t)])
     return obj
 
 
 def cdata_from_buffer(buf: bytearray, t: typing.Type[_CData_T], offset=0) -> _CData_T:
+    check_finalize(t)
     buf_ = (ctypes.c_char * len(buf)).from_buffer(buf)
     obj = t(_address_=ctypes.addressof(buf_) + offset, _accessor_=CAccessorLocal.get_instance())
     obj._raw_buf_ = buf_
@@ -87,6 +89,14 @@ def sizeof(t: typing.Type[CData] | CData) -> int:
 def padsizeof(t: typing.Type[CData] | CData) -> int:
     check_finalize(t)
     return t._pad_size_
+
+
+def as_bytes(t: CData) -> bytes:
+    return t._accessor_.read(t._address_, t._size_)
+
+
+def copy(t: _T) -> _T:
+    return cdata_from_buffer_copy(as_bytes(t), type(t), _accessor_=t._accessor_)
 
 
 class SimpleCDataMeta(CDataMeta):
@@ -463,7 +473,9 @@ def finalize_struct(cls):
     for name, t in cls.__dict__.items():
         if isinstance(t, Field):
             assert not hasattr(t, "name"), "Field name is reserved"
+            assert not hasattr(t, "parent"), "Field parent is reserved"
             t.name = name
+            t.parent = cls
             fields.append(t)
 
     size = 0
@@ -520,9 +532,18 @@ class Struct(CData):
     _fields_: 'list[Field]'
     _can_self_handle_ = True
 
+    def __init__(self, *args, _address_=None, _accessor_=None, **kwargs):
+        check_finalize(self.__class__)
+        super().__init__(_address_=_address_, _accessor_=_accessor_)
+        for field, val in zip(self._fields_, args):
+            setattr(self, field.name, val)
+        for name, val in kwargs.items():
+            setattr(self, name, val)
+
 
 class Field(typing.Generic[_T]):
     name: str
+    parent: typing.Type[Struct]
 
     def __init__(self, t: typing.Type[_T], offset: int = -1):
         assert issubclass(t, CData), "Field type must be subclass of CData"
@@ -530,6 +551,7 @@ class Field(typing.Generic[_T]):
         self.offset = offset
 
     def __get__(self, instance: Struct, owner) -> _T:
+        if instance is None: return self
         if self.offset < 0: finalize_struct(owner)
         return self.t(_address_=instance._address_ + self.offset, _accessor_=instance._accessor_)
 
@@ -540,6 +562,7 @@ class SField(Field[_T]):
         super().__init__(t, offset)
 
     def __get__(self, instance: Struct, owner) -> _T:
+        if instance is None: return self
         return super().__get__(instance, owner).value
 
     def __set__(self, instance: Struct, value: _T):
@@ -557,6 +580,7 @@ class BField(Field[int]):
         self.bit_mask = (1 << bit_size) - 1
 
     def __get__(self, instance: Struct, owner) -> int:
+        if instance is None: return self
         if self.bit_offset < 0: finalize_struct(owner)
         return (super().__get__(instance, owner).value >> self.bit_offset) & self.bit_mask
 
@@ -564,6 +588,23 @@ class BField(Field[int]):
         if self.bit_offset < 0 or self.bit_size < 0: finalize_struct(instance.__class__)
         _value = super().__get__(instance, instance.__class__)
         _value.value = (_value.value & self.rev_mask) | ((value & self.bit_mask) << self.bit_offset)
+
+
+def offsetof(t: Field) -> int:
+    check_finalize(t.parent)
+    return t.offset
+
+
+def as_py(obj: CData):
+    if isinstance(obj, Struct):
+        return {field.name: as_py(getattr(obj, field.name)) for field in obj._fields_}
+    if isinstance(obj, SimpleCData):
+        return obj.value
+    if isinstance(obj, Array):
+        return [as_py(i) for i in obj]
+    # if isinstance(obj, Pointer): # may cause infinite loop...
+    #     return obj
+    return obj
 
 
 class FuncDecl:
