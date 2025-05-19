@@ -21,7 +21,7 @@ def iter_pe_exported(pe_path):
     pe.close()
 
 
-def create_src(pe_path, dst_dir, default_config):
+def create_src(pe_path, dst_dir, default_config=None, template=None):
     names = [(name, ordinal) for name, _, ordinal in iter_pe_exported(pe_path)]
     dst = pathlib.Path(dst_dir)
     shutil.rmtree(dst, ignore_errors=True)
@@ -30,14 +30,19 @@ def create_src(pe_path, dst_dir, default_config):
     addr_var = lambda n: '_pyhijack_val_' + n
     func_asm = lambda n: '_pyhijack_func_' + n
 
-    current_dir = pathlib.Path(sys.executable if getattr(sys, "frozen", False) else __file__).parent
-    if (dllmain_template_path := current_dir / 'dllmain.template.cpp').exists():
-        dllmain_text = dllmain_template_path.read_text('utf-8')
+    if template:
+        with open(template, 'r', encoding='utf-8') as f:
+            dllmain_text = f.read()
     else:
-        dllmain_text = DLLMAIN_TEMPLATE
-    dllmain_text = dllmain_text.replace("/*REPLACE_ORIG_DLL_HERE*/", default_config['orig'].replace('\\', '\\\\'))
-    dllmain_text = dllmain_text.replace("/*REPLACE_PY_DLL_HERE*/", default_config['python_dll'].replace('\\', '\\\\'))
-    dllmain_text = dllmain_text.replace("/*REPLACE_PY_MAIN_HERE*/", default_config['python_main'].replace('\\', '\\\\'))
+        current_dir = pathlib.Path(sys.executable if getattr(sys, "frozen", False) else __file__).parent
+        if (dllmain_template_path := current_dir / 'dllmain.template.cpp').exists():
+            dllmain_text = dllmain_template_path.read_text('utf-8')
+        else:
+            dllmain_text = DLLMAIN_TEMPLATE
+    default_config = default_config or {}
+    dllmain_text = dllmain_text.replace("/*REPLACE_ORIG_DLL_HERE*/", default_config.get('orig', str(pe_path)).replace('\\', '\\\\'))
+    dllmain_text = dllmain_text.replace("/*REPLACE_PY_DLL_HERE*/", default_config.get('python_dll', '').replace('\\', '\\\\'))
+    dllmain_text = dllmain_text.replace("/*REPLACE_PY_MAIN_HERE*/", default_config.get('python_main', '').replace('\\', '\\\\'))
 
     buf = ''
     for name, ordinal in names:
