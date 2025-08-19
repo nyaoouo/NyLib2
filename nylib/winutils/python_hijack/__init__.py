@@ -21,14 +21,15 @@ def iter_pe_exported(pe_path):
     pe.close()
 
 
-def create_src(pe_path, dst_dir, default_config=None, template=None):
+def create_src(pe_path, dst_dir, default_config=None, template=None, plat_spec='x86_amd64'):
+    assert plat_spec in ('x86_amd64', 'x86')
     names = [(name, ordinal) for name, _, ordinal in iter_pe_exported(pe_path)]
     dst = pathlib.Path(dst_dir)
     shutil.rmtree(dst, ignore_errors=True)
     dst.mkdir(parents=True, exist_ok=True)
 
-    addr_var = lambda n: '_pyhijack_val_' + n
-    func_asm = lambda n: '_pyhijack_func_' + n
+    addr_var = lambda n: 'pyhijack_val_' + n
+    func_asm = lambda n: 'pyhijack_func_' + n
 
     if template:
         with open(template, 'r', encoding='utf-8') as f:
@@ -46,7 +47,11 @@ def create_src(pe_path, dst_dir, default_config=None, template=None):
 
     buf = ''
     for name, ordinal in names:
-        buf += f'#pragma comment(linker, "/EXPORT:{name}={func_asm(name)},@{ordinal}")\n'
+        internal_symbol = func_asm(name)
+        # MASM/x86 (C calling convention) decorates symbols with a leading underscore.
+        if plat_spec == 'x86':
+            internal_symbol = '_' + internal_symbol
+        buf += f'#pragma comment(linker, "/EXPORT:{name}={internal_symbol},@{ordinal}")\n'
     buf += '\nextern "C" {\n'
     for name, ordinal in names:
         buf += f'    PVOID {addr_var(name)};\n'
@@ -64,19 +69,38 @@ def create_src(pe_path, dst_dir, default_config=None, template=None):
 
     (dst / 'dllmain.cpp').write_text(dllmain_text, 'utf-8')
 
-    dllasm_text = '.Data\n'
-    for name, ordinal in names:
-        dllasm_text += f'EXTERN {addr_var(name)}:dq;\n'
-    dllasm_text += '\n.Code\n'
-    for name, ordinal in names:
-        dllasm_text += (f'{func_asm(name)} PROC\n'
-                        f'    jmp {addr_var(name)}\n'
-                        f'{func_asm(name)} ENDP\n\n')
-    dllasm_text += '\nEND\n'
+    # Generate platform-specific assembly
+    if plat_spec == 'x86':
+        # x86 assembly syntax
+        dllasm_text = '.386\n.model flat, C\n\n.Data\n'
+        for name, ordinal in names:
+            dllasm_text += f'EXTERN {addr_var(name)}:DWORD\n'
+        dllasm_text += '\n.Code\n\n'
+        # Then define the procedures
+        for name, ordinal in names:
+            dllasm_text += (f'{func_asm(name)} PROC C\n'
+                            f'    jmp DWORD PTR [{addr_var(name)}]\n'
+                            f'{func_asm(name)} ENDP\n'
+                            f'PUBLIC {func_asm(name)}\n\n')
+        dllasm_text += '\nEND\n'
+    else:
+        # x64 assembly syntax (original)
+        dllasm_text = '.Data\n'
+        for name, ordinal in names:
+            dllasm_text += f'EXTERN {addr_var(name)}:dq;\n'
+        dllasm_text += '\n.Code\n'
+        for name, ordinal in names:
+            dllasm_text += (f'{func_asm(name)} PROC\n'
+                            f'    jmp {addr_var(name)}\n'
+                            f'{func_asm(name)} ENDP\n\n')
+        dllasm_text += '\nEND\n'
+
     (dst / 'dllasm.asm').write_text(dllasm_text, 'utf-8')
 
 
-def hijack(pe_path, build_dir=None, default_config=None, dst_dir=None):
+def hijack(pe_path, build_dir=None, default_config=None, dst_dir=None, template=None, plat_spec='x86_amd64'):
+    assert plat_spec in ('x86_amd64', 'x86')
+
     from .. import msvc, ensure_env
     from ...process import Process
 
@@ -85,12 +109,11 @@ def hijack(pe_path, build_dir=None, default_config=None, dst_dir=None):
     need_move_orig = False
     orig_path = pe_path = pathlib.Path(pe_path).absolute()
     dst_dir = pathlib.Path(dst_dir) if dst_dir is not None else pe_path.parent
+    dst_dir.mkdir(parents=True, exist_ok=True)
     dst_path = dst_dir / pe_path.name
     if dst_path == orig_path:
         need_move_orig = True
         orig_path = orig_path.with_suffix('.pyHijack' + orig_path.suffix)
-
-    plat_spec = 'x86_amd64'  # TODO: check
     build_env = msvc.load_vcvarsall(plat_spec)
 
     py_dll = f"python{sys.version_info.major}{sys.version_info.minor}.dll"
@@ -106,27 +129,34 @@ def hijack(pe_path, build_dir=None, default_config=None, dst_dir=None):
     if build_dir is None:
         tmp_dir = tempfile.mkdtemp()
     else:
-        tmp_dir = build_dir
+        tmp_dir = pathlib.Path(build_dir).absolute()
+        tmp_dir.mkdir(parents=True, exist_ok=True)
     try:
         tmp_dir = pathlib.Path(tmp_dir)
-        create_src(pe_path, tmp_dir, default_config)
-        ml = msvc.where('ml64.exe', plat_spec)
+        create_src(pe_path, tmp_dir, default_config, plat_spec=plat_spec)
+        ml = msvc.where('ml64.exe' if plat_spec == 'x86_amd64' else 'ml.exe', plat_spec)
         cl = msvc.where('cl.exe', plat_spec)
         include_path = sysconfig.get_paths()['include']
         libs_path = str(pathlib.Path(include_path).with_name('libs'))
-        subprocess.run([ml, '/c', '/Fo', tmp_dir / 'dllasm.obj', tmp_dir / 'dllasm.asm'], cwd=tmp_dir, env=build_env, check=True, shell=True)
+
+        subprocess.run([
+            ml, '/c', '/coff', '/Fo', str(tmp_dir / 'dllasm.obj'), str(tmp_dir / 'dllasm.asm')
+        ], cwd=tmp_dir, env=build_env, check=True, shell=True)
+
         subprocess.run([
             cl,
             '/D_USRDLL', '/D_WINDLL',
+            str(tmp_dir / 'dllmain.cpp'), str(tmp_dir / 'dllasm.obj'),
             # '/I', sysconfig.get_paths()['include'], f'/LIBPATH:"{libs_path}"',
-            tmp_dir / 'dllmain.cpp', tmp_dir / 'dllasm.obj',
-            '/link', '/DLL', '/OUT:' + str(tmp_dir / 'hijacked.dll')
+            '/link', '/DLL',
+            ('/MACHINE:X86' if plat_spec == 'x86' else '/MACHINE:X64'),
+            '/OUT:' + str(tmp_dir / 'hijacked.dll')
         ], cwd=tmp_dir, env=build_env, check=True, shell=True)
+
         if need_move_orig:
-            pe_path.rename(orig_path)
+            shutil.move(str(pe_path), str(orig_path))
         # (tmp_dir / 'hijacked.dll').rename(dst_path)
-        with open(dst_path, 'wb') as f:
-            f.write((tmp_dir / 'hijacked.dll').read_bytes())
+        shutil.move(str(tmp_dir / 'hijacked.dll'), str(dst_path))
     finally:
         if build_dir is None:
             shutil.rmtree(tmp_dir, ignore_errors=True)
