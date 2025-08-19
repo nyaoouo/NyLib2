@@ -133,7 +133,7 @@ def hijack(pe_path, build_dir=None, default_config=None, dst_dir=None, template=
         tmp_dir.mkdir(parents=True, exist_ok=True)
     try:
         tmp_dir = pathlib.Path(tmp_dir)
-        create_src(pe_path, tmp_dir, default_config, plat_spec=plat_spec)
+        create_src(pe_path, tmp_dir, default_config, plat_spec=plat_spec, template=template)
         ml = msvc.where('ml64.exe' if plat_spec == 'x86_amd64' else 'ml.exe', plat_spec)
         cl = msvc.where('cl.exe', plat_spec)
         include_path = sysconfig.get_paths()['include']
