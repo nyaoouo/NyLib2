@@ -25,6 +25,7 @@ typedef struct
     WCHAR *pyDll;
     WCHAR *pyMain;
     WCHAR *pyPaths;
+    BOOL createConsole;
 } PyLoaderConfig;
 PyLoaderConfig *g_cfg = NULL;
 
@@ -69,6 +70,7 @@ void __LoadPython()
     {
         _throw_("cfg is NULL");
     }
+    if (g_cfg->createConsole)
     {
         AllocConsole();
         freopen("CONOUT$", "w", stdout);

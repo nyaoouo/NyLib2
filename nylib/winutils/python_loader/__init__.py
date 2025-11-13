@@ -38,7 +38,7 @@ def build_loader(dst, build_dir=None):
             file.unlink()
 
 
-def run_script(process: Process, main_script, python_dll=None, python_paths=None, loader=None):
+def run_script(process: Process, main_script, python_dll=None, python_paths=None, loader=None, create_console: bool = True):
     if loader is None:
         loader = pathlib.Path(__file__).parent / 'python_loader.dll'
     if not loader.exists():
@@ -59,12 +59,14 @@ def run_script(process: Process, main_script, python_dll=None, python_paths=None
     ws_pyDll = python_dll.encode('utf-16-le') + b'\0\0'
     ws_pyMain = main_script.encode('utf-16-le') + b'\0\0'
     ws_pyPaths = python_paths.encode('utf-16-le') + b'\0\0'
+    config_size = 4 * 8
+    p_config = process.alloc(config_size + len(ws_pyDll) + len(ws_pyMain) + len(ws_pyPaths))
+    process.write_ptr(p_config, p_config + config_size)
+    process.write_ptr(p_config + 8, p_config + config_size + len(ws_pyDll))
+    process.write_ptr(p_config + 16, p_config + config_size + len(ws_pyDll) + len(ws_pyMain))
+    process.write_u8(p_config + 24, int(bool(create_console)))
 
-    p_config = process.alloc(3 * 8 + len(ws_pyDll) + len(ws_pyMain) + len(ws_pyPaths))
-    process.write_ptr(p_config, p_config + 3 * 8)
-    process.write_ptr(p_config + 8, p_config + 3 * 8 + len(ws_pyDll))
-    process.write_ptr(p_config + 16, p_config + 3 * 8 + len(ws_pyDll) + len(ws_pyMain))
-    process.write(p_config + 24, ws_pyDll)
-    process.write(p_config + 24 + len(ws_pyDll), ws_pyMain)
-    process.write(p_config + 24 + len(ws_pyDll) + len(ws_pyMain), ws_pyPaths)
+    process.write(p_config + config_size, ws_pyDll)
+    process.write(p_config + config_size + len(ws_pyDll), ws_pyMain)
+    process.write(p_config + config_size + len(ws_pyDll) + len(ws_pyMain), ws_pyPaths)
     process.call(pLoadPython, p_config)
