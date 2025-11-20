@@ -36,3 +36,4 @@ TerminateProcess = def_win_api(_dll.TerminateProcess, ctypes.c_bool, (ctypes.c_v
 ExpandEnvironmentStringsW = def_win_api(_dll.ExpandEnvironmentStringsW, ctypes.c_ulong, (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_ulong), error_zero=True)
 CreateProcessA = def_win_api(_dll.CreateProcessA, ctypes.c_bool, (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_void_p), error_zero=True)
 ResumeThread = def_win_api(_dll.ResumeThread, ctypes.c_ulong, (ctypes.c_void_p,))
+DuplicateHandle = def_win_api(_dll.DuplicateHandle, ctypes.c_bool, (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_bool, ctypes.c_ulong), error_zero=True)

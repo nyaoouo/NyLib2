@@ -248,3 +248,17 @@ class PROCESS_INFORMATION(ctypes.Structure):
         ('dwProcessId', ctypes.c_ulong),
         ('dwThreadId', ctypes.c_ulong),
     ]
+
+
+class SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX(ctypes.Structure):
+    # https://www.geoffchappell.com/studies/windows/km/ntoskrnl/api/ex/sysinfo/handle_table_entry_ex.htm
+    _fields_ = [
+        ("Object", ctypes.c_void_p),
+        ("UniqueProcessId", ctypes.c_size_t),
+        ("HandleValue", ctypes.c_size_t),
+        ("GrantedAccess", ctypes.c_ulong),
+        ("CreatorBackTraceIndex", ctypes.c_ushort),
+        ("ObjectTypeIndex", ctypes.c_ushort),
+        ("HandleAttributes", ctypes.c_ulong),
+        ("Reserved", ctypes.c_ulong),
+    ]
