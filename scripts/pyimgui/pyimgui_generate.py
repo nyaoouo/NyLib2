@@ -1,5 +1,6 @@
 import io
 import json
+import multiprocessing
 import os
 import pathlib
 import re
@@ -453,7 +454,7 @@ def load_requirements(auto_src_dir, backends):
     auto_src_dir.mkdir(parents=True, exist_ok=True)
     cimgui_dir = auto_src_dir / 'cimgui'
     if not cimgui_dir.is_dir():
-        subprocess.check_call([ensure_env.ensure_git(), 'clone', 'https://github.com/cimgui/cimgui.git', cimgui_dir], cwd=auto_src_dir)
+        subprocess.check_call([ensure_env.ensure_git(), 'clone', '--branch', '1.90.9dock', 'https://github.com/cimgui/cimgui.git', cimgui_dir], cwd=auto_src_dir)
         subprocess.check_call([ensure_env.ensure_git(), 'submodule', 'update', '--init', '--recursive'], cwd=cimgui_dir)
     if not (auto_src_dir / 'detours').is_dir():
         subprocess.check_call([ensure_env.ensure_git(), 'clone', 'https://github.com/microsoft/Detours.git', auto_src_dir / 'detours'], cwd=auto_src_dir)
@@ -481,9 +482,18 @@ def pybind11_build(*a, debug=0, **kw):
         os.environ['SETUPTOOLS_USE_DISTUTILS'] = 'stdlib'
     from setuptools import Distribution
     from pybind11.setup_helpers import Pybind11Extension, build_ext
+
+    ext = Pybind11Extension(*a, **kw)
+
+    extra = list(getattr(ext, "extra_compile_args", []) or [])
+    for flag in ('/bigobj', '/Zm500'):
+        if flag not in extra:
+            extra.append(flag)
+    ext.extra_compile_args = extra
+
     dist = Distribution({
         'cmdclass': {'build_ext': build_ext},
-        'ext_modules': [Pybind11Extension(*a, **kw), ]
+        'ext_modules': [ext, ]
     })
     cmd_obj = dist.get_command_obj('build_ext')
     cmd_obj.inplace = 1

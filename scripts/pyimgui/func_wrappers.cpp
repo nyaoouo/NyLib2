@@ -73,6 +73,18 @@ struct GlyphRanges
                res.push_back(*p);
           return res;
      }
+
+     static GlyphRanges from_list(const std::list<ImWchar> &lst)
+     {
+          GlyphRanges gr;
+          ImWchar *arr = new ImWchar[lst.size() + 1];
+          size_t i = 0;
+          for (ImWchar c : lst)
+               arr[i++] = c;
+          arr[i] = 0;
+          gr.ranges = arr;
+          return gr;
+     }
 };
 /*END:__STRUCTS_EXTRA__*/
 
@@ -83,7 +95,8 @@ void _(py::module &m)
      /*START:__STRUCTS_DEF_EXTRA__*/
      py::class_<GlyphRanges>(m, "GlyphRanges", py::dynamic_attr())
          //.def(py::init<std::list<ImWchar>>())
-         .def("ToList", &GlyphRanges::ToList);
+         .def("ToList", &GlyphRanges::ToList)
+         .def_static("from_list", &GlyphRanges::from_list, py::arg("lst"));
      /*END:__STRUCTS_DEF_EXTRA__*/
      m
          /*START:_CLS_FIELD_:ImGuiViewportP::_ImGuiViewport*/
@@ -449,5 +462,13 @@ void _(py::module &m)
          .def("CalcTextSize", [](const char *text, std::optional<const char *> &text_end, bool hide_text_after_double_hash, float wrap_width)
                {ImVec2 __out_0 = {};igCalcTextSize(&__out_0, text, (text_end ? *text_end : NULL), hide_text_after_double_hash, wrap_width);return __out_0; }, py::arg("text"), py::arg("text_end") = py::none(), py::arg("hide_text_after_double_hash") = false, py::arg("wrap_width") = -1.0f, py::return_value_policy::move);
          /*END:_GFUNC_:igCalcTextSize*/
+         /*START:_GFUNC_:ImGuiSelectionBasicStorage_GetNextSelectedItem*/
+         .def("GetNextSelectedItem", [](ImGuiSelectionBasicStorage& self, std::optional<std::tuple<void*, ImGuiID>> item)
+               {
+                    void* it = NULL; ImGuiID id;
+                    if (item) { auto item_ = *item; it = std::get<0>(item_); id = std::get<1>(item_); }
+                    return ImGuiSelectionBasicStorage_GetNextSelectedItem(&self, &it, &id)? py::cast(std::make_tuple(it, id)): py::none();
+               }, py::arg("item") = py::none())
+         /*END:_GFUNC_:ImGuiSelectionBasicStorage_GetNextSelectedItem*/
      .def();
 }

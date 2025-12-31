@@ -81,6 +81,8 @@ START_M_IMGUI_IMPL_Dx11_NAMESPACE
 
     LRESULT WINAPI Dx11ImguiWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
+        if (M_IMGUI_HELPER_NAMESPACE::Win32TrayWindowProc(hWnd, msg, wParam, lParam))
+            return true;
         if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
             return true;
 
@@ -124,9 +126,10 @@ START_M_IMGUI_IMPL_Dx11_NAMESPACE
     {
         WNDCLASSEX wc = {sizeof(wc), CS_CLASSDC, Dx11ImguiWndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, _T("mImguiWindowDx11"), nullptr};
         ::RegisterClassEx(&wc);
-        this->hwnd = ::CreateWindow(wc.lpszClassName, _T(""), WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, nullptr, nullptr, wc.hInstance, nullptr);
-        if (this->hwnd == nullptr)
+        HWND hwnd = ::CreateWindow(wc.lpszClassName, _T(""), WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, nullptr, nullptr, wc.hInstance, nullptr);
+        if (hwnd == nullptr)
             _throwV_("Failed to create window, error code: {}", GetLastError());
+        this->SetHwnd(hwnd);
 
         try
         {
@@ -314,7 +317,8 @@ START_M_IMGUI_IMPL_Dx11_NAMESPACE
         this->pSwapChain = pSwapChain;
         DXGI_SWAP_CHAIN_DESC desc;
         this->pSwapChain->GetDesc(&desc);
-        this->hwnd = desc.OutputWindow;
+        // this->hwnd = desc.OutputWindow;
+        this->SetHwnd(desc.OutputWindow);
         this->pSwapChain->GetDevice(__uuidof(ID3D11Device), (void **)&this->pd3dDevice);
         this->pd3dDevice->GetImmediateContext(&this->pd3dDeviceContext);
 

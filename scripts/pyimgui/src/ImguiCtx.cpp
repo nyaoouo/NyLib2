@@ -138,16 +138,17 @@ START_IMGUI_CTX_NAMESPACE
                  igPushStyleVar_Vec2(idx,val);
                  PyCtxWrapper res = {py::none(), [](){igPopStyleVar(1);}};
                  return res; }, py::arg("idx"), py::arg("val"), py::return_value_policy::move);
-        m.def("PushTabStop", [](bool tab_stop)
-                {
-                 igPushTabStop(tab_stop);
-                 PyCtxWrapper res = {py::none(), igPopTabStop};
-                 return res; }, py::arg("tab_stop"), py::return_value_policy::move);
-        m.def("PushButtonRepeat", [](bool repeat)
-                {
-                 igPushButtonRepeat(repeat);
-                 PyCtxWrapper res = {py::none(), igPopButtonRepeat};
-                 return res; }, py::arg("repeat"), py::return_value_policy::move);
+      // OBSOLETED in 1.91.0 (from July 2024)
+      //   m.def("PushTabStop", [](bool tab_stop)
+      //           {
+      //            igPushTabStop(tab_stop);
+      //            PyCtxWrapper res = {py::none(), igPopTabStop};
+      //            return res; }, py::arg("tab_stop"), py::return_value_policy::move);
+      //   m.def("PushButtonRepeat", [](bool repeat)
+      //           {
+      //            igPushButtonRepeat(repeat);
+      //            PyCtxWrapper res = {py::none(), igPopButtonRepeat};
+      //            return res; }, py::arg("repeat"), py::return_value_policy::move);
         m.def("PushItemWidth", [](float item_width)
                 {
                  igPushItemWidth(item_width);

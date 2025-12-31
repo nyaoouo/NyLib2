@@ -2,6 +2,7 @@
 #include "../gHeader.h"
 #include "../PyDetours.h"
 #include "../ImguiInbound.h"
+#include "./Helper_Cmn.h"
 
 #define M_IMGUI_IMPL_NAMESPACE mNameSpace::MImguiImpl
 #define START_M_IMGUI_IMPL_NAMESPACE \
@@ -28,6 +29,13 @@ START_M_IMGUI_IMPL_NAMESPACE
         size_t renderCallback_argc = 0;
         HWND hwnd = nullptr;
         std::string title = "";
+        M_IMGUI_HELPER_NAMESPACE::Win32TrayIconHelper trayIconHelper = {};
+
+        void SetHwnd(HWND hwnd)
+        {
+            this->hwnd = hwnd;
+            this->trayIconHelper.SetHwnd(hwnd);
+        }
 
         std::string GetTitle() {
             if (this->hwnd == nullptr) return this->title;
@@ -149,7 +157,19 @@ START_M_IMGUI_IMPL_NAMESPACE
                  {
                     if (PyFuncArgc(func) >1 ) _throwV_("Invalid CallBeforeFrameOnce argc");
                     self.callBeforeFrameOnce.push_back(func); })
-            .def("Close", &RenderBase::Close);
+            .def("Close", &RenderBase::Close)
+            .def("UpdateTrayIconInfo", [](RenderBase &self, const std::wstring &tooltip, const std::wstring &iconPath)
+                 {
+                     self.trayIconHelper.UpdateInfo(tooltip, iconPath);
+                 }, py::arg("tooltip"), py::arg("iconPath") = L"")
+            .def("HideToTray", [](RenderBase &self)
+                 {
+                     self.trayIconHelper.HideToTray();
+                 })
+            .def("RestoreFromTray", [](RenderBase &self)
+                 {
+                     self.trayIconHelper.RestoreFromTray();
+                 });
     };
 }
 END_M_IMGUI_IMPL_NAMESPACE

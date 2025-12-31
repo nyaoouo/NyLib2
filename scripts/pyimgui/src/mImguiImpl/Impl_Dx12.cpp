@@ -4,6 +4,8 @@ START_M_IMGUI_IMPL_Dx12_NAMESPACE
 {
     LRESULT WINAPI Dx12ImguiWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
+        if (M_IMGUI_HELPER_NAMESPACE::Win32TrayWindowProc(hWnd, msg, wParam, lParam))
+            return true;
         if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
             return true;
         if (Dx12Window::_instance == nullptr)
@@ -293,9 +295,10 @@ START_M_IMGUI_IMPL_Dx12_NAMESPACE
     {
         WNDCLASSEX wc = {sizeof(wc), CS_CLASSDC, Dx12ImguiWndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, _T("mImguiWindowDx12"), nullptr};
         ::RegisterClassEx(&wc);
-        this->hwnd = ::CreateWindow(wc.lpszClassName, _T(""), WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, nullptr, nullptr, wc.hInstance, nullptr);
-        if (this->hwnd == nullptr)
+        HWND hwnd = ::CreateWindow(wc.lpszClassName, _T(""), WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, nullptr, nullptr, wc.hInstance, nullptr);
+        if (hwnd == nullptr)
             _throwV_("Failed to create window, error code: {}", GetLastError());
+        this->SetHwnd(hwnd);
 
         try
         {
@@ -449,7 +452,7 @@ START_M_IMGUI_IMPL_Dx12_NAMESPACE
             sdesc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
             sdesc.Windowed = (GetWindowLongPtr(this->hwnd, GWL_STYLE) & WS_POPUP) == 0;
 
-            this->hwnd = sdesc.OutputWindow;
+           this->SetHwnd(sdesc.OutputWindow);
             this->buffer_count = sdesc.BufferCount;
             this->frameContext = new FrameContext[this->buffer_count];
         }

@@ -70,6 +70,8 @@ START_M_IMGUI_IMPL_Dx9_NAMESPACE
 
     LRESULT WINAPI Dx9ImguiWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
+        if (M_IMGUI_HELPER_NAMESPACE::Win32TrayWindowProc(hWnd, msg, wParam, lParam))
+            return true;
         if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
             return true;
         if (Dx9Window::_instance == nullptr)
@@ -114,10 +116,11 @@ START_M_IMGUI_IMPL_Dx9_NAMESPACE
     {
         WNDCLASSEX wc = {sizeof(wc), CS_CLASSDC, Dx9ImguiWndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, _T("mImguiWindowDx9"), nullptr};
         ::RegisterClassEx(&wc);
-        this->hwnd = ::CreateWindow(wc.lpszClassName, _T(""), WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, nullptr, nullptr, wc.hInstance, nullptr);
-        if (this->hwnd == nullptr)
+        HWND hwnd = ::CreateWindow(wc.lpszClassName, _T(""), WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, nullptr, nullptr, wc.hInstance, nullptr);
+        if (hwnd == nullptr)
             _throwV_("Failed to create window, error code: {}", GetLastError());
-
+        this->SetHwnd(hwnd);
+        
         try
         {
             this->CreateDeviceD3D();

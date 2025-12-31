@@ -9,6 +9,9 @@ START_M_IMGUI_IMPL_WIN32_NAMESPACE
 		_In_ WPARAM wParam,
 		_In_ LPARAM lParam)
 	{
+		
+        if (M_IMGUI_HELPER_NAMESPACE::Win32TrayWindowProc(hwnd, uMsg, wParam, lParam))
+            return 1L;
 		if (ImGui_ImplWin32_WndProcHandler(hwnd, uMsg, wParam, lParam) > 0)
 			return 1L;
 		

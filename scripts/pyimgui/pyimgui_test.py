@@ -172,7 +172,8 @@ def test():
                         window_pos = imgui.GetWindowPos()
                         imgui.Text(f"Window pos: {window_pos.x}, {window_pos.y}")
                         if imgui.CollapsingHeader("Test"):
-
+                            if imgui.Button("HideToTray"):
+                                wnd.HideToTray()
                             with imgui_ctx.BeginChild("TabTest", imgui.ImVec2(300, 100),child_flags=imgui.ImGuiChildFlags_Border) as show_child:
                                 if show_child:
                                     with imgui_ctx.BeginTabBar("##tabs") as show_tabbar:
