@@ -262,3 +262,17 @@ class SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX(ctypes.Structure):
         ("HandleAttributes", ctypes.c_ulong),
         ("Reserved", ctypes.c_ulong),
     ]
+
+class OSVERSIONINFOW(ctypes.Structure):
+    _fields_ = [
+        ('dwOSVersionInfoSize', ctypes.c_ulong),
+        ('dwMajorVersion', ctypes.c_ulong),
+        ('dwMinorVersion', ctypes.c_ulong),
+        ('dwBuildNumber', ctypes.c_ulong),
+        ('dwPlatformId', ctypes.c_ulong),
+        ('szCSDVersion', ctypes.c_wchar * 128),
+    ]
+
+    def __init__(self):
+        super().__init__()
+        self.dwOSVersionInfoSize = ctypes.sizeof(self)

@@ -7,3 +7,4 @@ NtSetValueKey = def_win_api(_dll.NtSetValueKey, ctypes.c_ulong, (ctypes.c_void_p
 RtlOpenCurrentUser = def_win_api(_dll.RtlOpenCurrentUser, ctypes.c_ulong, (ctypes.c_ulong, ctypes.c_void_p), error_nt=True)
 NtQuerySystemInformation = def_win_api(_dll.NtQuerySystemInformation, ctypes.c_ulong, (ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p), error_nt=True)
 NtQueryObject = def_win_api(_dll.NtQueryObject, ctypes.c_ulong, (ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p), error_nt=True)
+RtlGetVersion = def_win_api(_dll.RtlGetVersion, ctypes.c_long, (ctypes.c_void_p,), error_nt=True)
