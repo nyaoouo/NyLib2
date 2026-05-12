@@ -120,7 +120,7 @@ ULONG WINAPI RunPython()
     "import io\n"
     "import os.path\n"
     "__file__ = r\"%ws\"\n"
-    "sys.stderr = sys.stdout = io.open(\"CONOUT$\", \"wt\", encoding=\"utf-8\")\n"
+    "%s"
     "def parse_path(paths):\n"
     "    if isinstance(paths, str):\n"
     "        paths = paths.split(os.pathsep)\n"
@@ -134,11 +134,12 @@ ULONG WINAPI RunPython()
     memcpy(mainDir, pyMain, sizeof(mainDir));
     PathRemoveFileSpecW(mainDir);
 
+    WCHAR buffer[MAX_PATH] = { 0 };
     WCHAR cfgPath[2048] = { 0 };
     GetCfgValue(L"Python", L"path", cfgPath, sizeof(cfgPath));
-
-    char* initBuffer = (char*)malloc(snprintf(NULL, 0, initTemplate, pyMain, cfgPath) + 1);
-    initBuffer[sprintf(initBuffer, initTemplate, pyMain, cfgPath)] = 0;
+    char* redirOutCode = GetCfgValue(L"Hijack", L"create_console", buffer, MAX_PATH)? "sys.stderr = sys.stdout = io.open(\"CONOUT$\", \"wt\", encoding=\"utf-8\")\n" : "";
+    char* initBuffer = (char*)malloc(snprintf(NULL, 0, initTemplate, pyMain, redirOutCode, cfgPath) + 1);
+    initBuffer[sprintf(initBuffer, initTemplate, pyMain, redirOutCode, cfgPath)] = 0;
 	fclose(fp);
 
 	Py_Initialize();

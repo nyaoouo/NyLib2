@@ -1,0 +1,43 @@
+from __future__ import annotations
+import collections.abc
+import pyimgui.imgui
+import typing
+from . import detours
+from . import inbound
+__all__: list[str] = ['Dx9Inbound', 'Dx9Window', '_Dx9Render', '_RenderBase', 'detours', 'inbound']
+class Dx9Inbound(_Dx9Render):
+    def Attach(self) -> None:
+        ...
+    def Detach(self) -> None:
+        ...
+    def __init__(self, renderCallback: collections.abc.Callable | None = None) -> None:
+        ...
+    @property
+    def isInLogic(self) -> bool:
+        ...
+class Dx9Window(_Dx9Render):
+    ClearColor: pyimgui.imgui.ImVec4
+    def Serve(self) -> None:
+        ...
+    def __init__(self, renderCallback: collections.abc.Callable | None = None) -> None:
+        ...
+class _Dx9Render(_RenderBase):
+    @staticmethod
+    def CreateDeviceObjects() -> bool:
+        ...
+    @staticmethod
+    def InvalidateDeviceObjects() -> None:
+        ...
+class _RenderBase:
+    renderCallback: collections.abc.Callable | None
+    title: str
+    def CallBeforeFrameOnce(self, arg0: collections.abc.Callable) -> None:
+        ...
+    def Close(self) -> None:
+        ...
+    def HideToTray(self) -> None:
+        ...
+    def RestoreFromTray(self) -> None:
+        ...
+    def UpdateTrayIconInfo(self, tooltip: str, iconPath: str = '') -> None:
+        ...

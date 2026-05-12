@@ -1,0 +1,11 @@
+/auto_src/
+/build/
+/pyimgui/
+/release/
+/debug/
+__pycache__/
+*.pyc
+*.pyd
+*.pdb
+*.exp
+*.lib

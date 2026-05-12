@@ -1,5 +1,6 @@
 .idea/
 .ignore/
+.agent-memory/
 ### Python template
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -8,6 +9,7 @@ __pycache__/
 *.dmp
 *.pdb
 /nylib/pyimgui/
+/nylib/pyimgui*.pyd
 /nylib/winutils/python_loader/python_loader.dll
 .vscode/
 imgui.ini
