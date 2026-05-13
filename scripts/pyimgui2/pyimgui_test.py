@@ -46,7 +46,7 @@ class DemoState:
 
         self.show_about_window = False
         self.show_debug_log_window = False
-        self.show_demo_window = True
+        self.show_demo_window = False
         self.show_id_stack_tool_window = False
         self.show_metrics_window = False
 
