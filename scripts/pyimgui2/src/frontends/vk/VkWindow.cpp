@@ -27,6 +27,18 @@ START_M_IMGUI_IMPL_VK_NAMESPACE
                     return true;
             return false;
         }
+
+        int Hook_Platform_CreateVkSurface(ImGuiViewport* vp, ImU64 vk_inst, const void* vk_allocators, ImU64* out_vk_surface)
+        {
+            VkWin32SurfaceCreateInfoKHR info = {};
+            info.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+            info.hinstance = ::GetModuleHandle(nullptr);
+            info.hwnd = (HWND)vp->PlatformHandle;
+            VkSurfaceKHR surface = VK_NULL_HANDLE;
+            VkResult err = vkCreateWin32SurfaceKHR((VkInstance)vk_inst, &info, (const VkAllocationCallbacks*)vk_allocators, &surface);
+            *out_vk_surface = (ImU64)surface;
+            return (int)err;
+        }
     }
 
     VkWindow::VkWindow(std::optional<py::function> renderCallback) : VkRender(renderCallback)
@@ -365,6 +377,7 @@ START_M_IMGUI_IMPL_VK_NAMESPACE
         }
 
         ImGui_ImplWin32_Init(this->hwnd);
+        ImGui::GetPlatformIO().Platform_CreateVkSurface = Hook_Platform_CreateVkSurface;
 
         ImGui_ImplVulkan_InitInfo initInfo = {};
         initInfo.Instance = this->instance;
