@@ -11,6 +11,8 @@ FRONTENDS = {
     'dx10': ('pyimgui.dx10', 'Dx10Window'),
     'dx11': ('pyimgui.dx11', 'Dx11Window'),
     'dx12': ('pyimgui.dx12', 'Dx12Window'),
+    'gl3': ('pyimgui.gl3', 'Gl3Window'),
+    'vk': ('pyimgui.vk', 'VkWindow'),
 }
 
 

@@ -1552,6 +1552,14 @@ def patch_frontend_compat_stubs(output_dir, frontends):
     if 'dx12' in frontends:
         exports.extend(['Dx12Inbound', 'Dx12Render', 'Dx12TextureHelper', 'Dx12Window'])
         imports.append('from pyimgui.dx12 import Dx12Inbound as Dx12Inbound, Dx12Render as Dx12Render, Dx12TextureHelper as Dx12TextureHelper, Dx12Window as Dx12Window')
+    if 'gl3' in frontends:
+        exports.extend(['Gl3Inbound', 'Gl3Render', 'Gl3Window', '_Gl3Render'])
+        imports.append('from pyimgui.gl3 import Gl3Inbound as Gl3Inbound, Gl3Window as Gl3Window, _Gl3Render as _Gl3Render')
+        imports.append('Gl3Render = _Gl3Render')
+    if 'vk' in frontends:
+        exports.extend(['VkInbound', 'VkRender', 'VkWindow', '_VkRender'])
+        imports.append('from pyimgui.vk import VkInbound as VkInbound, VkWindow as VkWindow, _VkRender as _VkRender')
+        imports.append('VkRender = _VkRender')
     if imports:
         data = re.sub(
             r"__all__: list\[str\] = \[[^\]]*\]",
@@ -1611,6 +1619,24 @@ def patch_frontend_module_stubs(output_dir, module_name):
             data,
             count=1,
         )
+    elif module_key == 'gl3':
+        data = re.sub(
+            r"__all__: list\[str\] = \[[^\]]*\]",
+            "__all__: list[str] = ['Gl3Inbound', 'Gl3Render', 'Gl3Window', '_Gl3Render', '_RenderBase', 'detours', 'inbound']",
+            data,
+            count=1,
+        )
+        data = data.replace('Gl3Render = _Gl3Render\n', '')
+        data = data.rstrip() + '\nGl3Render = _Gl3Render\n'
+    elif module_key == 'vk':
+        data = re.sub(
+            r"__all__: list\[str\] = \[[^\]]*\]",
+            "__all__: list[str] = ['VkInbound', 'VkRender', 'VkWindow', '_VkRender', '_RenderBase', 'detours', 'inbound']",
+            data,
+            count=1,
+        )
+        data = data.replace('VkRender = _VkRender\n', '')
+        data = data.rstrip() + '\nVkRender = _VkRender\n'
     module_stub.write_text(data, encoding='utf-8')
     inbound_stub = output_dir.joinpath(*module_parts) / 'inbound.pyi'
     if inbound_stub.is_file():
@@ -1771,6 +1797,49 @@ def generate(backends, debug=0, with_stubs=True):
                 debug=debug,
             )
             frontend_modules.append('pyimgui.dx12')
+        if 'gl3' in backends:
+            pybind11_build(
+                name='pyimgui.gl3',
+                sources=sorted(map(str, [
+                    imgui_dir / 'backends' / 'imgui_impl_win32.cpp',
+                    imgui_dir / 'backends' / 'imgui_impl_opengl3.cpp',
+                    *(src_dir / 'frontends' / 'common').glob('*.cpp'),
+                    *(src_dir / 'frontends' / 'gl3').glob('*.cpp'),
+                    *(f for f in (detours_dir / 'src').glob('*.cpp') if f.name != 'uimports.cpp'),
+                    src_dir / 'gHeader.cpp',
+                ])),
+                include_dirs=common_include_dirs,
+                extra_objects=[str(core_import_lib)],
+                extra_compile_args=frontend_compile_args,
+                libraries=['user32', 'gdi32', 'dwmapi', 'shell32', 'opengl32'],
+                debug=debug,
+            )
+            frontend_modules.append('pyimgui.gl3')
+        if 'vk' in backends:
+            vulkan_sdk_path = pathlib.Path(ensure_env.ensure_vulkan_sdk())
+            vulkan_include_dir = vulkan_sdk_path / 'Include'
+            vulkan_lib = vulkan_sdk_path / 'Lib' / 'vulkan-1.lib'
+            if not vulkan_include_dir.is_dir():
+                raise RuntimeError(f"Vulkan SDK include dir not found: {vulkan_include_dir}")
+            if not vulkan_lib.is_file():
+                raise RuntimeError(f"Vulkan SDK import lib not found: {vulkan_lib}")
+            pybind11_build(
+                name='pyimgui.vk',
+                sources=sorted(map(str, [
+                    imgui_dir / 'backends' / 'imgui_impl_win32.cpp',
+                    imgui_dir / 'backends' / 'imgui_impl_vulkan.cpp',
+                    *(src_dir / 'frontends' / 'common').glob('*.cpp'),
+                    *(src_dir / 'frontends' / 'vk').glob('*.cpp'),
+                    *(f for f in (detours_dir / 'src').glob('*.cpp') if f.name != 'uimports.cpp'),
+                    src_dir / 'gHeader.cpp',
+                ])),
+                include_dirs=common_include_dirs + [str(vulkan_include_dir)],
+                extra_objects=[str(core_import_lib), str(vulkan_lib)],
+                extra_compile_args=frontend_compile_args,
+                libraries=['user32', 'gdi32', 'dwmapi', 'shell32'],
+                debug=debug,
+            )
+            frontend_modules.append('pyimgui.vk')
         if with_stubs:
             stub_gen('pyimgui', str(cwd), pyimgui_generator.stub_field_types, pyimgui_generator.stub_function_return_types)
             for frontend_module in frontend_modules:
@@ -1790,7 +1859,7 @@ def main():
     parser.add_argument('--skip-stubs', action='store_true')
     args = parser.parse_args()
 
-    generate(['win32', 'dx9', 'dx10', 'dx11', 'dx12'], debug=args.debug, with_stubs=not args.skip_stubs)
+    generate(['win32', 'dx9', 'dx10', 'dx11', 'dx12', 'gl3', 'vk'], debug=args.debug, with_stubs=not args.skip_stubs)
     if not args.skip:
         import pyimgui_test
         pyimgui_test.test()
