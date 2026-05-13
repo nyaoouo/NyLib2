@@ -161,6 +161,108 @@ def ensure_msvc(tmp_dir=None, shell=True):
     raise FileNotFoundError('msvc not found')
 
 
+VULKAN_SDK_VERSION = '1.3.296.0'
+
+
+def _vulkan_sdk_valid(path):
+    if not path:
+        return False
+    path = pathlib.Path(path)
+    return (
+        path.is_dir()
+        and (path / 'Include' / 'vulkan' / 'vulkan.h').is_file()
+        and (path / 'Lib' / 'vulkan-1.lib').is_file()
+    )
+
+
+def _vulkan_sdk_candidate_roots():
+    roots = []
+    for env_name in ('LOCALAPPDATA', 'USERPROFILE'):
+        base = os.environ.get(env_name)
+        if base:
+            roots.append(pathlib.Path(base) / 'VulkanSDK')
+    sysdrive = os.environ.get('SystemDrive', 'C:')
+    roots.append(pathlib.Path(f'{sysdrive}\\VulkanSDK'))
+    return roots
+
+
+def _find_vulkan_sdk():
+    """Return the path of an installed Vulkan SDK, or None."""
+    candidates = []
+
+    env_path = os.environ.get('VULKAN_SDK')
+    if env_path:
+        candidates.append(env_path)
+
+    for getter in (get_sys_env, get_user_env):
+        try:
+            value = getter('VULKAN_SDK')
+        except (FileNotFoundError, OSError):
+            continue
+        if value:
+            candidates.append(os.path.expandvars(value))
+
+    for root in _vulkan_sdk_candidate_roots():
+        if root.is_dir():
+            for sub in sorted(root.iterdir(), reverse=True):
+                candidates.append(sub)
+
+    for candidate in candidates:
+        if _vulkan_sdk_valid(candidate):
+            return pathlib.Path(candidate)
+    return None
+
+
+def ensure_vulkan_sdk(tmp_dir=None, shell=True, version=None, prefer_user_install=True):
+    """Ensure the LunarG Vulkan SDK is installed locally and VULKAN_SDK is exported.
+
+    When ``prefer_user_install`` is True (default), the installer is invoked with
+    ``copy_only=1`` (introduced in SDK 1.3.296.0) so that no admin / UAC prompt
+    is required and the SDK is dropped into ``%LOCALAPPDATA%\\VulkanSDK\\<ver>``.
+    """
+    if p := _find_vulkan_sdk():
+        os.environ['VULKAN_SDK'] = str(p)
+        return p
+
+    version = version or VULKAN_SDK_VERSION
+    tmp_dir = pathlib.Path(tmp_dir or get_tmpdir())
+    installer = tmp_dir / f'vulkansdk-windows-X64-{version}.exe'
+    # Canonical LunarG download URL. See:
+    # https://vulkan.lunarg.com/content/view/latest-sdk-version-api
+    url = f'https://sdk.lunarg.com/sdk/download/{version}/windows/vulkan_sdk.exe'
+
+    if not installer.is_file():
+        download(url, installer, show_progress=shell)
+
+    if prefer_user_install:
+        local_root = pathlib.Path(os.environ.get('LOCALAPPDATA') or get_tmpdir())
+        install_root = local_root / 'VulkanSDK' / version
+    else:
+        sysdrive = os.environ.get('SystemDrive', 'C:')
+        install_root = pathlib.Path(f'{sysdrive}\\VulkanSDK\\{version}')
+    install_root.parent.mkdir(parents=True, exist_ok=True)
+
+    # Qt-Installer-Framework silent install. copy_only=1 (1.3.296.0+) skips
+    # registry / env-var writes so no admin elevation is required.
+    args = [
+        str(installer),
+        '--root', str(install_root),
+        '--accept-licenses',
+        '--default-answer',
+        '--confirm-command', 'install',
+    ]
+    if prefer_user_install:
+        # copy_only=1 must be appended after the `install` command per LunarG docs:
+        # https://vulkan.lunarg.com/doc/view/latest/windows/getting_started.html
+        args.append('copy_only=1')
+    subprocess.check_call(args, shell=shell)
+
+    if p := _find_vulkan_sdk():
+        os.environ['VULKAN_SDK'] = str(p)
+        return p
+    raise FileNotFoundError(f'Vulkan SDK install completed but no valid SDK found under {install_root}')
+
+
 def _find_cygwin_dir():
     try:
         reg = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Cygwin\setup", 0, winreg.KEY_READ)

@@ -115,7 +115,8 @@ void __LoadPython()
         "import io\n"
         "import os.path\n"
         "__file__ = r\"{}\"\n"
-        "sys.stderr = sys.stdout = io.open(\"CONOUT$\", \"wt\", encoding=\"utf-8\")\n"
+        "{}"
+        // "sys.stderr = sys.stdout = io.open(\"CONOUT$\", \"wt\", encoding=\"utf-8\")\n"
         "def parse_path(paths):\n"
         "    if isinstance(paths, str):\n"
         "        paths = paths.split(os.pathsep)\n"
@@ -124,6 +125,7 @@ void __LoadPython()
         "            sys.path.append(path)\n"
         "parse_path(r\"{}\")\n"
         "parse_path(os.path.dirname(__file__))\n",
+        ((g_cfg->createConsole)? "sys.stderr = sys.stdout = io.open(\"CONOUT$\", \"wt\", encoding=\"utf-8\")\n" : ""),
         s_pyMain, s_pyPaths);
 
     Py_Initialize();
