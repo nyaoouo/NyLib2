@@ -1401,6 +1401,16 @@ def pybind11_build(*a, debug=0, **kw):
             extra.append(flag)
     ext.extra_compile_args = extra
 
+    # Setuptools' inplace copy step does not auto-create the parent package
+    # directory, so for dotted module names (e.g. ``pyimgui.dx9``) we make
+    # sure ``./pyimgui/`` exists before the build runs. Otherwise the .pyd is
+    # silently dropped and downstream packaging (copy_build_outputs, etc.)
+    # never sees it.
+    module_name = kw.get('name') or (a[0] if a else None)
+    if module_name and '.' in module_name:
+        parts = module_name.split('.')
+        pathlib.Path.cwd().joinpath(*parts[:-1]).mkdir(parents=True, exist_ok=True)
+
     dist = Distribution({
         'cmdclass': {'build_ext': build_ext},
         'ext_modules': [ext],
@@ -1667,8 +1677,12 @@ def copy_build_outputs(cwd, debug=0):
     cwd = pathlib.Path(cwd)
     core_files = sorted(cwd.glob('pyimgui*.pyd'))
     package_dir = cwd / 'pyimgui'
-    if not core_files or not package_dir.is_dir():
+    if not core_files:
+        print('copy_build_outputs: no pyimgui*.pyd in cwd, skipping')
         return
+    if not package_dir.is_dir():
+        print('copy_build_outputs: pyimgui/ package dir is missing, creating empty one')
+        package_dir.mkdir(parents=True, exist_ok=True)
     for dst_dir in (cwd.parent.parent / 'nylib', cwd / ('debug' if debug else 'release')):
         dst_dir.mkdir(parents=True, exist_ok=True)
         for core_file in core_files:
