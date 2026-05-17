@@ -26,6 +26,14 @@ namespace
             {"Dx12Render", {"dx12", "Dx12Render"}},
             {"Dx12TextureHelper", {"dx12", "Dx12TextureHelper"}},
             {"Dx12Window", {"dx12", "Dx12Window"}},
+            {"_Gl3Render", {"gl3", "_Gl3Render"}},
+            {"Gl3Inbound", {"gl3", "Gl3Inbound"}},
+            {"Gl3Render", {"gl3", "_Gl3Render"}},
+            {"Gl3Window", {"gl3", "Gl3Window"}},
+            {"_VkRender", {"vk", "_VkRender"}},
+            {"VkInbound", {"vk", "VkInbound"}},
+            {"VkRender", {"vk", "_VkRender"}},
+            {"VkWindow", {"vk", "VkWindow"}},
         };
         auto it = frontend_attrs.find(name);
         if (it == frontend_attrs.end())

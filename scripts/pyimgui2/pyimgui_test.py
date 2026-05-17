@@ -11,6 +11,8 @@ FRONTENDS = {
     'dx10': ('pyimgui.dx10', 'Dx10Window'),
     'dx11': ('pyimgui.dx11', 'Dx11Window'),
     'dx12': ('pyimgui.dx12', 'Dx12Window'),
+    'gl3': ('pyimgui.gl3', 'Gl3Window'),
+    'vk': ('pyimgui.vk', 'VkWindow'),
 }
 
 
@@ -44,7 +46,7 @@ class DemoState:
 
         self.show_about_window = False
         self.show_debug_log_window = False
-        self.show_demo_window = True
+        self.show_demo_window = False
         self.show_id_stack_tool_window = False
         self.show_metrics_window = False
 
