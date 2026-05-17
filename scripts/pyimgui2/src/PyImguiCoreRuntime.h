@@ -44,6 +44,16 @@ struct PyImVectorBase
 };
 
 template <typename T>
+static py::class_<T> pyimgui_add_default_init(py::class_<T> cls)
+{
+    if constexpr (std::is_default_constructible_v<T>)
+    {
+        cls.def(py::init([]() { return new T(); }));
+    }
+    return cls;
+}
+
+template <typename T>
 struct PyImVectorWrapper : PyImVectorBase
 {
     ImVector<T>* vector = nullptr;

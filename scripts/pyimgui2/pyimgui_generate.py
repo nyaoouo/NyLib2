@@ -1187,7 +1187,12 @@ namespace PYBIND11_NAMESPACE { namespace detail { \
             if wrapper := specified_wrappers.get(f'_CLS_:{record_name}'):
                 struct_defs.write(f'{wrapper}\n')
                 continue
-            struct_defs.write(f'py::class_<{record_name}>(m, "{record_name}", py::dynamic_attr())')
+            extra = specified_wrappers.get(f'_CLS_EXTRA_:{record_name}')
+            wrap_default_init = not (extra and 'py::init' in extra)
+            if wrap_default_init:
+                struct_defs.write(f'pyimgui_add_default_init(py::class_<{record_name}>(m, "{record_name}", py::dynamic_attr())')
+            else:
+                struct_defs.write(f'py::class_<{record_name}>(m, "{record_name}", py::dynamic_attr())')
             with struct_defs.push_indent():
                 for field in record.fields:
                     if stub_type := self._field_stub_type(record_name, field):
@@ -1208,9 +1213,12 @@ namespace PYBIND11_NAMESPACE { namespace detail { \
                         method_def = self.make_function_def(method, owner=record_name, chain=True)
                     if method_def:
                         struct_defs.write('\n' + method_def)
-                if extra := specified_wrappers.get(f'_CLS_EXTRA_:{record_name}'):
+                if extra:
                     struct_defs.write('\n' + extra)
-            struct_defs.write('\n;\n')
+            if wrap_default_init:
+                struct_defs.write('\n);\n')
+            else:
+                struct_defs.write('\n;\n')
 
         template_defs = CodeWriter(1)
         for element_type in sorted(self.imvector_types):
