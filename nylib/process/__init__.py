@@ -1,3 +1,4 @@
+import contextlib
 import ctypes
 import functools
 import pathlib
@@ -38,7 +39,8 @@ class Process:
         return mbi
 
     def virtual_protect(self, address: int, size: int, protect: int):
-        return winapi.VirtualProtectEx(self.handle, address, size, protect, ctypes.byref(ctypes.c_ulong()))
+        winapi.VirtualProtectEx(self.handle, address, size, protect, ctypes.byref(old_prot := ctypes.c_ulong()))
+        return old_prot.value
 
     def iter_memory_region(self, start=0, end=None):
         pos = start

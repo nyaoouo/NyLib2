@@ -25,10 +25,10 @@ class EventLoop:
         self._serve_thread = threading.Thread(target=self.serve, daemon=True)
         self._terminate = False
 
-    def create_event(self, func: typing.Callable, args, kwargs, delay: float = 0, repeat: bool = False):
+    def create_event(self, func: typing.Callable, args = None, kwargs = None, delay: float = 0, repeat: bool = False):
         if delay == 0 and repeat:
             raise ValueError("Cannot repeat an event with zero delay")
-        evt = Event(self, func, args, kwargs, delay, repeat, time.time() + delay)
+        evt = Event(self, func, args or (), kwargs or {}, delay, repeat, time.time() + delay)
         handle = id(evt)
         with self.lock:
             idx = bisect.bisect_left(self._events_by_time, evt.next_time, key=lambda e: e.next_time)
