@@ -1,6 +1,7 @@
 import logging
 import os
 import socket
+import sys
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -127,7 +128,15 @@ def is_installed(*_a):
         if required == 0: return True
     return False
 
-if os.environ.get('PYTHON_PIP_ALL_REQ_INSTALLED'):
+# Inside a PyInstaller-frozen executable the pip-based presence check and
+# install fallback are both broken: pip's ``dist-info`` metadata is not
+# bundled (so ``is_installed`` returns False even when the package IS in
+# the bundle), and ``pip._internal.commands.install`` itself is not bundled
+# either (so the install fallback raises ``ModuleNotFoundError``). The only
+# correct behaviour for a frozen consumer is to treat all requirements as
+# already satisfied; the actual ``import <pkg>`` calls later in the library
+# will succeed against the bundled binaries.
+if os.environ.get('PYTHON_PIP_ALL_REQ_INSTALLED') or getattr(sys, 'frozen', False):
     required = lambda *_a: True
 else:
     def required(*_a):
