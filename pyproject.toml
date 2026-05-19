@@ -1,0 +1,106 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nylib"
+version = "0.1.0"
+description = "Windows-focused Python toolkit for process inspection, hooking, injection, and Dear ImGui overlays."
+readme = "readme.md"
+license = { file = "license.txt" }
+requires-python = ">=3.11"
+authors = [{ name = "ny" }]
+keywords = [
+    "windows",
+    "debugger",
+    "process",
+    "memory",
+    "hook",
+    "injection",
+    "imgui",
+    "reverse-engineering",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: System :: Hardware",
+]
+# Runtime dependencies are intentionally empty. `nylib.utils.pip.required(...)`
+# performs lazy `pip install` of native-binding packages on first use, and the
+# same module no-ops inside a PyInstaller-frozen bundle. Use the extras below
+# if you prefer eager installation.
+dependencies = []
+
+[project.optional-dependencies]
+# Pull these together with `pip install "nylib[hook]"`, etc.
+hook = ["pefile"]
+asm = ["setuptools", "keystone-engine", "capstone"]
+web = ["requests", "tqdm"]
+full = [
+    "pefile",
+    "setuptools",
+    "keystone-engine",
+    "capstone",
+    "requests",
+    "tqdm",
+]
+
+[project.urls]
+Homepage = "https://github.com/nyaoouo/NyLib2"
+Repository = "https://github.com/nyaoouo/NyLib2"
+
+# PyInstaller auto-discovers the hooks shipped under `nylib/__pyinstaller/`
+# through this entry point once `nylib` is installed.
+[project.entry-points."pyinstaller40"]
+hook-dirs = "nylib.__pyinstaller:get_hook_dirs"
+tests = "nylib.__pyinstaller:get_PyInstaller_tests"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["nylib*"]
+exclude = [
+    "nylib.*.__pycache__",
+    "scripts*",
+    "build*",
+    ".venv*",
+    ".ignore*",
+]
+
+# Ship Python type stubs, PyInstaller hooks, and the bundled font resources.
+# Compiled native extensions (.pyd / .dll / .so / .dylib / .lib / .pdb) are
+# DELIBERATELY NOT shipped: they are CPython-ABI-specific and must be built
+# locally by the user (see `scripts/pyimgui2/pyimgui_generate.py` and the
+# notes in AGENTS.md).
+[tool.setuptools.package-data]
+"nylib" = ["py.typed", "*.pyi"]
+"nylib.pyimgui" = ["*.pyi", "**/*.pyi"]
+"nylib.imguiutils.icons" = ["**/*.ttf"]
+"nylib.__pyinstaller" = ["README.md"]
+"nylib.winutils.python_hijack" = ["*.template.cpp"]
+"nylib.winutils.python_loader" = ["*.cpp"]
+
+[tool.setuptools.exclude-package-data]
+"*" = [
+    "*.pyd",
+    "*.dll",
+    "*.so",
+    "*.dylib",
+    "*.pdb",
+    "*.exp",
+    "*.lib",
+    "*.obj",
+    "*.dmp",
+    "__pycache__",
+    "__pycache__/*",
+]
