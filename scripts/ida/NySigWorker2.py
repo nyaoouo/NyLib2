@@ -30,11 +30,16 @@ import typing
 from dataclasses import dataclass
 
 try:
-    from PySide6 import QtCore, QtWidgets
-    QT_BINDING = "PySide6"
+    try:
+        from PySide6 import QtCore, QtWidgets
+        QT_BINDING = "PySide6"
+    except ImportError:
+        from PyQt5 import QtCore, QtWidgets
+        QT_BINDING = "PyQt5"
 except ImportError:
-    from PyQt5 import QtCore, QtWidgets
-    QT_BINDING = "PyQt5"
+    QtCore = None
+    QtWidgets = None
+    QT_BINDING = None
 
 import idaapi
 import ida_bytes
@@ -1262,283 +1267,290 @@ def search_sig(
         logger(tr(language, "result_limit", limit=limit))
     return results
 
+if QT_BINDING is not None:
+    class NySigWorkerDialog(QtWidgets.QDialog):
+        def __init__(self, parent: QtWidgets.QWidget | None = None):
+            super().__init__(parent)
+            self.setMinimumWidth(900)
+            self.translated_labels: dict[str, QtWidgets.QLabel] = {}
+            self._setup_ui()
+            self._load_defaults()
 
-class NySigWorkerDialog(QtWidgets.QDialog):
-    def __init__(self, parent: QtWidgets.QWidget | None = None):
-        super().__init__(parent)
-        self.setMinimumWidth(900)
-        self.translated_labels: dict[str, QtWidgets.QLabel] = {}
-        self._setup_ui()
-        self._load_defaults()
+        def _setup_ui(self) -> None:
+            root_layout = QtWidgets.QVBoxLayout(self)
 
-    def _setup_ui(self) -> None:
-        root_layout = QtWidgets.QVBoxLayout(self)
+            language_layout = QtWidgets.QHBoxLayout()
+            self.language_combo = QtWidgets.QComboBox()
+            self.language_combo.addItem("English", "en")
+            self.language_combo.addItem("中文", "zh")
+            language_layout.addStretch(1)
+            language_layout.addWidget(self._label("language"))
+            language_layout.addWidget(self.language_combo)
 
-        language_layout = QtWidgets.QHBoxLayout()
-        self.language_combo = QtWidgets.QComboBox()
-        self.language_combo.addItem("English", "en")
-        self.language_combo.addItem("中文", "zh")
-        language_layout.addStretch(1)
-        language_layout.addWidget(self._label("language"))
-        language_layout.addWidget(self.language_combo)
+            self.target_group = QtWidgets.QGroupBox()
+            target_layout = QtWidgets.QGridLayout(self.target_group)
+            self.target_edit = QtWidgets.QLineEdit()
+            self.here_button = QtWidgets.QPushButton()
+            self.operand_button = QtWidgets.QPushButton()
+            self.make_button = QtWidgets.QPushButton()
+            target_layout.addWidget(self._label("target"), 0, 0)
+            target_layout.addWidget(self.target_edit, 0, 1)
+            target_layout.addWidget(self.here_button, 0, 2)
+            target_layout.addWidget(self.operand_button, 0, 3)
+            target_layout.addWidget(self.make_button, 0, 4)
 
-        self.target_group = QtWidgets.QGroupBox()
-        target_layout = QtWidgets.QGridLayout(self.target_group)
-        self.target_edit = QtWidgets.QLineEdit()
-        self.here_button = QtWidgets.QPushButton()
-        self.operand_button = QtWidgets.QPushButton()
-        self.make_button = QtWidgets.QPushButton()
-        target_layout.addWidget(self._label("target"), 0, 0)
-        target_layout.addWidget(self.target_edit, 0, 1)
-        target_layout.addWidget(self.here_button, 0, 2)
-        target_layout.addWidget(self.operand_button, 0, 3)
-        target_layout.addWidget(self.make_button, 0, 4)
+            self.compare_edit = QtWidgets.QLineEdit()
+            self.compare_button = QtWidgets.QPushButton()
+            self.compare_clear_button = QtWidgets.QPushButton()
+            target_layout.addWidget(self._label("compare"), 1, 0)
+            target_layout.addWidget(self.compare_edit, 1, 1, 1, 2)
+            target_layout.addWidget(self.compare_button, 1, 3)
+            target_layout.addWidget(self.compare_clear_button, 1, 4)
 
-        self.compare_edit = QtWidgets.QLineEdit()
-        self.compare_button = QtWidgets.QPushButton()
-        self.compare_clear_button = QtWidgets.QPushButton()
-        target_layout.addWidget(self._label("compare"), 1, 0)
-        target_layout.addWidget(self.compare_edit, 1, 1, 1, 2)
-        target_layout.addWidget(self.compare_button, 1, 3)
-        target_layout.addWidget(self.compare_clear_button, 1, 4)
+            self.options_group = QtWidgets.QGroupBox()
+            options_layout = QtWidgets.QGridLayout(self.options_group)
+            self.nested_check = QtWidgets.QCheckBox()
+            self.nested_check.setChecked(True)
+            self.follow_refs_check = QtWidgets.QCheckBox()
+            self.follow_refs_check.setChecked(True)
+            self.depth_spin = self._make_spin(0, 8, 2)
+            self.sub_instr_spin = self._make_spin(1, 64, 8)
+            self.workers_spin = self._make_spin(1, 5000, 500)
+            self.steps_spin = self._make_spin(1, 500, 50)
+            self.found_spin = self._make_spin(1, 100, 10)
+            self.validate_spin = self._make_spin(1, 10000, 20)
+            options_layout.addWidget(self.nested_check, 0, 0)
+            options_layout.addWidget(self.follow_refs_check, 0, 1)
+            options_layout.addWidget(self._label("depth"), 0, 2)
+            options_layout.addWidget(self.depth_spin, 0, 3)
+            options_layout.addWidget(self._label("sub_instr"), 0, 4)
+            options_layout.addWidget(self.sub_instr_spin, 0, 5)
+            options_layout.addWidget(self._label("workers"), 1, 0)
+            options_layout.addWidget(self.workers_spin, 1, 1)
+            options_layout.addWidget(self._label("steps"), 1, 2)
+            options_layout.addWidget(self.steps_spin, 1, 3)
+            options_layout.addWidget(self._label("found"), 1, 4)
+            options_layout.addWidget(self.found_spin, 1, 5)
+            options_layout.addWidget(self._label("validate"), 1, 6)
+            options_layout.addWidget(self.validate_spin, 1, 7)
 
-        self.options_group = QtWidgets.QGroupBox()
-        options_layout = QtWidgets.QGridLayout(self.options_group)
-        self.nested_check = QtWidgets.QCheckBox()
-        self.nested_check.setChecked(True)
-        self.follow_refs_check = QtWidgets.QCheckBox()
-        self.follow_refs_check.setChecked(True)
-        self.depth_spin = self._make_spin(0, 8, 2)
-        self.sub_instr_spin = self._make_spin(1, 64, 8)
-        self.workers_spin = self._make_spin(1, 5000, 500)
-        self.steps_spin = self._make_spin(1, 500, 50)
-        self.found_spin = self._make_spin(1, 100, 10)
-        self.validate_spin = self._make_spin(1, 10000, 20)
-        options_layout.addWidget(self.nested_check, 0, 0)
-        options_layout.addWidget(self.follow_refs_check, 0, 1)
-        options_layout.addWidget(self._label("depth"), 0, 2)
-        options_layout.addWidget(self.depth_spin, 0, 3)
-        options_layout.addWidget(self._label("sub_instr"), 0, 4)
-        options_layout.addWidget(self.sub_instr_spin, 0, 5)
-        options_layout.addWidget(self._label("workers"), 1, 0)
-        options_layout.addWidget(self.workers_spin, 1, 1)
-        options_layout.addWidget(self._label("steps"), 1, 2)
-        options_layout.addWidget(self.steps_spin, 1, 3)
-        options_layout.addWidget(self._label("found"), 1, 4)
-        options_layout.addWidget(self.found_spin, 1, 5)
-        options_layout.addWidget(self._label("validate"), 1, 6)
-        options_layout.addWidget(self.validate_spin, 1, 7)
+            self.search_group = QtWidgets.QGroupBox()
+            search_layout = QtWidgets.QGridLayout(self.search_group)
+            self.search_edit = QtWidgets.QPlainTextEdit()
+            self.search_edit.setMaximumHeight(90)
+            self.search_button = QtWidgets.QPushButton()
+            self.format_button = QtWidgets.QPushButton()
+            self.search_limit_spin = self._make_spin(1, 10000, 100)
+            search_layout.addWidget(self.search_edit, 0, 0, 1, 5)
+            search_layout.addWidget(self._label("limit"), 1, 0)
+            search_layout.addWidget(self.search_limit_spin, 1, 1)
+            search_layout.addWidget(self.search_button, 1, 3)
+            search_layout.addWidget(self.format_button, 1, 4)
 
-        self.search_group = QtWidgets.QGroupBox()
-        search_layout = QtWidgets.QGridLayout(self.search_group)
-        self.search_edit = QtWidgets.QPlainTextEdit()
-        self.search_edit.setMaximumHeight(90)
-        self.search_button = QtWidgets.QPushButton()
-        self.format_button = QtWidgets.QPushButton()
-        self.search_limit_spin = self._make_spin(1, 10000, 100)
-        search_layout.addWidget(self.search_edit, 0, 0, 1, 5)
-        search_layout.addWidget(self._label("limit"), 1, 0)
-        search_layout.addWidget(self.search_limit_spin, 1, 1)
-        search_layout.addWidget(self.search_button, 1, 3)
-        search_layout.addWidget(self.format_button, 1, 4)
+            self.output_group = QtWidgets.QGroupBox()
+            output_layout = QtWidgets.QVBoxLayout(self.output_group)
+            self.output_edit = QtWidgets.QPlainTextEdit()
+            self.output_edit.setReadOnly(True)
+            output_layout.addWidget(self.output_edit)
 
-        self.output_group = QtWidgets.QGroupBox()
-        output_layout = QtWidgets.QVBoxLayout(self.output_group)
-        self.output_edit = QtWidgets.QPlainTextEdit()
-        self.output_edit.setReadOnly(True)
-        output_layout.addWidget(self.output_edit)
+            button_layout = QtWidgets.QHBoxLayout()
+            self.copy_button = QtWidgets.QPushButton()
+            self.clear_output_button = QtWidgets.QPushButton()
+            self.close_button = QtWidgets.QPushButton()
+            button_layout.addWidget(self.copy_button)
+            button_layout.addWidget(self.clear_output_button)
+            button_layout.addStretch(1)
+            button_layout.addWidget(self.close_button)
 
-        button_layout = QtWidgets.QHBoxLayout()
-        self.copy_button = QtWidgets.QPushButton()
-        self.clear_output_button = QtWidgets.QPushButton()
-        self.close_button = QtWidgets.QPushButton()
-        button_layout.addWidget(self.copy_button)
-        button_layout.addWidget(self.clear_output_button)
-        button_layout.addStretch(1)
-        button_layout.addWidget(self.close_button)
+            root_layout.addLayout(language_layout)
+            root_layout.addWidget(self.target_group)
+            root_layout.addWidget(self.options_group)
+            root_layout.addWidget(self.search_group)
+            root_layout.addWidget(self.output_group, 1)
+            root_layout.addLayout(button_layout)
 
-        root_layout.addLayout(language_layout)
-        root_layout.addWidget(self.target_group)
-        root_layout.addWidget(self.options_group)
-        root_layout.addWidget(self.search_group)
-        root_layout.addWidget(self.output_group, 1)
-        root_layout.addLayout(button_layout)
+            self.language_combo.currentIndexChanged.connect(self._apply_language)
+            self.here_button.clicked.connect(self._set_here)
+            self.operand_button.clicked.connect(self._set_operand)
+            self.compare_button.clicked.connect(self._browse_compare)
+            self.compare_clear_button.clicked.connect(self._clear_compare)
+            self.make_button.clicked.connect(self._run_make)
+            self.search_button.clicked.connect(self._run_search)
+            self.format_button.clicked.connect(self._format_pattern)
+            self.copy_button.clicked.connect(self._copy_output)
+            self.clear_output_button.clicked.connect(self.output_edit.clear)
+            self.close_button.clicked.connect(self.accept)
+            self._apply_language()
 
-        self.language_combo.currentIndexChanged.connect(self._apply_language)
-        self.here_button.clicked.connect(self._set_here)
-        self.operand_button.clicked.connect(self._set_operand)
-        self.compare_button.clicked.connect(self._browse_compare)
-        self.compare_clear_button.clicked.connect(self._clear_compare)
-        self.make_button.clicked.connect(self._run_make)
-        self.search_button.clicked.connect(self._run_search)
-        self.format_button.clicked.connect(self._format_pattern)
-        self.copy_button.clicked.connect(self._copy_output)
-        self.clear_output_button.clicked.connect(self.output_edit.clear)
-        self.close_button.clicked.connect(self.accept)
-        self._apply_language()
+        def _label(self, key: str) -> QtWidgets.QLabel:
+            label = QtWidgets.QLabel()
+            self.translated_labels[key] = label
+            return label
 
-    def _label(self, key: str) -> QtWidgets.QLabel:
-        label = QtWidgets.QLabel()
-        self.translated_labels[key] = label
-        return label
+        def _language(self) -> str:
+            if not hasattr(self, "language_combo"):
+                return DEFAULT_LANGUAGE
+            return self.language_combo.currentData() or DEFAULT_LANGUAGE
 
-    def _language(self) -> str:
-        if not hasattr(self, "language_combo"):
-            return DEFAULT_LANGUAGE
-        return self.language_combo.currentData() or DEFAULT_LANGUAGE
+        def _apply_language(self) -> None:
+            language = self._language()
+            self.setWindowTitle(tr(language, "window_title", binding=QT_BINDING))
+            self.target_group.setTitle(tr(language, "make_aob"))
+            self.options_group.setTitle(tr(language, "options"))
+            self.search_group.setTitle(tr(language, "search_aob"))
+            self.output_group.setTitle(tr(language, "output"))
+            self.target_edit.setPlaceholderText(tr(language, "target_placeholder"))
+            self.compare_edit.setPlaceholderText(tr(language, "compare_placeholder"))
+            self.here_button.setText(tr(language, "here"))
+            self.operand_button.setText(tr(language, "operand"))
+            self.make_button.setText(tr(language, "generate"))
+            self.compare_button.setText(tr(language, "browse"))
+            self.compare_clear_button.setText(tr(language, "clear"))
+            self.nested_check.setText(tr(language, "nested_refs"))
+            self.follow_refs_check.setText(tr(language, "follow_refs"))
+            self.search_button.setText(tr(language, "search"))
+            self.format_button.setText(tr(language, "format"))
+            self.copy_button.setText(tr(language, "copy"))
+            self.clear_output_button.setText(tr(language, "clear_output"))
+            self.close_button.setText(tr(language, "close"))
+            for key, label in self.translated_labels.items():
+                label.setText(tr(language, key))
 
-    def _apply_language(self) -> None:
-        language = self._language()
-        self.setWindowTitle(tr(language, "window_title", binding=QT_BINDING))
-        self.target_group.setTitle(tr(language, "make_aob"))
-        self.options_group.setTitle(tr(language, "options"))
-        self.search_group.setTitle(tr(language, "search_aob"))
-        self.output_group.setTitle(tr(language, "output"))
-        self.target_edit.setPlaceholderText(tr(language, "target_placeholder"))
-        self.compare_edit.setPlaceholderText(tr(language, "compare_placeholder"))
-        self.here_button.setText(tr(language, "here"))
-        self.operand_button.setText(tr(language, "operand"))
-        self.make_button.setText(tr(language, "generate"))
-        self.compare_button.setText(tr(language, "browse"))
-        self.compare_clear_button.setText(tr(language, "clear"))
-        self.nested_check.setText(tr(language, "nested_refs"))
-        self.follow_refs_check.setText(tr(language, "follow_refs"))
-        self.search_button.setText(tr(language, "search"))
-        self.format_button.setText(tr(language, "format"))
-        self.copy_button.setText(tr(language, "copy"))
-        self.clear_output_button.setText(tr(language, "clear_output"))
-        self.close_button.setText(tr(language, "close"))
-        for key, label in self.translated_labels.items():
-            label.setText(tr(language, key))
+        @staticmethod
+        def _make_spin(minimum: int, maximum: int, value: int) -> QtWidgets.QSpinBox:
+            spin = QtWidgets.QSpinBox()
+            spin.setRange(minimum, maximum)
+            spin.setValue(value)
+            return spin
 
-    @staticmethod
-    def _make_spin(minimum: int, maximum: int, value: int) -> QtWidgets.QSpinBox:
-        spin = QtWidgets.QSpinBox()
-        spin.setRange(minimum, maximum)
-        spin.setValue(value)
-        return spin
+        def _load_defaults(self) -> None:
+            current = idc.here()
+            if current != BADADDR:
+                self.target_edit.setText(format_ea(current))
+            cache = get_exec_cache()
+            compare_exe = getattr(cache, "compare_exe", "")
+            if compare_exe:
+                self.compare_edit.setText(compare_exe)
 
-    def _load_defaults(self) -> None:
-        current = idc.here()
-        if current != BADADDR:
+        def _options(self) -> SignatureOptions:
+            return SignatureOptions(
+                max_workers=self.workers_spin.value(),
+                max_found=self.found_spin.value(),
+                max_steps=self.steps_spin.value(),
+                nested_enabled=self.nested_check.isChecked(),
+                nested_depth=self.depth_spin.value(),
+                nested_max_instructions=self.sub_instr_spin.value(),
+                follow_nested_refs=self.follow_refs_check.isChecked(),
+                validate_limit=self.validate_spin.value(),
+                language=self._language(),
+            )
+
+        def _log(self, message: str) -> None:
+            print(message)
+            self.output_edit.appendPlainText(message)
+            self.output_edit.verticalScrollBar().setValue(self.output_edit.verticalScrollBar().maximum())
+            app = QtWidgets.QApplication.instance()
+            if app is not None:
+                app.processEvents()
+
+        def _set_here(self) -> None:
+            current = idc.here()
+            if current == BADADDR:
+                self._log(tr(self._language(), "invalid_current_address"))
+                return
             self.target_edit.setText(format_ea(current))
-        cache = get_exec_cache()
-        compare_exe = getattr(cache, "compare_exe", "")
-        if compare_exe:
-            self.compare_edit.setText(compare_exe)
 
-    def _options(self) -> SignatureOptions:
-        return SignatureOptions(
-            max_workers=self.workers_spin.value(),
-            max_found=self.found_spin.value(),
-            max_steps=self.steps_spin.value(),
-            nested_enabled=self.nested_check.isChecked(),
-            nested_depth=self.depth_spin.value(),
-            nested_max_instructions=self.sub_instr_spin.value(),
-            follow_nested_refs=self.follow_refs_check.isChecked(),
-            validate_limit=self.validate_spin.value(),
-            language=self._language(),
-        )
+        def _set_operand(self) -> None:
+            current = idc.here()
+            try:
+                self.target_edit.setText(format_ea(first_operand_point(current)))
+            except StopIteration:
+                self._log(tr(self._language(), "no_operand_target", ea=current))
 
-    def _log(self, message: str) -> None:
-        print(message)
-        self.output_edit.appendPlainText(message)
-        self.output_edit.verticalScrollBar().setValue(self.output_edit.verticalScrollBar().maximum())
-        app = QtWidgets.QApplication.instance()
-        if app is not None:
-            app.processEvents()
-
-    def _set_here(self) -> None:
-        current = idc.here()
-        if current == BADADDR:
-            self._log(tr(self._language(), "invalid_current_address"))
-            return
-        self.target_edit.setText(format_ea(current))
-
-    def _set_operand(self) -> None:
-        current = idc.here()
-        try:
-            self.target_edit.setText(format_ea(first_operand_point(current)))
-        except StopIteration:
-            self._log(tr(self._language(), "no_operand_target", ea=current))
-
-    def _browse_compare(self) -> None:
-        language = self._language()
-        path, _filter = QtWidgets.QFileDialog.getOpenFileName(
-            self,
-            tr(language, "file_dialog_title"),
-            "",
-            tr(language, "file_dialog_filter"),
-        )
-        if path:
-            self.compare_edit.setText(path)
-            get_exec_cache().compare_exe = path
-
-    def _clear_compare(self) -> None:
-        self.compare_edit.clear()
-        get_exec_cache().compare_exe = ""
-
-    def _run_make(self) -> None:
-        try:
+        def _browse_compare(self) -> None:
             language = self._language()
-            target = parse_ea(self.target_edit.text(), language)
-            if not in_idb(target):
-                raise ValueError(tr(language, "target_outside", ea=target))
-            compare = self.compare_edit.text().strip() or None
-            if compare:
-                get_exec_cache().compare_exe = compare
-            self._with_busy_cursor(lambda: make_sig(target, compare, self._options(), self._log))
-        except Exception as exc:
-            self._log(f"[!] {exc}")
-            self._log(traceback.format_exc())
-            QtWidgets.QMessageBox.critical(self, "NySigWorker2", str(exc))
+            path, _filter = QtWidgets.QFileDialog.getOpenFileName(
+                self,
+                tr(language, "file_dialog_title"),
+                "",
+                tr(language, "file_dialog_filter"),
+            )
+            if path:
+                self.compare_edit.setText(path)
+                get_exec_cache().compare_exe = path
 
-    def _run_search(self) -> None:
-        signature = self.search_edit.toPlainText().strip()
-        if not signature:
-            return
-        try:
-            language = self._language()
-            self._with_busy_cursor(lambda: search_sig(signature, self.search_limit_spin.value(), language, self._log))
-        except Exception as exc:
-            self._log(f"[!] {exc}")
-            self._log(traceback.format_exc())
-            QtWidgets.QMessageBox.critical(self, "NySigWorker2", str(exc))
+        def _clear_compare(self) -> None:
+            self.compare_edit.clear()
+            get_exec_cache().compare_exe = ""
 
-    def _format_pattern(self) -> None:
-        signature = self.search_edit.toPlainText().strip()
-        if not signature:
-            return
-        try:
-            pattern, _offset = split_signature_offset(signature)
-            self._log(compile_pattern(pattern).fmt(2))
-        except Exception as exc:
-            self._log(f"[!] {exc}")
+        def _run_make(self) -> None:
+            try:
+                language = self._language()
+                target = parse_ea(self.target_edit.text(), language)
+                if not in_idb(target):
+                    raise ValueError(tr(language, "target_outside", ea=target))
+                compare = self.compare_edit.text().strip() or None
+                if compare:
+                    get_exec_cache().compare_exe = compare
+                self._with_busy_cursor(lambda: make_sig(target, compare, self._options(), self._log))
+            except Exception as exc:
+                self._log(f"[!] {exc}")
+                self._log(traceback.format_exc())
+                QtWidgets.QMessageBox.critical(self, "NySigWorker2", str(exc))
 
-    def _copy_output(self) -> None:
-        text = self.output_edit.textCursor().selectedText().replace("\u2029", "\n")
-        if not text:
-            text = self.output_edit.toPlainText()
-        QtWidgets.QApplication.clipboard().setText(text)
+        def _run_search(self) -> None:
+            signature = self.search_edit.toPlainText().strip()
+            if not signature:
+                return
+            try:
+                language = self._language()
+                self._with_busy_cursor(lambda: search_sig(signature, self.search_limit_spin.value(), language, self._log))
+            except Exception as exc:
+                self._log(f"[!] {exc}")
+                self._log(traceback.format_exc())
+                QtWidgets.QMessageBox.critical(self, "NySigWorker2", str(exc))
 
-    @staticmethod
-    def _with_busy_cursor(callback: typing.Callable[[], typing.Any]) -> typing.Any:
-        wait_cursor = getattr(QtCore.Qt, "WaitCursor", None)
-        if wait_cursor is None:
-            wait_cursor = QtCore.Qt.CursorShape.WaitCursor
-        QtWidgets.QApplication.setOverrideCursor(wait_cursor)
-        try:
-            with ida_kernwin.disabled_script_timeout_t():
-                return callback()
-        finally:
-            QtWidgets.QApplication.restoreOverrideCursor()
+        def _format_pattern(self) -> None:
+            signature = self.search_edit.toPlainText().strip()
+            if not signature:
+                return
+            try:
+                pattern, _offset = split_signature_offset(signature)
+                self._log(compile_pattern(pattern).fmt(2))
+            except Exception as exc:
+                self._log(f"[!] {exc}")
+
+        def _copy_output(self) -> None:
+            text = self.output_edit.textCursor().selectedText().replace("\u2029", "\n")
+            if not text:
+                text = self.output_edit.toPlainText()
+            QtWidgets.QApplication.clipboard().setText(text)
+
+        @staticmethod
+        def _with_busy_cursor(callback: typing.Callable[[], typing.Any]) -> typing.Any:
+            wait_cursor = getattr(QtCore.Qt, "WaitCursor", None)
+            if wait_cursor is None:
+                wait_cursor = QtCore.Qt.CursorShape.WaitCursor
+            QtWidgets.QApplication.setOverrideCursor(wait_cursor)
+            try:
+                with ida_kernwin.disabled_script_timeout_t():
+                    return callback()
+            finally:
+                QtWidgets.QApplication.restoreOverrideCursor()
 
 
-def exec_dialog(dialog: QtWidgets.QDialog) -> int:
-    if hasattr(dialog, "exec"):
-        return dialog.exec()
-    return dialog.exec_()
+    def exec_dialog(dialog: QtWidgets.QDialog) -> int:
+        if hasattr(dialog, "exec"):
+            return dialog.exec()
+        return dialog.exec_()
 
+else:
+    class NySigWorkerDialog:
+        def __init__(self):
+            raise NotImplementedError("Qt bindings not available")
+    
+    def exec_dialog(dialog) -> int:
+        raise NotImplementedError("Qt bindings not available")
 
 def main() -> None:
     dialog = NySigWorkerDialog()
