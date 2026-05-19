@@ -89,7 +89,10 @@ void _(py::module_ m)
                 else
                     ranges = reinterpret_cast<const ImWchar*>(pyimgui_address_from_object(glyph_ranges));
             }
-            return self.AddFontFromFileTTF(filename, size_pixels, nullptr, ranges);
+            // Honour the caller's ImFontConfig (MergeMode, PixelSnapH, etc.).
+            // pyimgui_ptr_from_object returns nullptr when font_cfg is None.
+            const ImFontConfig* cfg = pyimgui_ptr_from_object<ImFontConfig>(font_cfg);
+            return self.AddFontFromFileTTF(filename, size_pixels, cfg, ranges);
         }, py::arg("filename"), py::arg("size_pixels"), py::arg("font_cfg") = py::none(), py::arg("glyph_ranges") = py::none(), py::return_value_policy::reference)
 /*END:_MFUNC_:ImFontAtlas::AddFontFromFileTTF*/
 

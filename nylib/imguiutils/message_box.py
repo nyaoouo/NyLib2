@@ -1,5 +1,6 @@
 import typing
 
+from . import window_manager as _wm
 from ..pyimgui import imgui
 from ..pyimgui.imgui import ctx as imgui_ctx
 from ..utils.handles import Handles
@@ -14,7 +15,17 @@ NO_BUTTON = []
 
 
 class MessageBox:
-    def __init__(self, message: str | typing.Callable, title: str = None, buttons: list[tuple[str, typing.Any]] = None, callback: callable = None):
+    """A modal-ish message box. Auto-registers with the global window manager.
+
+    Instantiating shows the dialog on the next :func:`window_manager.render`. The
+    callback fires once the user clicks a button or closes the window (value =
+    chosen button's payload, or ``None`` if dismissed). Call ``mb.close()`` to
+    dismiss programmatically without firing the callback.
+    """
+
+    def __init__(self, message: str | typing.Callable, title: str = None,
+                 buttons: list[tuple[str, typing.Any]] = None,
+                 callback: callable = None):
         self.handle = handles.get()
         self.title = (title or "") + f"###__message_box_{self.handle}"
 
@@ -27,16 +38,23 @@ class MessageBox:
         else:
             self.render_message = self.render_custom_message
 
+        self.wm_handle = _wm.window_manager.add(self._render)
+
+    def close(self) -> None:
+        """Programmatically dismiss the dialog (does not fire ``callback``)."""
+        self.__free_handle()
+        _wm.window_manager.close(self.wm_handle)
+
     def __free_handle(self):
         if self.handle:
             handles.free(self.handle)
+            self.handle = None
 
     def __del__(self):
         self.__free_handle()
 
     def _call_callback(self, value=None):
         self.__free_handle()
-        self.handle = None
         if self.callback:
             self.callback(value)
 
@@ -46,8 +64,9 @@ class MessageBox:
     def render_custom_message(self):
         self.message()
 
-    def render(self):
-        if not self.handle: return False
+    def _render(self):
+        if not self.handle:
+            return False
         flags = imgui.ImGuiWindowFlags_NoDocking | imgui.ImGuiWindowFlags_NoResize | imgui.ImGuiWindowFlags_AlwaysAutoResize
         with imgui_ctx.Begin(self.title, None if self.buttons else True, flags) as (show, window_open):
             if not window_open:

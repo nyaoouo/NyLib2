@@ -346,10 +346,15 @@ namespace PYBIND11_NAMESPACE { namespace detail { \
                 enum_defs.write(f'm.attr("{const_name}") = {enum_var}.attr("{const_name}");\n')
             enum_casts.write(f'ENUM_CAST({enum.name});\n')
 
+        # ENUM_CAST macro + all per-enum type_caster specializations live in the
+        # header so they're visible in every TU that emits pybind11 bindings
+        # (structs.cpp, globals.cpp, …). If they live in enums.cpp only,
+        # other TUs fall back to "Unregistered type" at runtime.
         self.out.append((
             self.core_dir / 'enums.h',
             '#pragma once\n'
             '#include "gHeader.h"\n'
+            f'{enum_casts.getvalue()}\n'
             'namespace mNameSpace{ namespace PyImguiCore{\n'
             'void pybind_setup_pyimgui_enums(pybind11::module_ m);\n'
             '}}\n'
@@ -357,7 +362,6 @@ namespace PYBIND11_NAMESPACE { namespace detail { \
         self.out.append((
             self.core_dir / 'enums.cpp',
             '#include "./enums.h"\n'
-            f'{enum_casts.getvalue()}\n'
             'namespace mNameSpace{ namespace PyImguiCore{\n'
             'void pybind_setup_pyimgui_enums(pybind11::module_ m) {\n'
             f'{enum_defs.getvalue()}'
@@ -720,7 +724,7 @@ namespace PYBIND11_NAMESPACE { namespace detail { \
             return f'Pointer[{base_type}]'
         if field_type.endswith('*'):
             if field_type in {'const char*', 'char const*'}:
-                return 'str'
+                return 'str | None'
             base_type = self._base_type(field_type)
             if self._pointer_depth(field_type) == 1 and base_type == 'void':
                 return 'Pointer[typing.Any]'
@@ -798,7 +802,13 @@ namespace PYBIND11_NAMESPACE { namespace detail { \
             return f'// TODO field {record_name}::{field.name}: {field.type}'
         if field.is_bitfield:
             if self._is_scalar_type(field_type):
-                return f'.def_property("{field.name}", []({record_name}& self) {{ return {self._format_output_value(field_type, f"self.{field.name}")}; }}, []({record_name}& self, {field_type} value) {{ self.{field.name} = value; }})'
+                # Accept the setter as `long long` and cast inside the lambda so we
+                # don't depend on cross-TU visibility of enum type_casters.
+                base_field_type = field_type[6:].strip() if field_type.startswith('const ') else field_type
+                getter_body = self._format_output_value(field_type, f"self.{field.name}")
+                getter = f'[]({record_name}& self) {{ return {getter_body}; }}'
+                setter = f'[]({record_name}& self, long long value) {{ self.{field.name} = ({base_field_type})value; }}'
+                return f'.def_property("{field.name}", {getter}, {setter})'
             return f'// TODO field {record_name}::{field.name}: bitfield {field.type}'
         if field.is_array:
             if field.array_size and field_type.endswith('*'):
@@ -851,10 +861,34 @@ namespace PYBIND11_NAMESPACE { namespace detail { \
                 expr = self._pointer_wrapper_expr(f'&self.{field.name}', base_type, field_type.startswith('const '), count=1)
                 return f'.def_property_readonly("{field.name}", []({record_name}& self) {{ return {expr}; }}, py::return_value_policy::reference_internal)'
             pointer_type = f'const {base_type}*' if field_type.startswith('const ') else f'{base_type}*'
-            return f'.def_property_readonly("{field.name}", []({record_name}& self) -> {pointer_type} {{ return &self.{field.name}; }}, py::return_value_policy::reference_internal)'
+            if field_type.startswith('const '):
+                return f'.def_property_readonly("{field.name}", []({record_name}& self) -> {pointer_type} {{ return &self.{field.name}; }}, py::return_value_policy::reference_internal)'
+            # Non-const pycast record field — read returns a reference (so in-place
+            # mutation works: `io.DisplaySize.x = 800`), assignment copies a value.
+            getter = f'[]({record_name}& self) -> {pointer_type} {{ return &self.{field.name}; }}'
+            setter = f'[]({record_name}& self, const {base_type}& value) {{ self.{field.name} = value; }}'
+            return f'.def_property("{field.name}", {getter}, {setter}, py::return_value_policy::reference_internal)'
         if field_type.endswith('*'):
             if field_type in {'const char*', 'char const*'}:
-                return f'.def_property_readonly("{field.name}", []({record_name}& self) {{ return self.{field.name}; }}, py::return_value_policy::reference)'
+                # const char* field — needs to expose None for nullptr and accept
+                # str-or-None on assignment. The C side stores raw const char*, so
+                # the assigned string must outlive the pointer; we keep it in a
+                # lambda-local static keyed by the field address.
+                getter = (
+                    f'[]({record_name}& self) {{ '
+                    f'return self.{field.name} ? py::cast(self.{field.name}) : py::object(py::none()); '
+                    f'}}'
+                )
+                setter = (
+                    f'[]({record_name}& self, py::object value) {{ '
+                    f'static std::unordered_map<const char**, std::string> __store; '
+                    f'auto __slot = const_cast<const char**>(&self.{field.name}); '
+                    f'if (value.is_none()) {{ __store.erase(__slot); self.{field.name} = nullptr; return; }} '
+                    f'auto& __s = __store[__slot]; __s = value.cast<std::string>(); '
+                    f'self.{field.name} = __s.c_str(); '
+                    f'}}'
+                )
+                return f'.def_property("{field.name}", {getter}, {setter}, py::return_value_policy::reference)'
             if self._pointer_depth(field_type) == 1 and self._base_type(field_type) == 'void':
                 getter = f'[]({record_name}& self) {{ return PyPointer((uintptr_t)(self.{field.name}), pyimgui_void_memory_type()); }}'
                 if field_type.startswith('const '):
@@ -895,6 +929,17 @@ namespace PYBIND11_NAMESPACE { namespace detail { \
             return f'.def_property("{field.name}", {getter}, {setter}, py::return_value_policy::reference_internal)'
         if not self._is_supported_value_type(field_type):
             return f'// TODO field {record_name}::{field.name}: {field.type}'
+        # Enum / flags fields: emit a property with int conversion. def_readwrite
+        # requires the enum's type_caster to be visible at this translation unit,
+        # which the ENUM_CAST specializations in enums.cpp are NOT. Wrapping
+        # via py::int_ sidesteps that and matches how we handle bitfields.
+        if self._is_enum_like_type(field_type):
+            base_field_type = field_type[6:].strip() if field_type.startswith('const ') else field_type
+            getter = f'[]({record_name}& self) {{ return py::int_((long long)(self.{field.name})); }}'
+            if field_type.startswith('const '):
+                return f'.def_property_readonly("{field.name}", {getter})'
+            setter = f'[]({record_name}& self, long long value) {{ self.{field.name} = ({base_field_type})value; }}'
+            return f'.def_property("{field.name}", {getter}, {setter})'
         if field_type.startswith('const '):
             return f'.def_property_readonly("{field.name}", []({record_name}& self) {{ return self.{field.name}; }})'
         return f'.def_readwrite("{field.name}", &{record_name}::{field.name})'
@@ -1123,6 +1168,21 @@ namespace PYBIND11_NAMESPACE { namespace detail { \
                 return f'// TODO {spec.name}: non-record reference argument {arg.name} {arg.type}'
             if not self._is_supported_value_type(arg_type):
                 return f'// TODO {spec.name}: unsupported argument {arg.name} {arg.type}'
+            # Special case: `const char* x = NULL/nullptr` — pybind11 cannot route
+            # a nullptr default through a `const char*` parameter (None is not
+            # convertible to str). Route via py::object so None ↔ nullptr.
+            if arg_type in {'const char*', 'char const*'} and arg.default in {'NULL', 'nullptr', '0'}:
+                cstr_var = f'__{arg_name}_cstr'
+                storage_var = f'__{arg_name}_str'
+                lambda_args.append(f'py::object {arg_name}')
+                py_args.append(f'py::arg("{arg_name}") = py::none()')
+                prelude.append(
+                    f'std::string {storage_var}; '
+                    f'const char* {cstr_var} = {arg_name}.is_none() ? nullptr : '
+                    f'({storage_var} = {arg_name}.cast<std::string>(), {storage_var}.c_str());'
+                )
+                call_args.append(cstr_var)
+                continue
             lambda_args.append(f'{arg_type} {arg_name}')
             py_arg = f'py::arg("{arg_name}")'
             if arg.default is not None:
@@ -1249,6 +1309,7 @@ namespace PYBIND11_NAMESPACE { namespace detail { \
             self.core_dir / 'structs.h',
             '#pragma once\n'
             '#include "gHeader.h"\n'
+            '#include "./enums.h"\n'
             '#include "./runtime.h"\n'
             'namespace mNameSpace{ namespace PyImguiCore{\n'
             'void pybind_setup_pyimgui_structs(pybind11::module_ m);\n'
@@ -1290,6 +1351,7 @@ namespace PYBIND11_NAMESPACE { namespace detail { \
             self.core_dir / 'globals.h',
             '#pragma once\n'
             '#include "gHeader.h"\n'
+            '#include "./enums.h"\n'
             '#include "./runtime.h"\n'
             'namespace mNameSpace{ namespace PyImguiCore{\n'
             'void pybind_setup_pyimgui_globals(pybind11::module_ m);\n'
