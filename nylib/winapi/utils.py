@@ -2,7 +2,6 @@ import typing
 from .defs import *
 
 _NULL = type('NULL', (), {})
-_SetLastError = ctypes.windll.kernel32.SetLastError
 
 
 def def_win_api(func, res_type: typing.Any = ctypes.c_void_p, arg_types=(), error_zero=False, error_nonzero=False, error_val: typing.Any = _NULL, error_nt=False):
@@ -11,30 +10,30 @@ def def_win_api(func, res_type: typing.Any = ctypes.c_void_p, arg_types=(), erro
 
     if error_zero:
         def wrapper(*args, _ignore_error=False, **kwargs):
-            _SetLastError(0)
+            ctypes.set_last_error(0)
             res = func(*args, **kwargs)
             if not res and not _ignore_error:
-                raise ctypes.WinError()
+                raise ctypes.WinError(ctypes.get_last_error())
             return res
 
         return wrapper
 
     if error_nonzero:
         def wrapper(*args, _ignore_error=False, **kwargs):
-            _SetLastError(0)
+            ctypes.set_last_error(0)
             res = func(*args, **kwargs)
             if res != 0 and not _ignore_error:
-                raise ctypes.WinError()
+                raise ctypes.WinError(ctypes.get_last_error())
             return res
 
         return wrapper
 
     if error_val is not _NULL:
         def wrapper(*args, _ignore_error=False, **kwargs):
-            _SetLastError(0)
+            ctypes.set_last_error(0)
             res = func(*args, **kwargs)
             if res == error_val and not _ignore_error:
-                raise ctypes.WinError()
+                raise ctypes.WinError(ctypes.get_last_error())
             return res
 
         return wrapper

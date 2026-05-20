@@ -100,7 +100,12 @@ def load_vcvarsall(plat_spec):
 
 
 def where(exe, plat_spec):
-    paths = load_vcvarsall(plat_spec).get("Path", "").split(os.pathsep)
+    env = load_vcvarsall(plat_spec)
+    # `cmd /c set` emits the variable name with whatever casing the OS stored
+    # it under; on most Windows installs that's "PATH", not "Path", so the
+    # historical lookup silently returned "".
+    raw = env.get("Path") or env.get("PATH") or ""
+    paths = raw.split(os.pathsep)
     for path in paths:
         if os.path.exists(exe_path := os.path.join(os.path.abspath(path), exe)):
             return exe_path
