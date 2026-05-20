@@ -13,7 +13,7 @@ def def_win_api(func, res_type: typing.Any = ctypes.c_void_p, arg_types=(), erro
             ctypes.set_last_error(0)
             res = func(*args, **kwargs)
             if not res and not _ignore_error:
-                raise ctypes.WinError(ctypes.get_last_error())
+                raise ctypes.WinError(ctypes.GetLastError())
             return res
 
         return wrapper
@@ -23,7 +23,7 @@ def def_win_api(func, res_type: typing.Any = ctypes.c_void_p, arg_types=(), erro
             ctypes.set_last_error(0)
             res = func(*args, **kwargs)
             if res != 0 and not _ignore_error:
-                raise ctypes.WinError(ctypes.get_last_error())
+                raise ctypes.WinError(ctypes.GetLastError())
             return res
 
         return wrapper
@@ -33,7 +33,7 @@ def def_win_api(func, res_type: typing.Any = ctypes.c_void_p, arg_types=(), erro
             ctypes.set_last_error(0)
             res = func(*args, **kwargs)
             if res == error_val and not _ignore_error:
-                raise ctypes.WinError(ctypes.get_last_error())
+                raise ctypes.WinError(ctypes.GetLastError())
             return res
 
         return wrapper
