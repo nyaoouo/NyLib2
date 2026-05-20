@@ -360,16 +360,18 @@ static void AttachConsole_NoCRTRedirect()
 // ---------- init code generator ----------
 
 // Build the bootstrap Python source that runs immediately after
-// Py_InitializeFromConfig. Responsible for:
+// Py_Initialize. Responsible for:
 //   * Setting __main__.__file__ to pyMain.
 //   * Redirecting sys.stdout / sys.stderr to CONOUT$ when a console was
-//     allocated.
+//     allocated; or, failing that, tee'ing them into the loader's log
+//     file so script tracebacks are visible without a console.
 //   * Extending sys.path with pyPaths entries and dirname(__file__).
-//   * Installing a faulthandler so segfaults surface in the debug console.
+//   * Enabling faulthandler so segfaults inside Python surface somewhere.
 static std::string BuildInitCode(const PyLoaderConfig* cfg)
 {
     std::string esc_file  = PyEscape(WideToUtf8(cfg->pyMain ? cfg->pyMain : L""));
     std::string esc_paths = PyEscape(WideToUtf8(cfg->pyPaths ? cfg->pyPaths : L""));
+    std::string esc_log   = PyEscape(WideToUtf8(cfg->logPath ? cfg->logPath : L""));
 
     std::ostringstream os;
     os <<
@@ -392,6 +394,34 @@ static std::string BuildInitCode(const PyLoaderConfig* cfg)
         "except Exception as _e:\n"
         "    import ctypes; ctypes.windll.kernel32.OutputDebugStringW("
         "    'nylib.python_loader: console redirect failed: ' + repr(_e))\n";
+    } else if (!esc_log.empty()) {
+        // No console but a log path is configured. Tee Python's stdio
+        // into the log so tracebacks aren't silently dropped. Lines get
+        // a "[py] " prefix so they're easy to distinguish from the
+        // loader's own trace lines.
+        os <<
+        "try:\n"
+        "    import io\n"
+        "    class _NyTee:\n"
+        "        def __init__(self, path):\n"
+        "            self._fp = io.open(path, 'a', encoding='utf-8', buffering=1)\n"
+        "        def write(self, s):\n"
+        "            if not s: return 0\n"
+        "            try:\n"
+        "                tail = '' if s.endswith('\\n') else '\\n'\n"
+        "                self._fp.write('[py] ' + s.replace('\\n', '\\n[py] ').rstrip('[py] ') + tail)\n"
+        "            except Exception: pass\n"
+        "            try: self._fp.flush()\n"
+        "            except Exception: pass\n"
+        "            return len(s)\n"
+        "        def flush(self):\n"
+        "            try: self._fp.flush()\n"
+        "            except Exception: pass\n"
+        "        def isatty(self): return False\n"
+        "    sys.stdout = sys.stderr = _NyTee(r\"" << esc_log << "\")\n"
+        "except Exception as _e:\n"
+        "    import ctypes; ctypes.windll.kernel32.OutputDebugStringW("
+        "    'nylib.python_loader: log tee setup failed: ' + repr(_e))\n";
     }
 
     os <<
