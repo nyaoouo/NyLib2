@@ -28,6 +28,19 @@ CONTEXT_REG_OFFSETS: dict[str, int] = {
 # EFlags is a uint32 at offset 0x44 in the AMD64 CONTEXT.
 EFLAGS_OFFSET = 0x44
 
+# MxCsr (SSE control/status) at offset 0x34 in the AMD64 CONTEXT.
+MXCSR_OFFSET = 0x34
+
+# XMM0..XMM15 live inside the FXSAVE area at offset 0x1A0, each 16 bytes
+# (M128A). Stable AMD64 Win32 ABI - see winnt.h _CONTEXT layout.
+XMM_BASE_OFFSET = 0x1A0
+XMM_REG_SIZE = 16
+XMM_REG_NAMES: tuple[str, ...] = tuple(f"xmm{i}" for i in range(16))
+XMM_REG_OFFSETS: dict[str, int] = {
+    name: XMM_BASE_OFFSET + i * XMM_REG_SIZE
+    for i, name in enumerate(XMM_REG_NAMES)
+}
+
 
 def _make_reg64(name: str, offset: int):
     def fget(self: "BpCtx") -> int:
@@ -117,6 +130,36 @@ class BpCtx:
         }
         snap["eflags"] = ctypes.c_uint32.from_address(self._addr + EFLAGS_OFFSET).value
         return snap
+
+    @property
+    def mxcsr(self) -> int:
+        self._check_valid()
+        return ctypes.c_uint32.from_address(self._addr + MXCSR_OFFSET).value
+
+    @mxcsr.setter
+    def mxcsr(self, value: int) -> None:
+        self._check_valid()
+        ctypes.c_uint32.from_address(self._addr + MXCSR_OFFSET).value = int(value) & 0xFFFFFFFF
+
+    @property
+    def xmm(self) -> dict[str, bytes]:
+        """Snapshot of XMM0..XMM15 as 16-byte little-endian buffers.
+
+        Stable order: xmm0 -> xmm15. Returned bytes are copies of the
+        CONTEXT memory at the time of the call - safe to use after the
+        ctx is invalidated."""
+        self._check_valid()
+        base = self._addr
+        return {
+            name: bytes((ctypes.c_uint8 * XMM_REG_SIZE).from_address(base + off))
+            for name, off in XMM_REG_OFFSETS.items()
+        }
+
+    def xmm_raw(self, name: str) -> bytes:
+        """Read a single XMM register by name (xmm0..xmm15) as 16 bytes."""
+        self._check_valid()
+        off = XMM_REG_OFFSETS[name]
+        return bytes((ctypes.c_uint8 * XMM_REG_SIZE).from_address(self._addr + off))
 
     # ----- stack / memory -----
 
