@@ -163,12 +163,76 @@ def default_python_home() -> str:
     return base or sys.prefix
 
 
+def _editable_install_source_roots() -> list[str]:
+    """Resolve on-disk source directories of every editable-installed dist.
+
+    PEP 660 editable installs (``pip install -e``) register a path-hook
+    finder via a ``.pth`` file in the venv's ``site-packages``. The hook is
+    replayed by ``site.py`` at host startup, but **not** inside the injected
+    interpreter (which is configured with ``python_home = sys.base_prefix``
+    and never adds the venv's ``site-packages`` to ``sys.path`` for ``site.py``
+    to process). Result: editable-installed packages that are perfectly
+    importable in the launcher raise ``ModuleNotFoundError`` in the target.
+
+    We sidestep this generically (works with setuptools, hatchling, pdm,
+    flit, ...) by reading each distribution's ``direct_url.json``
+    (standardised by PEP 610). Editable installs carry
+    ``dir_info.editable == true`` and a ``file://`` ``url`` pointing at the
+    source tree; the caller can add that path to ``sys.path`` to import the
+    package via the ordinary filesystem finder.
+    """
+    import json
+    import urllib.parse
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for sp_dir in sys.path:
+        if not sp_dir or not os.path.isdir(sp_dir):
+            continue
+        # site-packages dirs hold ``*.dist-info``; other entries don't, but
+        # the cheap check below short-circuits without listing entries that
+        # have no ``.dist-info`` children.
+        try:
+            entries = os.listdir(sp_dir)
+        except OSError:
+            continue
+        for name in entries:
+            if not name.endswith('.dist-info'):
+                continue
+            direct_url = os.path.join(sp_dir, name, 'direct_url.json')
+            if not os.path.isfile(direct_url):
+                continue
+            try:
+                with open(direct_url, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            except Exception:
+                continue
+            if not data.get('dir_info', {}).get('editable'):
+                continue
+            url = data.get('url', '')
+            if not url.startswith('file://'):
+                continue
+            parsed = urllib.parse.urlparse(url)
+            local = urllib.parse.unquote(parsed.path)
+            # Windows: ``file:///D:/foo`` → parsed.path is ``/D:/foo``.
+            if os.name == 'nt' and len(local) > 2 and local[0] == '/' and local[2] == ':':
+                local = local[1:]
+            local = os.path.normpath(local)
+            if os.path.isdir(local) and local not in seen:
+                seen.add(local)
+                out.append(local)
+    return out
+
+
 def default_python_paths() -> list[str]:
     """Sys.path entries to pre-seed into the injected interpreter.
 
     Filters out empty strings, the current working directory ('') and
     directories that no longer exist, then de-duplicates while preserving
-    order.
+    order. Also appends source roots of editable-installed distributions (see
+    :func:`_editable_install_source_roots`) so packages installed via
+    ``pip install -e`` are importable in the target interpreter without the
+    host's ``.pth``-driven path hook.
     """
     seen: set[str] = set()
     out: list[str] = []
@@ -182,6 +246,10 @@ def default_python_paths() -> list[str]:
             continue
         seen.add(p)
         out.append(p)
+    for p in _editable_install_source_roots():
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
     return out
 
 
