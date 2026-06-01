@@ -12,6 +12,20 @@ from .. import winapi, winutils
 _T = typing.TypeVar('_T')
 
 
+class PageGuardError(Exception):
+    """Raised by Process.read_memoryview when the requested range
+    crosses an unreadable page (PAGE_GUARD, PAGE_NOACCESS, or
+    uncommitted)."""
+
+    def __init__(self, addr: int, size: int, reason: str):
+        self.addr = addr
+        self.size = size
+        self.reason = reason
+        super().__init__(
+            f"unreadable at 0x{addr:X}+0x{size:X}: {reason}"
+        )
+
+
 class Process:
     current: 'Process'
 
@@ -49,6 +63,148 @@ class Process:
             next_addr = mbi.BaseAddress + mbi.RegionSize
             if pos >= next_addr or end is not None and end < next_addr: break
             pos = next_addr
+
+    _PAGE_NOACCESS = 0x01
+    _PAGE_GUARD = 0x100
+    _MEM_COMMIT = 0x1000
+    _MEM_IMAGE = 0x1000000
+    _MEM_MAPPED = 0x40000
+
+    def read_memoryview(self, addr: int, size: int, *,
+                        validate: bool = True) -> memoryview:
+        """Return a memoryview over `[addr, addr+size)`.
+
+        For `Process.current`: zero-copy. Builds a ctypes array
+        aliasing the in-process bytes and wraps it in a memoryview.
+        Caller MUST call mv.release() promptly so the underlying
+        ctypes array can be collected.
+
+        For a remote `Process`: copies via ReadProcessMemory into a
+        bytearray; returns memoryview(bytearray). Copy unavoidable.
+
+        With `validate=True` (default), walks VirtualQuery over the
+        range and raises PageGuardError on the first unreadable page
+        encountered (PAGE_NOACCESS, PAGE_GUARD, or uncommitted).
+        Callers that already vetted the range (e.g. via
+        iter_readable_subregions) can pass validate=False to skip the
+        per-call walk.
+        """
+        if validate:
+            # Walk the range; raise on the first unreadable page.
+            pos = addr
+            end = addr + size
+            while pos < end:
+                mbi = self.virtual_query(pos)
+                if mbi.RegionSize == 0:
+                    raise PageGuardError(addr, size, "virtual_query failed")
+                if not (mbi.State & self._MEM_COMMIT):
+                    raise PageGuardError(
+                        addr, size,
+                        f"uncommitted at 0x{int(mbi.BaseAddress):X}",
+                    )
+                if mbi.Protect & self._PAGE_NOACCESS:
+                    raise PageGuardError(
+                        addr, size,
+                        f"PAGE_NOACCESS at 0x{int(mbi.BaseAddress):X}",
+                    )
+                if mbi.Protect & self._PAGE_GUARD:
+                    raise PageGuardError(
+                        addr, size,
+                        f"PAGE_GUARD at 0x{int(mbi.BaseAddress):X}",
+                    )
+                pos = int(mbi.BaseAddress) + int(mbi.RegionSize)
+        if self is Process.current:
+            # Zero-copy alias on the in-process bytes.
+            arr_type = ctypes.c_ubyte * size
+            arr = arr_type.from_address(addr)
+            return memoryview(arr)
+        # Remote: copy via ReadProcessMemory.
+        buf = bytearray(size)
+        arr_type = ctypes.c_ubyte * size
+        winapi.ReadProcessMemory(self.handle, addr,
+                                 (arr_type).from_buffer(buf),
+                                 size, None)
+        return memoryview(buf)
+
+    def iter_readable_subregions(self, addr: int,
+                                  size: int) -> typing.Iterator[tuple[int, int]]:
+        """Yield (sub_addr, sub_size) tuples covering the readable
+        portions of `[addr, addr+size)`.
+
+        Adjacent readable pages (under one VirtualQuery report) are
+        coalesced into a single subrange. Unreadable pages
+        (PAGE_NOACCESS / PAGE_GUARD / uncommitted) are skipped. One
+        VirtualQuery per readable run, not per page.
+        """
+        pos = addr
+        end = addr + size
+        run_start: int | None = None
+        run_end: int | None = None
+        while pos < end:
+            mbi = self.virtual_query(pos)
+            if mbi.RegionSize == 0:
+                break
+            region_start = max(int(mbi.BaseAddress), addr)
+            region_end = min(int(mbi.BaseAddress) + int(mbi.RegionSize), end)
+            readable = (
+                (mbi.State & self._MEM_COMMIT)
+                and not (mbi.Protect & self._PAGE_NOACCESS)
+                and not (mbi.Protect & self._PAGE_GUARD)
+            )
+            if readable:
+                if run_start is None:
+                    run_start = region_start
+                run_end = region_end
+            else:
+                if run_start is not None:
+                    yield (run_start, run_end - run_start)
+                    run_start = None
+                    run_end = None
+            pos = int(mbi.BaseAddress) + int(mbi.RegionSize)
+        if run_start is not None:
+            yield (run_start, run_end - run_start)
+
+    def iter_committed_regions(self, *, modules_only: bool = True,
+                                snapshot: bool = True
+                                ) -> typing.Iterator[tuple[int, int]]:
+        """Walk VirtualQuery from 0 upward; yield (addr, size) per
+        committed region.
+
+        `modules_only=True` (default): only MEM_IMAGE + MEM_MAPPED.
+        Excludes MEM_PRIVATE (Python's PyMalloc arenas etc.) — required
+        to make pattern scans terminate when scanning the host process.
+
+        `snapshot=True` (default): materialize the full list before
+        yielding anything, so the caller sees a consistent region set
+        even if memory is allocated mid-iteration.
+        """
+        def _walk() -> typing.Iterator[tuple[int, int]]:
+            pos = 0
+            while True:
+                try:
+                    mbi = self.virtual_query(pos)
+                except OSError:
+                    return
+                if mbi.RegionSize == 0:
+                    return
+                region_addr = int(mbi.BaseAddress)
+                region_size = int(mbi.RegionSize)
+                if mbi.State & self._MEM_COMMIT:
+                    type_ok = True
+                    if modules_only:
+                        type_ok = bool(int(mbi.Type) & (
+                            self._MEM_IMAGE | self._MEM_MAPPED))
+                    if type_ok:
+                        yield (region_addr, region_size)
+                next_pos = region_addr + region_size
+                if next_pos <= pos:
+                    return
+                pos = next_pos
+        if snapshot:
+            buf = list(_walk())
+            yield from buf
+        else:
+            yield from _walk()
 
     def alloc_near(self, size: int, address, protect=0x40):
         for mbi in self.iter_memory_region(max(address - 0x7fff0000, 0), address + 0x7fff0000):

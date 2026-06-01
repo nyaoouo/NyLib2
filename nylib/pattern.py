@@ -372,3 +372,38 @@ class CachedRawMemoryPatternScanner(MemoryPatternScanner):
         if self._cached_raw is None:
             self._cached_raw = super().get_raw()
         return self._cached_raw
+
+
+class LocalMemoryPatternScanner(IPatternScanner):
+    """Zero-copy in-process pattern scanner.
+
+    Walks `Process.current.iter_readable_subregions` inside
+    `[region_address, region_address + region_size)`, builds a
+    `memoryview` per readable subrange via `read_memoryview(validate=False)`,
+    runs `pattern.finditer(mv)`, releases the view, moves on.
+
+    Only valid in the current process. For remote processes, use
+    `MemoryPatternScanner` or `CachedRawMemoryPatternScanner`.
+    """
+
+    def __init__(self, region_address: int, region_size: int):
+        self.region_address = int(region_address)
+        self.region_size = int(region_size)
+
+    def search(self, pattern):
+        from .process import Process
+        if isinstance(pattern, str):
+            pattern = compile_pattern(pattern)
+        proc = Process.current
+        for sub_addr, sub_size in proc.iter_readable_subregions(
+                self.region_address, self.region_size):
+            mv = proc.read_memoryview(sub_addr, sub_size, validate=False)
+            try:
+                for offset, args in pattern.finditer(mv):
+                    yield (
+                        sub_addr + offset,
+                        [a + sub_addr if r else a
+                         for a, r in zip(args, pattern.res_is_ref)],
+                    )
+            finally:
+                mv.release()
