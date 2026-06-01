@@ -4,6 +4,18 @@
 #include <chrono>
 #include <cstdio>
 
+extern "C" __declspec(dllexport) volatile unsigned long long g_dxtest_tick = 0;
+
+extern "C" __declspec(dllexport) void dxtest_tick(unsigned long long in,
+                                                   unsigned long long* out) {
+    g_dxtest_tick++;
+    if (out) *out = in * 2 + g_dxtest_tick;
+}
+
+extern "C" __declspec(dllexport) unsigned long long dxtest_get_tick(void) {
+    return g_dxtest_tick;
+}
+
 extern "C" __declspec(dllimport) void __stdcall dxtest_bootstrap_touch();
 
 int main()
@@ -11,6 +23,7 @@ int main()
     dxtest_bootstrap_touch();
 
     dxtest::Window window(L"dxtest_dx9_window", L"dxtest dx9", 960, 540);
+    dxtest::TitleStats title_stats(L"dxtest dx9");
     LPDIRECT3D9 d3d = Direct3DCreate9(D3D_SDK_VERSION);
     if (d3d == nullptr)
     {
@@ -42,6 +55,22 @@ int main()
     auto seconds = std::chrono::seconds(dxtest::RunSecondsFromEnv());
     while (window.PumpMessages() && std::chrono::steady_clock::now() - start < seconds)
     {
+        unsigned long long _dx_out = 0;
+        dxtest_tick(g_dxtest_tick, &_dx_out);
+        title_stats.Update(window.hwnd, g_dxtest_tick);
+
+        if (window.size_changed && window.width > 0 && window.height > 0)
+        {
+            window.size_changed = false;
+            pp.BackBufferWidth = (UINT)window.width;
+            pp.BackBufferHeight = (UINT)window.height;
+            HRESULT hrz = device->Reset(&pp);
+            if (FAILED(hrz))
+            {
+                std::printf("dx9 Reset failed: 0x%08lx\n", hrz);
+            }
+        }
+
         device->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, D3DCOLOR_XRGB(28, 42, 72), 1.0f, 0);
         if (SUCCEEDED(device->BeginScene()))
         {

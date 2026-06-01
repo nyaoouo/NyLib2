@@ -5,6 +5,18 @@
 #include <chrono>
 #include <cstdio>
 
+extern "C" __declspec(dllexport) volatile unsigned long long g_dxtest_tick = 0;
+
+extern "C" __declspec(dllexport) void dxtest_tick(unsigned long long in,
+                                                   unsigned long long* out) {
+    g_dxtest_tick++;
+    if (out) *out = in * 2 + g_dxtest_tick;
+}
+
+extern "C" __declspec(dllexport) unsigned long long dxtest_get_tick(void) {
+    return g_dxtest_tick;
+}
+
 extern "C" __declspec(dllimport) void __stdcall dxtest_bootstrap_touch();
 
 int main()
@@ -12,6 +24,7 @@ int main()
     dxtest_bootstrap_touch();
 
     dxtest::Window window(L"dxtest_dx11_window", L"dxtest dx11", 960, 540);
+    dxtest::TitleStats title_stats(L"dxtest dx11");
 
     DXGI_SWAP_CHAIN_DESC sd = {};
     sd.BufferCount = 2;
@@ -48,6 +61,30 @@ int main()
     auto seconds = std::chrono::seconds(dxtest::RunSecondsFromEnv());
     while (window.PumpMessages() && std::chrono::steady_clock::now() - start < seconds)
     {
+        unsigned long long _dx_out = 0;
+        dxtest_tick(g_dxtest_tick, &_dx_out);
+        title_stats.Update(window.hwnd, g_dxtest_tick);
+
+        if (window.size_changed && window.width > 0 && window.height > 0)
+        {
+            window.size_changed = false;
+            if (rtv) { rtv->Release(); rtv = nullptr; }
+            HRESULT hrz = swap_chain->ResizeBuffers(
+                0, (UINT)window.width, (UINT)window.height,
+                DXGI_FORMAT_UNKNOWN, 0);
+            if (SUCCEEDED(hrz))
+            {
+                ID3D11Texture2D *new_bb = nullptr;
+                swap_chain->GetBuffer(0, IID_PPV_ARGS(&new_bb));
+                device->CreateRenderTargetView(new_bb, nullptr, &rtv);
+                new_bb->Release();
+            }
+            else
+            {
+                std::printf("ResizeBuffers failed: 0x%08lx\n", hrz);
+            }
+        }
+
         float color[4] = {0.08f, 0.18f, 0.28f, 1.0f};
         context->OMSetRenderTargets(1, &rtv, nullptr);
         context->ClearRenderTargetView(rtv, color);

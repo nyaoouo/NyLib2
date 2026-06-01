@@ -48,12 +48,14 @@ def build_if_needed(backend: str) -> pathlib.Path:
     return out_dir
 
 
-def install_hijack(backend: str, out_dir: pathlib.Path, create_console: bool = False) -> None:
+def install_hijack(backend: str, out_dir: pathlib.Path, create_console: bool = False,
+                   test: bool = False) -> None:
     ensure_paths()
     from nylib.winutils import python_hijack
 
     restore_bootstrap(out_dir)
-    payload = ROOT / backend / "payload.py"
+    payload_name = "test_debug_tool.py" if test else "payload.py"
+    payload = ROOT / "common" / payload_name
     python_hijack.hijack(
         out_dir / "dxtest_bootstrap.dll",
         build_dir=out_dir / "hijack_build",
@@ -95,11 +97,15 @@ def main() -> None:
     parser.add_argument("--seconds", type=int, default=10)
     parser.add_argument("--console", action="store_true")
     parser.add_argument("--no-launch", action="store_true")
+    parser.add_argument("--test", action="store_true",
+                        help="Inject the v2 auto-smoke payload "
+                             "(test_debug_tool.py) instead of payload.py")
     args = parser.parse_args()
 
     ensure_project_venv()
     out_dir = build_if_needed(args.backend)
-    install_hijack(args.backend, out_dir, create_console=args.console)
+    install_hijack(args.backend, out_dir, create_console=args.console,
+                   test=args.test)
     if args.no_launch:
         return
     started = time.time()

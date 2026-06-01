@@ -5,6 +5,18 @@
 #include <chrono>
 #include <cstdio>
 
+extern "C" __declspec(dllexport) volatile unsigned long long g_dxtest_tick = 0;
+
+extern "C" __declspec(dllexport) void dxtest_tick(unsigned long long in,
+                                                   unsigned long long* out) {
+    g_dxtest_tick++;
+    if (out) *out = in * 2 + g_dxtest_tick;
+}
+
+extern "C" __declspec(dllexport) unsigned long long dxtest_get_tick(void) {
+    return g_dxtest_tick;
+}
+
 extern "C" __declspec(dllimport) void __stdcall dxtest_bootstrap_touch();
 
 namespace
@@ -28,6 +40,7 @@ int main()
     dxtest_bootstrap_touch();
 
     dxtest::Window window(L"dxtest_dx12_window", L"dxtest dx12", 960, 540);
+    dxtest::TitleStats title_stats(L"dxtest dx12");
 
     IDXGIFactory4 *factory = nullptr;
     HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
@@ -97,6 +110,39 @@ int main()
     auto seconds = std::chrono::seconds(dxtest::RunSecondsFromEnv());
     while (window.PumpMessages() && std::chrono::steady_clock::now() - start < seconds)
     {
+        unsigned long long _dx_out = 0;
+        dxtest_tick(g_dxtest_tick, &_dx_out);
+        title_stats.Update(window.hwnd, g_dxtest_tick);
+
+        if (window.size_changed && window.width > 0 && window.height > 0)
+        {
+            window.size_changed = false;
+            wait_for_gpu(queue, fence, fence_event, fence_value);
+
+            for (UINT i = 0; i < FrameCount; ++i)
+            {
+                if (render_targets[i]) { render_targets[i]->Release(); render_targets[i] = nullptr; }
+            }
+
+            HRESULT hrz = swap_chain->ResizeBuffers(
+                FrameCount, (UINT)window.width, (UINT)window.height,
+                DXGI_FORMAT_R8G8B8A8_UNORM, 0);
+            if (FAILED(hrz))
+            {
+                std::printf("dx12 ResizeBuffers failed: 0x%08lx\n", hrz);
+            }
+            else
+            {
+                D3D12_CPU_DESCRIPTOR_HANDLE handle = rtv_heap->GetCPUDescriptorHandleForHeapStart();
+                for (UINT i = 0; i < FrameCount; ++i)
+                {
+                    swap_chain->GetBuffer(i, IID_PPV_ARGS(&render_targets[i]));
+                    device->CreateRenderTargetView(render_targets[i], nullptr, handle);
+                    handle.ptr += rtv_descriptor_size;
+                }
+            }
+        }
+
         UINT frame_index = swap_chain->GetCurrentBackBufferIndex();
         allocator->Reset();
         command_list->Reset(allocator, nullptr);
