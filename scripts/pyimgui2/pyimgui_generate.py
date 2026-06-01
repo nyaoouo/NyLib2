@@ -1800,6 +1800,7 @@ def generate(backends, debug=0, with_stubs=True):
                 src_dir / 'DllMain.cpp',
                 src_dir / 'gHeader.cpp',
                 src_dir / 'ImguiCtx.cpp',
+                src_dir / 'UnhandledException.cpp',
             ])),
             include_dirs=common_include_dirs,
             extra_objects=[],

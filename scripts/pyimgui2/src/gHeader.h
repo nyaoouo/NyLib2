@@ -92,7 +92,5 @@ START_G_UTILS_NAMESPACE
             .def("__exit__", [](PyCtxWrapper &self, py::args args)
                  { if (self.onExit) self.onExit(); });
     }
-
-    void InstallUnhandledExceptionFilter();
 }
 END_G_UTILS_NAMESPACE

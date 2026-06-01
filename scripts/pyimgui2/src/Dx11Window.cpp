@@ -396,7 +396,21 @@ START_M_IMGUI_IMPL_NAMESPACE
     {
         this->pd3dDeviceContext->OMSetRenderTargets(1, &this->mainRenderTargetView, nullptr);
 
-        this->ProcessCallBeforeFrameOnce(py::cast(this));
+        // `_Update` runs from `hkPresent11`, which is invoked by D3D11's
+        // Present implementation on a thread that does NOT hold the GIL.
+        // `py::cast(this)` has to touch pybind11's registry (a CPython call),
+        // so the GIL must be acquired BEFORE the cast - not just inside the
+        // Process* methods. Doing the cast without the GIL races with any
+        // Python work happening on other threads (e.g. the DebugView worker
+        // doing imports) and corrupts CPython's runtime state; the symptom
+        // is a delayed NULL function-pointer call on the OTHER thread.
+        // See the standalone `Dx11Window::Update` path above for the same
+        // pattern done correctly.
+        {
+            py::gil_scoped_acquire gil;
+            py::object self = py::cast(this, py::return_value_policy::reference);
+            this->ProcessCallBeforeFrameOnce(self);
+        }
 
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
@@ -404,11 +418,25 @@ START_M_IMGUI_IMPL_NAMESPACE
 
         try
         {
-            this->ProcessRenderCallback(py::cast(this));
+            py::gil_scoped_acquire gil;
+            py::object self = py::cast(this, py::return_value_policy::reference);
+            this->ProcessRenderCallback(self);
         }
         catch (std::exception &e)
         {
-            printf("Error in render callback, detach: \n%s\n", e.what());
+            // The exception may be `pybind11::error_already_set`, whose
+            // destructor decrefs Python objects and therefore needs the GIL.
+            // The inner gil_scoped_acquire was unwound before we landed here,
+            // so re-acquire for the duration of the catch body (covers
+            // `e.what()`, which may also touch Python, and the implicit
+            // destruction of `e` when this scope exits). Without this, the
+            // GIL-less decref on the C++ render thread races CPython's
+            // runtime state and crashes with RIP=0 on a NULL function-pointer
+            // call (typically several frames later, on whichever thread next
+            // touches the corrupted slot).
+            py::gil_scoped_acquire gil;
+            fprintf(stderr, "[pyimgui] dx11 inbound render callback raised, detaching:\n%s\n", e.what());
+            std::fflush(stderr);
             this->Detach();
             return;
         }

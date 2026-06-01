@@ -2,6 +2,7 @@
 #include "./gheader.h"
 #include "./pyimgui.h"
 #include "./ImguiCtx.h"
+#include "./UnhandledException.h"
 
 namespace
 {
@@ -56,7 +57,10 @@ namespace
 PYBIND11_MODULE(pyimgui, m) {
     pyimgui_module_name = py::str(m.attr("__name__"));
     pyimgui_enable_submodule_path(m);
-    G_UTILS_NAMESPACE::InstallUnhandledExceptionFilter();
+    // Expose `setup_unhandle_exception_filter` and the `MINIDUMP_TYPE` enum at
+    // the top level of `pyimgui`. The filter is NOT installed automatically;
+    // the user must call `setup_unhandle_exception_filter(...)` explicitly.
+    G_UTILS_NAMESPACE::pybind_setup_UnhandledException(m);
     G_UTILS_NAMESPACE::pybind_setup_gUtils(m.def_submodule("gUtils"));
     auto imgui_m = m.def_submodule("imgui");
     PYIMGUI_CORE_NAMESPACE::pybind_setup_pyimgui_core(imgui_m);

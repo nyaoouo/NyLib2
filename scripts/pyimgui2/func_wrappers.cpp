@@ -159,6 +159,24 @@ void _(py::module_ m)
     }, py::arg("label"), py::arg("value") = "", py::arg("flags") = 0);
 /*END:_GFUNC_:InputText*/
 
+/*START:_GFUNC_:InputTextMultiline*/
+    m.def("InputTextMultiline", [](const char* label, std::string value, const ImVec2& size, ImGuiInputTextFlags flags) {
+        flags |= ImGuiInputTextFlags_CallbackResize;
+        value.reserve(std::max<size_t>(value.size() + 1024, 4096));
+        bool changed = ImGui::InputTextMultiline(label, value.data(), value.capacity() + 1, size, flags, pyimgui_input_text_callback, &value);
+        return py::make_tuple(changed, value);
+    }, py::arg("label"), py::arg("value") = "", py::arg("size") = ImVec2(0, 0), py::arg("flags") = 0);
+/*END:_GFUNC_:InputTextMultiline*/
+
+/*START:_GFUNC_:InputTextWithHint*/
+    m.def("InputTextWithHint", [](const char* label, const char* hint, std::string value, ImGuiInputTextFlags flags) {
+        flags |= ImGuiInputTextFlags_CallbackResize;
+        value.reserve(std::max<size_t>(value.size() + 1024, 4096));
+        bool changed = ImGui::InputTextWithHint(label, hint, value.data(), value.capacity() + 1, flags, pyimgui_input_text_callback, &value);
+        return py::make_tuple(changed, value);
+    }, py::arg("label"), py::arg("hint"), py::arg("value") = "", py::arg("flags") = 0);
+/*END:_GFUNC_:InputTextWithHint*/
+
 /*START:_GFUNC_:ProgressBar*/
     m.def("ProgressBar", [](float fraction, const ImVec2& size_arg, const char* overlay) { ImGui::ProgressBar(fraction, size_arg, overlay); }, py::arg("fraction"), py::arg("size_arg") = ImVec2(-FLT_MIN, 0), py::arg("overlay") = nullptr);
 /*END:_GFUNC_:ProgressBar*/
