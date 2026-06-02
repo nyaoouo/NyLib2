@@ -1801,6 +1801,7 @@ def generate(backends, debug=0, with_stubs=True):
                 src_dir / 'gHeader.cpp',
                 src_dir / 'ImguiCtx.cpp',
                 src_dir / 'UnhandledException.cpp',
+                src_dir / 'Win32Font.cpp',
             ])),
             include_dirs=common_include_dirs,
             extra_objects=[],
@@ -1942,12 +1943,16 @@ def main():
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--skip', action='store_true')
     parser.add_argument('--skip-stubs', action='store_true')
+    # Auto-close the post-build demo after this many frames so unattended
+    # build invocations always self-terminate. Pass 0 for an interactive
+    # session that runs until the user closes the window.
+    parser.add_argument('--test-frames', type=int, default=600)
     args = parser.parse_args()
 
     generate(['win32', 'dx9', 'dx10', 'dx11', 'dx12', 'gl3', 'vk'], debug=args.debug, with_stubs=not args.skip_stubs)
     if not args.skip:
         import pyimgui_test
-        pyimgui_test.test()
+        pyimgui_test.test(auto_close_frames=args.test_frames)
 
 
 if __name__ == '__main__':

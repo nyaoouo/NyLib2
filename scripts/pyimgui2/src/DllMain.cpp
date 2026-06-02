@@ -3,6 +3,7 @@
 #include "./pyimgui.h"
 #include "./ImguiCtx.h"
 #include "./UnhandledException.h"
+#include "./Win32Font.h"
 
 namespace
 {
@@ -65,5 +66,6 @@ PYBIND11_MODULE(pyimgui, m) {
     auto imgui_m = m.def_submodule("imgui");
     PYIMGUI_CORE_NAMESPACE::pybind_setup_pyimgui_core(imgui_m);
     IMGUI_CTX_NAMESPACE::pybind_setup_ImguiCtx(imgui_m.def_submodule("ctx"));
+    WIN32FONT_NAMESPACE::pybind_setup_Win32Font(m.def_submodule("win32_font"));
     m.def("__getattr__", &pyimgui_lazy_frontend_attr, py::arg("name"));
 }

@@ -78,15 +78,15 @@ class DemoState:
         self.color = self.wnd.ClearColor
         io = imgui.GetIO()
 
-        font_dir = pathlib.Path(os.environ.get('WINDIR', r'C:\Windows')) / 'fonts'
-        if (font_file := font_dir / 'msyh.ttc').is_file():
-            try:
-                self.font = io.Fonts.AddFontFromFileTTF(str(font_file), 16, None, io.Fonts.GetGlyphRangesChineseFull())
-                io.Fonts.Build()
+        try:
+            import pyimgui.win32_font as wf
+            self.font = wf.AutoInstall(size_pixels=16.0)
+            if self.font is not None:
+                # io.FontDefault = self.font
                 if hasattr(self.wnd, 'InvalidateDeviceObjects'):
                     self.wnd.InvalidateDeviceObjects()
-            except Exception as exc:
-                self.font_error = repr(exc)
+        except Exception as exc:
+            self.font_error = repr(exc)
 
         if hasattr(self.wnd, 'CreateTexture'):
             try:
@@ -149,7 +149,7 @@ class DemoState:
             imgui.Text(f'frontend: {self.frontend}')
             imgui.Text(f'fps: {imgui.GetIO().Framerate:.1f}')
             imgui.Text(f'frame: {self.frames}')
-            imgui.Text('中文字符 / direct Dear ImGui pybind wrapper')
+            imgui.Text('多语言混排 / 多言語混在 / 다국어 / Привет / Aa / direct Dear ImGui pybind wrapper')
             if self.font_error:
                 imgui.Text(f'font error: {self.font_error}')
             if self.texture_error:
