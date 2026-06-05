@@ -263,6 +263,36 @@ class SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX(ctypes.Structure):
         ("Reserved", ctypes.c_ulong),
     ]
 
+class GUID(ctypes.Structure):
+    _fields_ = [
+        ('Data1', ctypes.c_ulong),
+        ('Data2', ctypes.c_ushort),
+        ('Data3', ctypes.c_ushort),
+        ('Data4', ctypes.c_ubyte * 8),
+    ]
+
+    def __init__(self, guid_str: str = None):
+        super().__init__()
+        if guid_str:
+            s = guid_str.strip('{}')
+            parts = s.split('-')
+            if len(parts) != 5:
+                raise ValueError(f'invalid GUID string: {guid_str!r}')
+            self.Data1 = int(parts[0], 16)
+            self.Data2 = int(parts[1], 16)
+            self.Data3 = int(parts[2], 16)
+            rest = bytes.fromhex(parts[3] + parts[4])
+            for i, b in enumerate(rest):
+                self.Data4[i] = b
+
+    def __str__(self):
+        return '{%08X-%04X-%04X-%s-%s}' % (
+            self.Data1, self.Data2, self.Data3,
+            bytes(self.Data4[:2]).hex().upper(),
+            bytes(self.Data4[2:]).hex().upper(),
+        )
+
+
 class OSVERSIONINFOW(ctypes.Structure):
     _fields_ = [
         ('dwOSVersionInfoSize', ctypes.c_ulong),

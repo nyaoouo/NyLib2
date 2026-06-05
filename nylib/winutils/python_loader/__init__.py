@@ -482,16 +482,23 @@ def run_script(
     )
 
 
-def pack_script(path: str | pathlib.Path, is_main: bool = True) -> str:
+def pack_script(path: str | pathlib.Path, is_main: bool = True,
+                package_name: str | None = None) -> str:
     """Pack a script (or package directory) into a self-extracting payload.
 
     Wraps :func:`nylib.utils.pkg_archive.pack`. The returned string is
     standalone Python source: feeding it to :func:`run_code` injects the
     user's script *and* any sibling submodules without writing files to
     the target process's filesystem.
+
+    Set ``package_name`` to wrap the payload in a synthetic top-level
+    package of that name. The entry script then runs with
+    ``__package__=<package_name>`` so relative imports work inside it.
+    Default ``None`` preserves the legacy top-level behaviour (sibling
+    modules importable by bare name, no relative imports from entry).
     """
     from ...utils import pkg_archive
-    return pkg_archive.pack(path, is_main=is_main)
+    return pkg_archive.pack(path, is_main=is_main, package_name=package_name)
 
 
 def run_packed(

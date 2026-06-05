@@ -483,8 +483,18 @@ class Process:
             b'\xF3\x0F\x10\x1B',  # MOVSS xmm3, [rbx]
         )
 
-        if len(args) > 4:
-            raise ValueError('not yet handle args more then 4')
+        # Args 0..3 go in rcx/rdx/r8/r9 (or xmm0..3 for floats). Args 4+ are
+        # passed on the stack at [rsp+0x20 + 8*(i-4)] per the Win64 ABI. Grow the
+        # reserved frame so it covers the 0x20 shadow space plus the stack args,
+        # while keeping rsp 16-byte aligned at the CALL (push rbp + push rbx push
+        # 16 bytes, so the frame size must be ≡ 8 mod 16).
+        n_stack = max(0, len(args) - 4)
+        if n_stack:
+            required = 0x18 + n_stack * 8
+            required = ((required - 8 + 15) // 16) * 16 + 8  # round up to ≡ 8 (mod 16)
+            push_stack_depth = max(push_stack_depth, required)
+        if push_stack_depth > 0xFF:
+            raise ValueError(f'too many args; frame {push_stack_depth:#x} exceeds 0xFF')
         with self.name_space() as name_space:
             return_address = name_space.take(8)
             shell = (
@@ -499,12 +509,24 @@ class Process:
                     a = name_space.store(a)
                 elif isinstance(a, bool):
                     a = int(a)
-                if isinstance(a, int):
-                    shell += _INT_ARG[i] + struct.pack('q', a)
-                elif isinstance(a, float):
-                    shell += _MOV_RBX + struct.pack('f', a) + bytes(4) + _FLOAT_ARG[i]
+                if i < 4:
+                    if isinstance(a, int):
+                        shell += _INT_ARG[i] + struct.pack('q', a)
+                    elif isinstance(a, float):
+                        shell += _MOV_RBX + struct.pack('f', a) + bytes(4) + _FLOAT_ARG[i]
+                    else:
+                        raise TypeError(f'not support arg type {type(a)} at pos {i}')
                 else:
-                    raise TypeError(f'not support arg type {type(a)} at pos {i}')
+                    # Stack arg: MOV rax, imm64 ; MOV [rsp + off], rax
+                    if isinstance(a, float):
+                        raise TypeError(f'float stack args (pos>=4) not supported, at {i}')
+                    if not isinstance(a, int):
+                        raise TypeError(f'not support arg type {type(a)} at pos {i}')
+                    off = 0x20 + (i - 4) * 8
+                    shell += (
+                            b"\x48\xB8" + struct.pack('q', a) +           # MOV rax, imm64
+                            b"\x48\x89\x84\x24" + struct.pack('<i', off)  # MOV [rsp+off], rax
+                    )
             shell += (
                              b"\x48\xBB" + struct.pack('q', func_ptr) +  # MOV rbx, func_ptr
                              b"\xFF\xD3"  # CALL rbx

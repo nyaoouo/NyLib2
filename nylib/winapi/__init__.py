@@ -4,3 +4,6 @@ from .ntdll import *
 from .user32 import *
 from .msvcrt import *
 from .shell32 import *
+from .ole32 import *
+from .version import *
+from .propsys import *
