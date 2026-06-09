@@ -136,13 +136,119 @@ class WinTrustData(ctypes.Structure):
     ]
 
 
+class CryptAlgorithmIdentifier(ctypes.Structure):
+    _fields_ = [
+        ("pszObjId", ctypes.c_char_p),
+        ("Parameters", CryptDataBlob),
+    ]
+
+
+class CertInfo(ctypes.Structure):
+    # Only the leading fields up to Subject are needed (to read the Issuer / Subject name
+    # blobs); the remaining fields are intentionally omitted.
+    _fields_ = [
+        ("dwVersion", wintypes.DWORD),
+        ("SerialNumber", CryptDataBlob),
+        ("SignatureAlgorithm", CryptAlgorithmIdentifier),
+        ("Issuer", CryptDataBlob),
+        ("NotBefore", wintypes.FILETIME),
+        ("NotAfter", wintypes.FILETIME),
+        ("Subject", CryptDataBlob),
+    ]
+
+
+class CertContext(ctypes.Structure):
+    _fields_ = [
+        ("dwCertEncodingType", wintypes.DWORD),
+        ("pbCertEncoded", ctypes.POINTER(ctypes.c_ubyte)),
+        ("cbCertEncoded", wintypes.DWORD),
+        ("pCertInfo", ctypes.POINTER(CertInfo)),
+        ("hCertStore", ctypes.c_void_p),
+    ]
+
+
+class CertEnhKeyUsage(ctypes.Structure):
+    _fields_ = [
+        ("cUsageIdentifier", wintypes.DWORD),
+        ("rgpszUsageIdentifier", ctypes.POINTER(ctypes.c_char_p)),
+    ]
+
+
+class CertUsageMatch(ctypes.Structure):
+    _fields_ = [
+        ("dwType", wintypes.DWORD),
+        ("Usage", CertEnhKeyUsage),
+    ]
+
+
+class CertChainPara(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("RequestedUsage", CertUsageMatch),
+    ]
+
+
+class CertTrustStatus(ctypes.Structure):
+    _fields_ = [
+        ("dwErrorStatus", wintypes.DWORD),
+        ("dwInfoStatus", wintypes.DWORD),
+    ]
+
+
+class CertChainElement(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("pCertContext", ctypes.c_void_p),
+        ("TrustStatus", CertTrustStatus),
+        ("pRevocationInfo", ctypes.c_void_p),
+        ("pIssuanceUsage", ctypes.c_void_p),
+        ("pApplicationUsage", ctypes.c_void_p),
+        ("pwszExtendedErrorInfo", wintypes.LPCWSTR),
+    ]
+
+
+class CertSimpleChain(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("TrustStatus", CertTrustStatus),
+        ("cElement", wintypes.DWORD),
+        ("rgpElement", ctypes.POINTER(ctypes.POINTER(CertChainElement))),
+        ("pTrustListInfo", ctypes.c_void_p),
+        ("fHasRevocationFreshnessTime", wintypes.BOOL),
+        ("dwRevocationFreshnessTime", wintypes.DWORD),
+    ]
+
+
+class CertChainContext(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("TrustStatus", CertTrustStatus),
+        ("cChain", wintypes.DWORD),
+        ("rgpChain", ctypes.POINTER(ctypes.POINTER(CertSimpleChain))),
+        ("cLowerQualityChainContext", wintypes.DWORD),
+        ("rgpLowerQualityChainContext", ctypes.c_void_p),
+        ("fHasRevocationFreshnessTime", wintypes.BOOL),
+        ("dwRevocationFreshnessTime", wintypes.DWORD),
+    ]
+
+
 SIGNER_SUBJECT_FILE = 0x1
 SIGNER_CERT_STORE = 0x2
 SIGNER_CERT_POLICY_STORE = 0x1
+SIGNER_CERT_POLICY_CHAIN = 0x2
 SIGNER_CERT_POLICY_CHAIN_NO_ROOT = 0x8
 SIGNER_AUTHCODE_ATTR = 0x1
 SIGNER_TIMESTAMP_AUTHENTICODE = 0x1
 SIGNER_TIMESTAMP_RFC3161 = 0x2
+
+# Certificate store add dispositions (wincrypt.h)
+CERT_STORE_ADD_USE_EXISTING = 2
+CERT_STORE_ADD_REPLACE_EXISTING = 3
+CERT_STORE_ADD_ALWAYS = 4
+
+# CERT_USAGE_MATCH.dwType (wincrypt.h)
+USAGE_MATCH_TYPE_AND = 0x00000000
+USAGE_MATCH_TYPE_OR = 0x00000001
 
 CALG_SHA1 = 0x00008004
 CALG_SHA256 = 0x0000800C
@@ -161,6 +267,7 @@ WTD_STATEACTION_IGNORE = 0x0
 WTD_UICONTEXT_EXECUTE = 0x0
 
 CERT_NAME_SIMPLE_DISPLAY_TYPE = 4
+CERT_NAME_ISSUER_FLAG = 0x1
 CERT_HASH_PROP_ID = 3
 CERT_QUERY_OBJECT_FILE = 1
 CERT_QUERY_CONTENT_FLAG_ALL = 0x00003FFE
@@ -170,6 +277,9 @@ PKCS_7_ASN_ENCODING = 0x00010000
 CMSG_SIGNER_INFO_PARAM = 6
 CERT_ID_ISSUER_SERIAL_NUMBER = 1
 CERT_FIND_SUBJECT_CERT = 0x000B0000
+CERT_FIND_SUBJECT_NAME = 0x00020007
+# Predefined store providers (wincrypt.h) passed as the integer lpszStoreProvider.
+CERT_STORE_PROV_MEMORY = 2
 
 WINTRUST_ACTION_GENERIC_VERIFY_V2 = GUID(
     0x00AAC56B,
@@ -197,6 +307,10 @@ CryptQueryObject = def_win_api(crypt32.CryptQueryObject, wintypes.BOOL, (wintype
 CryptMsgClose = def_win_api(crypt32.CryptMsgClose, wintypes.BOOL, (ctypes.c_void_p,), error_zero=True)
 CryptMsgGetParam = def_win_api(crypt32.CryptMsgGetParam, wintypes.BOOL, (ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, ctypes.c_void_p), error_zero=True)
 CertFindCertificateInStore = def_win_api(crypt32.CertFindCertificateInStore, ctypes.c_void_p, (ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, ctypes.c_void_p), error_zero=True)
+CertAddCertificateContextToStore = def_win_api(crypt32.CertAddCertificateContextToStore, wintypes.BOOL, (ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p), error_zero=True)
+CertGetCertificateChain = def_win_api(crypt32.CertGetCertificateChain, wintypes.BOOL, (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, ctypes.c_void_p), error_zero=True)
+CertFreeCertificateChain = def_win_api(crypt32.CertFreeCertificateChain, None, (ctypes.c_void_p,))
+CertOpenStore = def_win_api(crypt32.CertOpenStore, ctypes.c_void_p, (ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p), error_zero=True)
 CryptMsgGetAndVerifySigner = def_win_api(crypt32.CryptMsgGetAndVerifySigner, wintypes.BOOL, (ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p), error_zero=True)
 SignerSign = def_win_api(mssign32.SignerSign, ctypes.c_long, (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, wintypes.LPCWSTR, ctypes.c_void_p, ctypes.c_void_p))
 SignerTimeStamp = def_win_api(mssign32.SignerTimeStamp, ctypes.c_long, (ctypes.c_void_p, wintypes.LPCWSTR, ctypes.c_void_p, ctypes.c_void_p))

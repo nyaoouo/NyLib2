@@ -89,6 +89,7 @@ exclude = [
 "nylib.__pyinstaller" = ["README.md"]
 "nylib.winutils.python_hijack" = ["*.template.cpp"]
 "nylib.winutils.python_loader" = ["*.cpp"]
+"nylib.winutils.sign" = ["*.p7b"]
 "nylib.winutils.breakpoint.veh" = ["*.cpp"]
 "nylib.winutils.breakpoint.debugger" = ["*.cpp"]
 
