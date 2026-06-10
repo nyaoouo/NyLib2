@@ -306,3 +306,21 @@ class OSVERSIONINFOW(ctypes.Structure):
     def __init__(self):
         super().__init__()
         self.dwOSVersionInfoSize = ctypes.sizeof(self)
+
+
+class CREDENTIAL(ctypes.Structure):
+    # wincred.h CREDENTIALW
+    _fields_ = [
+        ('Flags', ctypes.c_ulong),
+        ('Type', ctypes.c_ulong),
+        ('TargetName', ctypes.c_wchar_p),
+        ('Comment', ctypes.c_wchar_p),
+        ('LastWritten', ctypes.wintypes.FILETIME),
+        ('CredentialBlobSize', ctypes.c_ulong),
+        ('CredentialBlob', ctypes.POINTER(ctypes.c_char)),
+        ('Persist', ctypes.c_ulong),
+        ('AttributeCount', ctypes.c_ulong),
+        ('Attributes', ctypes.c_void_p),
+        ('TargetAlias', ctypes.c_wchar_p),
+        ('UserName', ctypes.c_wchar_p),
+    ]

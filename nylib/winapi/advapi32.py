@@ -54,3 +54,9 @@ OpenServiceW = def_win_api(_dll.OpenServiceW, ctypes.c_void_p, (ctypes.c_void_p,
 ControlService = def_win_api(_dll.ControlService, ctypes.c_bool, (ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p), error_zero=True)
 StartService = def_win_api(_dll.StartServiceW, ctypes.c_bool, (ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p), error_zero=True)
 DeleteService = def_win_api(_dll.DeleteService, ctypes.c_bool, (ctypes.c_void_p,), error_zero=True)
+
+CRED_TYPE_GENERIC = 1
+# BOOL CredReadW(LPCWSTR TargetName, DWORD Type, DWORD Flags, PCREDENTIALW *Credential)
+CredReadW = def_win_api(_dll.CredReadW, ctypes.c_bool, (ctypes.c_wchar_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p), error_zero=True)
+# void CredFree(PVOID Buffer)
+CredFree = def_win_api(_dll.CredFree, None, (ctypes.c_void_p,))

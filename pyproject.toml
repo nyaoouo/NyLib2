@@ -84,6 +84,7 @@ exclude = [
 # notes in AGENTS.md).
 [tool.setuptools.package-data]
 "nylib" = ["py.typed", "*.pyi"]
+"nylib.vmware_wp" = ["py.typed", "README.md"]
 "nylib.pyimgui" = ["*.pyi", "**/*.pyi"]
 "nylib.imguiutils.icons" = ["**/*.ttf"]
 "nylib.__pyinstaller" = ["README.md"]
