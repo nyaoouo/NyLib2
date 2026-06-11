@@ -33,6 +33,8 @@ nylib/                       importable package
   ctype/                     remote-process aware ctypes accessors
   hook/                      Microsoft Detours wrapper (`Hook`, `create_hook`)
   imguiutils/                widgets & FA icon TTFs for the pyimgui frontend
+    debug_view/              Dear ImGui debug view (disasm/hex/BP/tools/console)
+  logging.py                 color console logging, multiline + std->file tee
   mono/                      Unity / Mono runtime inspector
   pattern.py                 IDA-style "AA BB ?? CC" scanner
   process/                   `Process` class - memory R/W, module enum, scan
@@ -40,19 +42,23 @@ nylib/                       importable package
   structs/                   PDB / DWARF struct helpers
   tkinter_/                  small tkinter extras
   utils/                     pip bootstrap, eventloop, threading, web, ...
+  vmware_wp/                 VMware Workstation Pro backend (own README.md)
   winapi/                    typed ctypes for kernel32 / ntdll / user32 / ...
   winutils/                  high-level Win32 helpers (see section 4)
+    breakpoint/              x64 HW/SW breakpoint primitive (VEH + debugger)
 
 scripts/                     dev-only tools (NOT installed; not in the wheel)
+  breakpoint_demo/           manual smoke scripts for winutils.breakpoint
   dxtest/                    DirectX 9/10/11/12 injection smoke tests
   generate_bind/             pybind11 binding generator from C headers
   ida/                       IDA Pro loaders & sig workers
   pyimgui/  pyimgui2/        build scripts for the `pyimgui` C extension
   sig_thief/                 signature thief (PE Authenticode)
   test_inject/               sample injection target
+  windows_driver_policy_manage/  PowerShell cross-cert driver-policy manager
 
 pyproject.toml               package metadata + PyInstaller entry point
-readme.md                    short user-facing intro & example
+readme.md                    user-facing intro, feature map & examples
 license.txt                  GPL v3
 .agent-memory/               local-only notes for AI agents (git-ignored)
 ```
@@ -87,9 +93,10 @@ from nylib.process import Process
 ### `nylib.winapi`
 
 Typed `ctypes` wrappers around the Win32 surface used internally:
-`kernel32`, `ntdll`, `user32`, `advapi32`, `shell32`, `msvcrt`. Plus
-`utils.py` with helpers such as `DEFAULT_ENCODING` and small `byref`
-wrappers. Prefer importing the symbol you need directly:
+`kernel32`, `ntdll`, `user32`, `advapi32`, `shell32`, `msvcrt`, `ole32`,
+`propsys`, `version`. Plus `utils.py` with helpers such as
+`DEFAULT_ENCODING` and small `byref` wrappers. Prefer importing the symbol
+you need directly:
 
 ```python
 from nylib.winapi import OpenProcess, ReadProcessMemory, MEMORY_BASIC_INFORMATION
@@ -102,16 +109,19 @@ High-level Win32 helpers; subpackages are loaded lazily.
 | Module | Purpose |
 | --- | --- |
 | `winutils.process` | `enable_privilege()`, `run_admin()`, `iter_processes()`, `pid_by_executable()`, `create_suspend_process` |
+| `winutils.breakpoint` | x64 HW/SW breakpoint primitive (`BreakPoint`, `BP_E`); VEH + debugger backends - see section 3 |
 | `winutils.ensure_env` | locate / install Visual Studio + Windows SDK + LLVM toolchains |
 | `winutils.msvc` | `load_vcvarsall(arch)` and friends |
 | `winutils.llvm_pdb` | PDB symbol helpers via LLVM |
-| `winutils.driver` | minimal kernel-driver helpers |
+| `winutils.driver` | service-control (`SCManager`, `Service`) helpers for loading kernel drivers |
 | `winutils.inline_hook` | hot-patch trampoline based on `keystone-engine` + `capstone` |
 | `winutils.pe_unmap` | rebuild an in-memory PE back to its on-disk layout |
+| `winutils.pe_exports` | in-memory PE export-table walker (`read_exports`), ctypes-only |
+| `winutils.version` | PE version resource + shell file properties (`get_file_version_info`, `get_file_properties`) |
 | `winutils.pipe`, `winutils.pipe_rpc` | named-pipe transport plus a tiny RPC layer (used by `python_loader` host <-> guest) |
 | `winutils.python_hijack` | build a stub DLL that proxies a real DLL and runs Python on attach |
 | `winutils.python_loader` | C source for an in-process Python loader (`python_loader.cpp`) |
-| `winutils.sign` | Authenticode helpers - `bypass.py` (memory patching) and `native.py` |
+| `winutils.sign` | Authenticode + kernel-driver cross-cert signing - see section 3 |
 
 `python_hijack` and `python_loader` are how you get arbitrary Python
 into a third-party process. The hijack flow compiles a tiny C++ proxy
@@ -131,6 +141,63 @@ from nylib.hook import Hook, create_hook
 - Inside the callback, `hook.original(*args)` invokes the original.
 - The Detours `.dll` is loaded lazily via
   `nylib.hook.detours`; ship it next to the binary when freezing.
+
+### `nylib.winutils.breakpoint`
+
+x64 hardware/software breakpoint primitive (in-process, local only):
+
+```python
+from nylib.winutils.breakpoint import BreakPoint, BP_E
+
+def on_hit(address, t, frm, ctx):
+    ctx.rcx += 1                       # mutate the trapping thread's registers
+bp = BreakPoint(addr, 1, on_hit, flag=BP_E.EXEC).install()
+bp.uninstall()
+```
+
+- `BP_E` flags: access `EXEC | WRITE | READ`, impl `HARD` (debug registers)
+  / `SOFT` (PAGE_GUARD). EXEC requires `size == 1`.
+- Two backends via `backend=`: `'veh'` (default, no elevation; new threads
+  need `bp.refresh_threads()`) and `'debugger'` (`DebugActiveProcess`,
+  **requires SeDebugPrivilege**, auto-attaches new threads).
+- Module helpers: `install`, `install_decorator`, `list_breakpoints`,
+  `find_breakpoint`, `refresh_all_threads`, `uninstall_all` (also
+  `atexit`-registered). HARD-BP per-thread mgmt: `attach_tids`,
+  `detach_tids`, `tracked_tids`, `refresh_threads`.
+- Native backends live in `breakpoint/veh/veh_backend.cpp` and
+  `breakpoint/debugger/debugger_backend.cpp`; build the DLL once with
+  `from nylib.winutils.breakpoint.veh import ensure_backend_dll; ensure_backend_dll()`.
+  See `scripts/breakpoint_demo/` for runnable smoke scripts.
+
+### `nylib.winutils.sign`
+
+Dependency-free Authenticode signing / verification over `mssign32` +
+`crypt32` + `wintrust` (no `signtool.exe` needed):
+
+```python
+from nylib.winutils.sign import (
+    SigningService, VerificationService, CertificateLoader,
+    SignRequest, HashAlgorithmType, TimestampKind,
+)
+signer = SigningService(CertificateLoader())
+result = signer.sign(SignRequest(file_path=..., pfx_path=..., password=...,
+                                 hash_algorithm=HashAlgorithmType.SHA256))
+```
+
+Two things it adds beyond signtool:
+
+- **Driver / kernel-mode signing** (`driver_mode=True`): assembles and embeds
+  the cross-certificate chain like `signtool sign /ac`, and refuses to sign
+  unless the chain reaches `required_chain_root` (default
+  `"Microsoft Code Verification Root"`). A 29-CA Microsoft cross-cert bundle
+  (`MSCVStore.p7b`) ships with the package and is used automatically.
+- **Automatic expired-cert handling** (`auto_bypass_expired_cert=True`, the
+  default): out-of-validity signing certs are wrapped in an in-process
+  time-validity bypass (`bypass.py`) so `SignerSign` does not fail with
+  `CERT_E_EXPIRED`. Do not also wrap the call in `bypass.BypassTsCheck`.
+
+Low-level surface is in `native.py`; the bundled store is pinned as a
+PyInstaller data file via `hook-nylib.winutils.sign.py`.
 
 ### `nylib.pattern`
 
@@ -200,6 +267,11 @@ Higher-level pyimgui widgets that depend on the user having a working
 - `icons/` - Font Awesome TTFs (`solid`, `regular`) plus generated
   unicode-name constants. The TTFs are shipped in the wheel; they are
   loaded with `atlas.AddFontFromFileTTF`.
+- `debug_view/` - a Dear ImGui debug view (disassembly + hex panels,
+  breakpoint manager, module list, pattern scan, dump, Python console,
+  pinned/history nav). Public API:
+  `DebugViewState` + `render_debug_view(state)`, called inside a window
+  begun with `ImGuiWindowFlags_MenuBar`.
 
 ### `nylib.mono`
 
@@ -229,6 +301,30 @@ Catch-all for non-Win32 helpers. The notable ones:
 - `template`, `preprocessor`, `yaml2json`, `prime`, `simple` - small
   text / data utilities.
 
+### `nylib.logging`
+
+Drop-in `logging` setup. `nylib.logging.install(...)` enables ANSI color on
+the Windows console, adds `Verbose1..3` levels below `DEBUG`, reflows
+multi-line messages / tracebacks so every line carries the prefix, and can
+tee to a size-capped, zip-archiving file. `std2file(...)` redirects
+`sys.stdout` / `sys.stderr` into a rotating file (used when injected code
+has no console).
+
+### `nylib.vmware_wp`
+
+Control VMware Workstation Pro from Python - power, snapshots, guest
+commands, and the Workstation REST API - through one synchronous,
+zero-dependency interface (`Vmrun`, `Vmcli`, `WorkstationRest`,
+`Workstation`, `VmwareConfig`). Encrypted-VM passwords auto-resolve from the
+Windows Credential Manager. This subpackage ships its own detailed
+`README.md` (and `py.typed`); read it before touching the module.
+
+```python
+from nylib.vmware_wp import Vmrun, VmwareConfig
+vr = Vmrun.from_config(VmwareConfig())
+vr.power(r"D:\vm\Win11\Win11.vmx", "start")
+```
+
 ### `nylib.structs`, `nylib.tkinter_`, `nylib.__pyinstaller`
 
 - `structs/` - PDB-derived and ad-hoc binary struct definitions.
@@ -245,13 +341,15 @@ venv.
 
 | Folder | Role |
 | --- | --- |
-| `scripts/pyimgui2/` | Current pyimgui generator + build + demo. Treat this as the canonical source for the `nylib.pyimgui` build. |
+| `scripts/pyimgui2/` | Current pyimgui generator + build + demo (DX9/10/11/12 + GL3 + Vulkan; overlay mode). Treat this as the canonical source for the `nylib.pyimgui` build. |
 | `scripts/pyimgui/` | Legacy pyimgui generator. Kept for reference. |
 | `scripts/dxtest/` | Tiny DX9/10/11/12 host executables used to validate the pyimgui Inbound hooks. Run `python scripts/dxtest/build.py all`, then `python scripts/dxtest/inject.py dx11 --seconds 6`. |
+| `scripts/breakpoint_demo/` | Manual smoke scripts for `nylib.winutils.breakpoint` (EXEC/WRITE/SOFT BPs, slot exhaustion, new-thread mgmt, debugger backend). Build the backend DLL first (see its README). |
 | `scripts/generate_bind/` | Standalone pybind11 generator used by pyimgui and Mono. |
 | `scripts/ida/` | IDA Pro plugins / loaders (e.g. `loader_hthh_nxo64.py`, `NySigWorker2.py`). Load these from inside IDA. |
 | `scripts/sig_thief/` | Steal a valid Authenticode signature from one PE and apply it to another. |
 | `scripts/test_inject/` | Example client/host pair driving `nylib.winutils.python_loader`. |
+| `scripts/windows_driver_policy_manage/` | PowerShell (`manage.ps1` / `manage.bat`) to status/remove/restore the Windows cross-cert driver Code-Integrity policy so a cross-signed test driver can load. Run elevated; lowers security and needs a reboot. |
 | `scripts/setup_llvm_dev.py` | Bootstrap an LLVM dev environment via `nylib.winutils.ensure_env`. |
 | `scripts/gen_fa_icons.py` | Regenerate `nylib/imguiutils/icons/fa/{solid,regular}.py` from the upstream Font Awesome metadata. |
 
@@ -315,6 +413,12 @@ What this gives you for free, once `nylib` is `pip install`ed:
   already covered by `pyinstaller-hooks-contrib`).
 - `hook-nylib.imguiutils.icons.py` - collects the Font Awesome TTFs
   and pins every icon-set submodule as a hidden import.
+- `hook-nylib.winutils.sign.py` - bundles the cross-cert store
+  (`MSCVStore.p7b`) so driver-mode signing works when frozen.
+- `hook-nylib.winutils.breakpoint.py` - bundles the breakpoint backend
+  sources / DLLs.
+- `hook-nylib.winutils.python_loader.py` - bundles the in-process Python
+  loader C source.
 
 ### Two installation modes
 
