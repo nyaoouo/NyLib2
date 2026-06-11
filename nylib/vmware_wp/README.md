@@ -66,6 +66,31 @@ a guest batch file, redirects the whole batch to a temp file, and copies the out
 a `GuestExecResult(returncode, stdout, command)`. Use `shell=False` to run a program directly, and
 `capture=False` to skip output capture.
 
+## Folder copy (archive → transfer → unarchive)
+
+`vmrun` only copies single files. `Vmrun.copy_folder_from_host_to_guest` /
+`copy_folder_from_guest_to_host` move a whole directory's *contents* by packing it into one
+**`.tar.gz`**, shipping that single file, and unpacking on the far side. `tar.gz` is the most
+portable choice: Linux's GNU `tar` and the `tar.exe` (bsdtar) bundled with Windows 10 1803+ both
+create *and* extract it with no extra tooling. The guest OS is auto-detected from the vmx's
+`guestOS` line (override with `guest_os="windows"|"posix"`).
+
+`file_filter` (a glob string or an iterable of globs) is applied **guest-side**: at extraction for
+host→guest, at archiving for guest→host. `None` copies everything.
+
+```python
+# push a payload folder into a fresh guest dir
+vr.copy_folder_from_host_to_guest(vmx, "user", "pw", r".\guest", r"C:\Temp\run123")
+
+# pull just the logs back to the host
+vr.copy_folder_from_guest_to_host(vmx, "user", "pw", r"C:\Temp\run123\output", r".\output",
+                                  file_filter="*.log")
+```
+
+> Param ordering follows the single-file helpers (host→guest: `host_path, guest_path`;
+> guest→host: `guest_path, host_path`). The Windows guest path is fully tested; the posix path
+> (`/bin/sh -c tar …`) is best-effort.
+
 ## Notes
 
 - Requires Python ≥ 3.11. No third-party runtime dependencies.

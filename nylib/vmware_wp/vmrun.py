@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
+import shlex
 import subprocess
+import tarfile
 import tempfile
 from dataclasses import dataclass
 from enum import Enum
@@ -15,6 +18,13 @@ from nylib.vmware_wp.wincred import read_encrypted_vm_password
 
 _SECRET_FLAGS = {"-vp", "-gu", "-gp"}
 _CMD = r"C:\Windows\System32\cmd.exe"
+_GUEST_OS_RE = re.compile(r'^\s*guestOS\s*=\s*"([^"]+)"', re.IGNORECASE | re.MULTILINE)
+
+
+def _winq(path):
+    """Double-quote a Windows path for a cmd command line (no-op if already space-free)."""
+    s = str(path)
+    return '"' + s + '"' if " " in s else s
 
 
 def _redact_secret_args(command):
@@ -133,7 +143,7 @@ class Vmrun:
     # ---- guest ops ----
     def run_program_in_guest(self, vmx_path, guest_username, guest_password, program_path, *,
                              program_arguments=None, no_wait=False, interactive=False,
-                             active_window=False, vm_password=None) -> ProcessResult:
+                             active_window=False, vm_password=None, timeout=None) -> ProcessResult:
         vm_password = self._resolve_vm_password(vmx_path, vm_password)
         args = ["runProgramInGuest", str(vmx_path)]
         if no_wait:
@@ -148,7 +158,8 @@ class Vmrun:
             # command-line string (splitting them into separate tokens fails for
             # cmd.exe). Join with Windows quoting rules.
             args.append(subprocess.list2cmdline([str(a) for a in program_arguments]))
-        return self.invoke(args, guest_username=guest_username, guest_password=guest_password, vm_password=vm_password)
+        return self.invoke(args, guest_username=guest_username, guest_password=guest_password,
+                           vm_password=vm_password, timeout=timeout)
 
     def create_temp_file_in_guest(self, vmx_path, guest_username, guest_password, *, vm_password=None) -> str:
         """Create a temp file in the guest and return its path (from stdout)."""
@@ -321,3 +332,181 @@ class Vmrun:
             ["deleteDirectoryInGuest", str(vmx_path), str(guest_path)],
             guest_username=guest_username, guest_password=guest_password, vm_password=vm_password,
         )
+
+    # ---- folder copy (archive -> transfer -> unarchive) ----
+    @staticmethod
+    def _detect_guest_os(vmx_path, guest_os):
+        """Return 'windows' or 'posix' for the guest.
+
+        Explicit `guest_os` wins; otherwise the host-side .vmx `guestOS = "..."` line is
+        consulted (values like 'windows11-64', 'ubuntu-64', 'otherlinux'). Anything containing
+        'win' -> 'windows'. If the vmx is unreadable / has no guestOS, default to 'windows'
+        (this lib's primary target); pass guest_os='posix' to override.
+        """
+        if guest_os:
+            g = str(guest_os).strip().lower()
+            return "windows" if g.startswith("win") else "posix"
+        try:
+            text = pathlib.Path(str(vmx_path)).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return "windows"
+        m = _GUEST_OS_RE.search(text)
+        if not m:
+            return "windows"
+        return "windows" if "win" in m.group(1).lower() else "posix"
+
+    @staticmethod
+    def _normalize_patterns(file_filter):
+        """A str -> [str]; an iterable -> list[str]; None/empty -> []."""
+        if file_filter is None:
+            return []
+        if isinstance(file_filter, str):
+            return [file_filter]
+        return [str(p) for p in file_filter]
+
+    def _run_guest_tar(self, vmx_path, guest_username, guest_password, *, mode, archive,
+                       directory, patterns, guest_os, vm_password, timeout):
+        """Invoke the guest's tar to create ('c') or extract ('x') a .tar.gz.
+
+        Both the bundled Windows bsdtar and Linux GNU tar match glob operands against the
+        archived/extracted members, so `patterns` are passed as plain operands.
+
+        Windows: we run **bare `tar` through cmd**, NOT `C:\\Windows\\System32\\tar.exe` by
+        full path — vmrun launches programs in a context where System32 is WOW64-redirected
+        to SysWOW64, and a literal System32 path fails; cmd resolves `tar` on PATH correctly.
+        Posix wraps in `/bin/sh -c` so the shell expands globs before tar sees them (posix is
+        best-effort: only the Windows guest is exercised by our tests). Raises VmwareError on
+        a non-zero tar exit.
+        """
+        flags = "-" + mode + "zf"          # -czf / -xzf
+        operands = self._normalize_patterns(patterns)
+        if mode == "c" and not operands:
+            operands = ["."]               # archive the whole directory by default
+        if guest_os == "windows":
+            parts = ["tar", flags, _winq(archive), "-C", _winq(directory), *operands]
+            res = self.exec_in_guest(
+                vmx_path, guest_username, guest_password, " ".join(parts),
+                vm_password=vm_password, shell=True, capture=True, timeout=timeout,
+            )
+            if res.returncode != 0:
+                raise VmwareError(
+                    f"guest tar ({mode}) failed rc={res.returncode}: {res.stdout.strip()}")
+            return res
+        # posix (best-effort)
+        pat = " ".join(operands)
+        script = "cd " + shlex.quote(directory) + " && tar " + flags + " " + shlex.quote(archive)
+        if pat:
+            script += " " + pat
+        res = self.run_program_in_guest(
+            vmx_path, guest_username, guest_password, "/bin/sh",
+            program_arguments=["-c", script], vm_password=vm_password, timeout=timeout,
+        )
+        if res.returncode != 0:
+            raise VmwareError(f"guest tar ({mode}) failed rc={res.returncode}")
+        return res
+
+    @staticmethod
+    def _safe_extract_tar(tgz_path, dest_dir):
+        """Extract a tar.gz on the host, skipping members that escape dest_dir."""
+        dest = pathlib.Path(dest_dir).resolve()
+        dest.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(tgz_path, "r:gz") as tf:
+            safe = []
+            for member in tf.getmembers():
+                target = (dest / member.name).resolve()
+                if target == dest or dest in target.parents:
+                    safe.append(member)
+            tf.extractall(dest, members=safe)
+
+    def copy_folder_from_host_to_guest(self, vmx_path, guest_username, guest_password,
+                                       host_path, guest_path, *, vm_password=None, timeout=None,
+                                       file_filter=None, guest_os=None) -> ProcessResult:
+        """Copy a host folder's *contents* into a guest folder via a tar.gz round-trip.
+
+        Packs `host_path` on the host (Python tarfile), ships one archive, and extracts it
+        into `guest_path` with the guest's tar. `file_filter` (a glob str or iterable of
+        globs) is applied guest-side at extraction. Returns the guest tar ProcessResult.
+        """
+        vm_password = self._resolve_vm_password(vmx_path, vm_password)
+        os_kind = self._detect_guest_os(vmx_path, guest_os)
+
+        host_tgz = tempfile.NamedTemporaryFile(prefix="nyvm_dir_", suffix=".tar.gz", delete=False)
+        host_tgz.close()
+        try:
+            with tarfile.open(host_tgz.name, "w:gz") as tf:
+                tf.add(str(host_path), arcname=".")
+
+            try:
+                self.create_directory_in_guest(
+                    vmx_path, guest_username, guest_password, guest_path, vm_password=vm_password,
+                )
+            except VmwareError:
+                pass  # already exists
+
+            guest_tgz = self.create_temp_file_in_guest(
+                vmx_path, guest_username, guest_password, vm_password=vm_password,
+            ) + ".tar.gz"
+            self.copy_file_from_host_to_guest(
+                vmx_path, guest_username, guest_password, host_tgz.name, guest_tgz,
+                vm_password=vm_password, timeout=timeout,
+            )
+            try:
+                return self._run_guest_tar(
+                    vmx_path, guest_username, guest_password, mode="x", archive=guest_tgz,
+                    directory=str(guest_path), patterns=file_filter, guest_os=os_kind,
+                    vm_password=vm_password, timeout=timeout,
+                )
+            finally:
+                try:
+                    self.delete_file_in_guest(
+                        vmx_path, guest_username, guest_password, guest_tgz, vm_password=vm_password,
+                    )
+                except VmwareError:
+                    pass
+        finally:
+            try:
+                os.unlink(host_tgz.name)
+            except OSError:
+                pass
+
+    def copy_folder_from_guest_to_host(self, vmx_path, guest_username, guest_password,
+                                       guest_path, host_path, *, vm_password=None, timeout=None,
+                                       file_filter=None, guest_os=None) -> ProcessResult:
+        """Copy a guest folder's *contents* to a host folder via a tar.gz round-trip.
+
+        Packs `guest_path` with the guest's tar (applying `file_filter` guest-side), ships one
+        archive, and extracts it into `host_path` on the host. Returns the guest tar
+        ProcessResult (inspect `.returncode` to confirm the guest-side archive succeeded).
+        """
+        vm_password = self._resolve_vm_password(vmx_path, vm_password)
+        os_kind = self._detect_guest_os(vmx_path, guest_os)
+        pathlib.Path(str(host_path)).mkdir(parents=True, exist_ok=True)
+
+        guest_tgz = self.create_temp_file_in_guest(
+            vmx_path, guest_username, guest_password, vm_password=vm_password,
+        ) + ".tar.gz"
+        host_tgz = tempfile.NamedTemporaryFile(prefix="nyvm_dir_", suffix=".tar.gz", delete=False)
+        host_tgz.close()
+        try:
+            result = self._run_guest_tar(
+                vmx_path, guest_username, guest_password, mode="c", archive=guest_tgz,
+                directory=str(guest_path), patterns=file_filter, guest_os=os_kind,
+                vm_password=vm_password, timeout=timeout,
+            )
+            self.copy_file_from_guest_to_host(
+                vmx_path, guest_username, guest_password, guest_tgz, host_tgz.name,
+                vm_password=vm_password, timeout=timeout,
+            )
+            self._safe_extract_tar(host_tgz.name, host_path)
+            return result
+        finally:
+            try:
+                self.delete_file_in_guest(
+                    vmx_path, guest_username, guest_password, guest_tgz, vm_password=vm_password,
+                )
+            except VmwareError:
+                pass
+            try:
+                os.unlink(host_tgz.name)
+            except OSError:
+                pass
