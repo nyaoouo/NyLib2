@@ -32,7 +32,7 @@ def _package_version() -> str:
         return '0+unknown'
 
 
-GENERATOR_DEFAULT = {'tool': 'nylib.ue', 'version': _package_version(), 'reference': 'Dumper-7@dd8fe34'}
+GENERATOR_DEFAULT = {'tool': 'nylib.ue', 'version': _package_version(), 'reference': 'Dumper-7@ea0dab3'}
 
 _ADDRESS_LIMIT = 1 << 64
 _LONE_SURROGATE_RE = re.compile('[\ud800-\udfff]')

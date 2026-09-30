@@ -760,7 +760,7 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(snapshot.FIELDS_SCHEMA, 'nylib.ue.fields')
         self.assertEqual(snapshot.OBJECT_COLUMNS, ['index', 'address', 'flags', 'class', 'outer', 'name'])
         self.assertEqual(snapshot.TYPE_CACHE_SIZE, 256)
-        self.assertEqual(snapshot.GENERATOR_DEFAULT['reference'], 'Dumper-7@dd8fe34')
+        self.assertEqual(snapshot.GENERATOR_DEFAULT['reference'], 'Dumper-7@ea0dab3')
         self.assertEqual(snapshot.GENERATOR_DEFAULT['tool'], 'nylib.ue')
 
 
