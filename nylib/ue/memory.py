@@ -1,7 +1,13 @@
+import bisect
+import collections
+import contextlib
 import dataclasses
 import struct
+import threading
+import time
 
-from .errors import MemoryReadError, MemoryWriteError, UeError
+from ..process import Process
+from .errors import MemoryReadError, MemoryWriteError, TargetError, UeError
 
 MEM_COMMIT, MEM_RESERVE, MEM_FREE = 0x1000, 0x2000, 0x10000
 MEM_PRIVATE, MEM_MAPPED, MEM_IMAGE = 0x20000, 0x40000, 0x1000000
@@ -195,3 +201,329 @@ class MemorySource:
 
     def refresh(self) -> None:
         pass
+
+
+PROCESS_CREATE_THREAD, PROCESS_VM_OPERATION = 0x0002, 0x0008
+PROCESS_VM_READ, PROCESS_VM_WRITE, PROCESS_QUERY_INFORMATION = 0x0010, 0x0020, 0x0400
+
+
+def handle_rights(*, write: bool = False, remote_calls: bool = False) -> int:
+    """Access mask for open_process: query + read, plus write or remote-call rights on request."""
+    rights = PROCESS_QUERY_INFORMATION | PROCESS_VM_READ
+    if write:
+        rights |= PROCESS_VM_OPERATION | PROCESS_VM_WRITE
+    if remote_calls:
+        rights |= PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_VM_WRITE
+    return rights
+
+
+def open_process(pid: int, *, write: bool = False, remote_calls: bool = False) -> 'Process':
+    """Open a live process with exactly handle_rights(...); failures raise TargetError."""
+    if not isinstance(pid, int):
+        raise TypeError(f'pid must be int, got {type(pid).__name__}')
+    if pid <= 0:
+        raise TargetError(pid, 'invalid pid')
+    try:
+        process = Process(pid, da=handle_rights(write=write, remote_calls=remote_calls))
+    except OSError as e:
+        raise TargetError(pid, f'OpenProcess failed: winerror {e.winerror}') from e
+    try:
+        alive = process.still_alive()
+    except OSError as e:
+        process.close()
+        raise TargetError(pid, f'cannot query process: winerror {e.winerror}') from e
+    if not alive:
+        process.close()
+        raise TargetError(pid, 'process has exited')
+    return process
+
+
+_current_lock = threading.Lock()
+_current = None
+
+
+def current_process() -> 'Process':
+    """The shared own-process Process; its reads and writes go through Read/WriteProcessMemory."""
+    global _current
+    with _current_lock:
+        if _current is None:
+            _current = Process(Process.current.process_id, Process.current.handle)
+        return _current
+
+
+def _contiguous_regions(mbis, lo: int, hi: int) -> list[Region]:
+    out, pos = [], lo
+    with contextlib.suppress(OSError):  # the first failed query ends the walk
+        for mbi in mbis:
+            base, end = max(int(mbi.BaseAddress), pos), min(int(mbi.BaseAddress) + int(mbi.RegionSize), hi)
+            if end <= base:
+                break
+            if base > pos:
+                out.append(Region(pos, base - pos, 0, MEM_FREE, 0))
+            out.append(Region(base, end - base, int(mbi.Protect), int(mbi.State), int(mbi.Type)))
+            if (pos := end) >= hi:
+                break
+    if pos < hi:
+        out.append(Region(pos, hi - pos, 0, MEM_FREE, 0))
+    return out
+
+
+def _first_gap(runs: list[tuple[int, int]], lo: int, hi: int) -> int | None:
+    if not runs or runs[0][0] > lo:
+        return lo
+    return runs[0][1] if runs[0][1] < hi else None
+
+
+class _Page:
+    __slots__ = ('data', 'spans')
+
+    def __init__(self, size: int):
+        self.data = bytearray(size)
+        self.spans = []  # sorted, merged (lo, hi) offsets of the bytes present
+
+    def add(self, offset: int, data: bytes):
+        self.data[offset:offset + len(data)] = data
+        merged = []
+        for lo, hi in sorted(self.spans + [(offset, offset + len(data))]):
+            if merged and lo <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+            else:
+                merged.append((lo, hi))
+        self.spans = merged
+
+    def gaps(self, lo: int, hi: int) -> list[tuple[int, int]]:
+        out, pos = [], lo
+        for s_lo, s_hi in self.spans:
+            if s_lo >= hi:
+                break
+            if s_hi <= pos:
+                continue
+            if s_lo > pos:
+                out.append((pos, s_lo))
+            pos = s_hi
+        if pos < hi:
+            out.append((pos, hi))
+        return out
+
+
+class _SharedState:
+    def __init__(self, requery_interval, max_cache_bytes):
+        self.lock = threading.RLock()
+        self.requery_interval = requery_interval
+        self.max_cache_bytes = max_cache_bytes
+        self.bases = self.regions = self.stamps = self.modules = None
+        self.pages = collections.OrderedDict()
+
+
+class ProcessSource(MemorySource):
+    """Live memory of a Process: self-healing region map, optional page cache, guarded writes."""
+
+    def __init__(self, process: 'Process', *, cache: bool = True, page_size: int = 0x10000,
+                 max_cache_bytes: int | None = None, requery_interval: float = 0.25):
+        if process is Process.current:
+            raise ValueError('ProcessSource cannot wrap Process.current; use current_process()')
+        if not isinstance(page_size, int):
+            raise TypeError(f'page_size must be int, got {type(page_size).__name__}')
+        if page_size < 0x1000 or page_size & (page_size - 1):
+            raise ValueError(f'page_size must be a power of two >= 0x1000, got {page_size:#x}')
+        if max_cache_bytes is not None:
+            if not isinstance(max_cache_bytes, int):
+                raise TypeError(f'max_cache_bytes must be int or None, got {type(max_cache_bytes).__name__}')
+            if max_cache_bytes < page_size:
+                raise ValueError(f'max_cache_bytes {max_cache_bytes:#x} is below page_size {page_size:#x}')
+        if not isinstance(requery_interval, (int, float)):
+            raise TypeError(f'requery_interval must be int or float, got {type(requery_interval).__name__}')
+        if requery_interval != requery_interval or requery_interval < 0:
+            raise ValueError(f'requery_interval must be >= 0, got {requery_interval!r}')
+        self.process = process
+        self.cache = bool(cache)
+        self.page_size = page_size
+        self._state = _SharedState(requery_interval, max_cache_bytes)
+        self._fresh = None
+
+    @property
+    def fresh(self) -> 'ProcessSource':
+        if not self.cache:
+            return self
+        with self._state.lock:
+            if self._fresh is None:
+                fresh = ProcessSource.__new__(ProcessSource)
+                fresh.process, fresh.cache, fresh.page_size, fresh._state, fresh._fresh = self.process, False, self.page_size, self._state, None
+                self._fresh = fresh
+            return self._fresh
+
+    def _ensure_map(self):
+        st = self._state
+        if st.bases is None:
+            stamp = time.monotonic()
+            st.regions = _contiguous_regions(self.process.iter_memory_region(0, USER_MAX), 0, USER_MAX)
+            st.bases = [r.base for r in st.regions]
+            st.stamps = [stamp] * len(st.regions)
+
+    def _query_span(self, lo: int, hi: int):
+        pos = lo
+        while pos < hi:
+            yield (mbi := self.process.virtual_query(pos))
+            pos = int(mbi.BaseAddress) + int(mbi.RegionSize)
+
+    def _heal(self, lo: int, hi: int, force: bool = False):
+        """Re-walk the map regions meeting [lo, hi): every one if force, else the stale unreadable ones."""
+        st, hi = self._state, min(hi, USER_MAX)
+        if lo >= hi:
+            return
+        now = time.monotonic()
+        i = bisect.bisect_right(st.bases, lo) - 1
+        while i < len(st.bases) and st.bases[i] < hi:
+            r = st.regions[i]
+            if force or not r.readable and now - st.stamps[i] >= st.requery_interval:
+                stamp = time.monotonic()
+                new = _contiguous_regions(self._query_span(r.base, r.end), r.base, r.end)
+                st.regions[i:i + 1] = new
+                st.bases[i:i + 1] = [x.base for x in new]
+                st.stamps[i:i + 1] = [stamp] * len(new)
+                i += len(new)
+            else:
+                i += 1
+
+    def _runs(self, lo: int, hi: int, writable: bool = False) -> list[tuple[int, int]]:
+        """Merged (start, end) runs of [lo, hi) inside readable (or writable) map regions."""
+        st, hi, out = self._state, min(hi, USER_MAX), []
+        if lo >= hi:
+            return out
+        regions, i = st.regions, bisect.bisect_right(st.bases, lo) - 1
+        while i < len(regions) and (r := regions[i]).base < hi:
+            if r.writable if writable else r.readable:
+                s, e = max(r.base, lo), min(r.end, hi)
+                if out and out[-1][1] == s:
+                    out[-1] = (out[-1][0], e)
+                else:
+                    out.append((s, e))
+            i += 1
+        return out
+
+    def _readable_ranges(self, address: int, size: int) -> list[tuple[int, int]]:
+        with self._state.lock:
+            self._ensure_map()
+            self._heal(address, address + size)
+            return [(s, e - s) for s, e in self._runs(address, address + size)]
+
+    def _read(self, address: int, size: int) -> bytes:
+        st = self._state
+        with st.lock:
+            if not self.cache:
+                return self._read_direct(address, size)
+            pbase = address & -self.page_size
+            off = address - pbase
+            if (rec := st.pages.get(pbase)) is not None and off + size <= self.page_size:
+                for lo, hi in rec.spans:
+                    if lo <= off and off + size <= hi:
+                        if st.max_cache_bytes is not None:
+                            st.pages.move_to_end(pbase)
+                        return rec.data[off:off + size]
+            return self._read_paged(address, size)
+
+    def _read_direct(self, address: int, size: int) -> bytes:
+        end = address + size
+        self._ensure_map()
+        self._heal(address, end)
+        if (gap := _first_gap(self._runs(address, end), address, end)) is not None:
+            raise MemoryReadError(address, size, f'unreadable at {gap:#x}')
+        try:
+            return self.process.read(address, size, strict=True)
+        except OSError as e:
+            self._heal(address, end, force=True)
+            raise MemoryReadError(address, size, f'winerror {e.winerror}') from e
+
+    def _read_paged(self, address: int, size: int) -> bytes:
+        st, ps, end = self._state, self.page_size, address + size
+        first, cap = address & -ps, st.max_cache_bytes
+        if cap is not None and (end - first + ps - 1) // ps * ps > cap:
+            return self._read_direct(address, size)
+        self._ensure_map()
+        out = []
+        for pbase in range(first, end, ps):
+            lo, hi = max(address, pbase) - pbase, min(end, pbase + ps) - pbase
+            if (rec := st.pages.get(pbase)) is None:
+                rec = self._fill(pbase, None, [(0, ps)])
+            else:
+                if cap is not None:
+                    st.pages.move_to_end(pbase)
+                if gaps := rec.gaps(lo, hi):
+                    self._fill(pbase, rec, gaps)
+            if gaps := [(lo, hi)] if rec is None else rec.gaps(lo, hi):
+                raise MemoryReadError(address, size, f'unreadable at {pbase + gaps[0][0]:#x}')
+            out.append(rec.data[lo:hi])
+        return b''.join(out)
+
+    def _fill(self, pbase: int, rec: '_Page | None', wanted: list[tuple[int, int]]) -> '_Page | None':
+        """Heal the wanted page offsets and fetch their readable bytes into rec, which is created on the first bytes."""
+        for w_lo, w_hi in wanted:
+            self._heal(pbase + w_lo, pbase + w_hi)
+            rec = self._fetch(pbase, rec, pbase + w_lo, pbase + w_hi, retry=True)
+        return rec
+
+    def _fetch(self, pbase: int, rec: '_Page | None', lo: int, hi: int, retry: bool) -> '_Page | None':
+        for s, e in self._runs(lo, hi):
+            try:
+                data = self.process.read(s, e - s, strict=True)
+            except OSError:
+                self._heal(s, e, force=True)
+                if retry:  # the failed run's now-readable bytes get one more try
+                    rec = self._fetch(pbase, rec, s, e, retry=False)
+                continue
+            if rec is None:
+                rec = self._new_page(pbase)
+            rec.add(s - pbase, data)
+        return rec
+
+    def _new_page(self, pbase: int) -> _Page:
+        st = self._state
+        if (cap := st.max_cache_bytes) is not None:
+            while st.pages and (len(st.pages) + 1) * self.page_size > cap:
+                st.pages.popitem(last=False)
+        st.pages[pbase] = rec = _Page(self.page_size)
+        return rec
+
+    def _write(self, address: int, data: bytes) -> None:
+        st, size = self._state, len(data)
+        end = address + size
+        with st.lock:
+            self._ensure_map()
+            self._heal(address, end, force=True)
+            if (gap := _first_gap(self._runs(address, end, writable=True), address, end)) is not None:
+                raise MemoryWriteError(address, size, f'not writable at {gap:#x}')
+            try:
+                self.process.write(address, data)
+            except OSError as e:
+                self._heal(address, end, force=True)
+                raise MemoryWriteError(address, size, f'winerror {e.winerror}') from e
+            ps = self.page_size
+            first = address & -ps
+            stale = range(first, end, ps) if (end - first + ps - 1) // ps <= len(st.pages) else [p for p in st.pages if first <= p < end]
+            for pbase in stale:
+                st.pages.pop(pbase, None)
+
+    def regions(self) -> list[Region]:
+        with self._state.lock:
+            self._ensure_map()
+            return list(self._state.regions)
+
+    def modules(self) -> list[Module]:
+        st, process = self._state, self.process
+        with st.lock:
+            if st.modules is None:
+                try:
+                    text = lambda u: process.read(u.Buffer, u.Length, strict=True).decode('utf-16-le', 'ignore')
+                    st.modules = [
+                        Module(text(ldr.BaseDllName), int(ldr.DllBase), int(ldr.SizeOfImage), text(ldr.FullDllName))
+                        for ldr in process.enum_ldr_data()
+                    ]
+                except OSError as e:
+                    raise TargetError(process.process_id, f'cannot list modules: winerror {e.winerror}') from e
+            return list(st.modules)
+
+    def refresh(self) -> None:
+        st = self._state
+        with st.lock:
+            st.bases = st.regions = st.stamps = st.modules = None
+            st.pages.clear()
