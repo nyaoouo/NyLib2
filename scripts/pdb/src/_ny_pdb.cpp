@@ -12,8 +12,13 @@ PYBIND11_MODULE(_ny_pdb, m) {
 
     py::register_exception<DiaError>(m, "DiaError", PyExc_RuntimeError);
 
-    // ---------- Symbol ----------
-    py::class_<DiaSymbol>(m, "Symbol")
+    // ---------- Symbol / Type / Member ----------
+    // Declared before any .def(): they reference each other and pybind11 resolves signature types at .def() time.
+    py::class_<DiaSymbol> symbol_cls(m, "Symbol");
+    py::class_<DiaType> type_cls(m, "Type");
+    py::class_<DiaMember> member_cls(m, "Member");
+
+    symbol_cls
         .def_property_readonly("name", &DiaSymbol::name)
         .def_property_readonly("undecorated_name", &DiaSymbol::undecorated_name)
         .def_property_readonly("tag_id", &DiaSymbol::tag_id)
@@ -25,18 +30,11 @@ PYBIND11_MODULE(_ny_pdb, m) {
         .def_property_readonly("section", &DiaSymbol::section)
         .def_property_readonly("offset", &DiaSymbol::offset)
         .def_property_readonly("sym_index_id", &DiaSymbol::sym_index_id)
+        .def_property_readonly("type", &DiaSymbol::type)
         .def("__repr__", [](const DiaSymbol& s){
             return "<Symbol " + s.tag() + " '" + s.name() + "' rva=0x" +
                    [&]{ char b[16]; std::snprintf(b, sizeof(b), "%x", s.rva()); return std::string(b); }() + ">";
         });
-
-    // ---------- Type / Member ----------
-    // Type.members()/fields() return Member, and Member.type returns Type -
-    // each needs the other's Python class already registered when its own
-    // methods are bound (pybind11 resolves signature types at .def() time),
-    // so both names are declared up front before either gets its methods.
-    py::class_<DiaType> type_cls(m, "Type");
-    py::class_<DiaMember> member_cls(m, "Member");
 
     member_cls
         .def_property_readonly("name", &DiaMember::name)

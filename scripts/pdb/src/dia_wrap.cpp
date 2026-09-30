@@ -251,6 +251,12 @@ DWORD DiaSymbol::sym_index_id() const {
     return v;
 }
 
+std::optional<DiaType> DiaSymbol::type() const {
+    CComPtr<IDiaSymbol> t;
+    if (!sym || sym->get_type(&t) != S_OK || !t) return std::nullopt;
+    return DiaType{owner, std::move(t)};
+}
+
 ULONGLONG DiaSymbol::va(bool require_load_addr) const {
     ULONGLONG va = 0;
     if (sym) sym->get_virtualAddress(&va);
