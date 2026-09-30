@@ -1,4 +1,4 @@
-"""Build a pinned Dumper-7 revision as the stage-20 test oracle.
+"""Build a pinned Dumper-7 revision as a test oracle whose output root we control.
 
 CMD: `./.venv/Scripts/python.exe scripts/ue/build_dumper7.py --rev <hash>`.
 `--verify <manifest>` checks a previous build without rebuilding.

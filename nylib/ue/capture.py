@@ -609,7 +609,7 @@ def write_capture(path: str | os.PathLike, source: MemorySource, ranges: typing.
 
 
 def wide_capture_ranges(regions: typing.Iterable[Region]) -> tuple[list[tuple[int, int]], list[tuple[int, int, str]]]:
-    """Stage-20 wide-capture recipe: (ranges to capture, readable ranges excluded with a reason)."""
+    """Wide-capture recipe: (ranges to capture, readable ranges excluded with a reason)."""
     ranges, excluded = [], []
     for r in regions:
         if not isinstance(r, Region):
