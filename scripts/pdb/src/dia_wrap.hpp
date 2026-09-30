@@ -48,6 +48,7 @@ std::string bstr_to_utf8(BSTR b);
 CComBSTR utf8_to_bstr(const std::string& s);
 
 class DiaSession;
+class DiaType;
 
 // Wraps IDiaSymbol. Copies AddRef the underlying symbol; destruction Release's.
 class DiaSymbol {
@@ -70,9 +71,8 @@ public:
     DWORD section() const;
     LONG offset() const;                     // relative offset (for members)
     DWORD sym_index_id() const;
+    std::optional<DiaType> type() const;
 };
-
-class DiaType;
 
 // A member of a UDT or an enum - carries name/offset/type + bitfield info.
 class DiaMember {
