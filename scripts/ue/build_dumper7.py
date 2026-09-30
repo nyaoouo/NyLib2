@@ -55,7 +55,7 @@ _GUARD_MESSAGE = "Dumper-7: SDKGenerationPath is empty or not absolute, no outpu
 _INI_KEY = "SDKGenerationPath"
 
 
-# Recipe for ea0dab35eb8d99162ac94de276cfbbf26d67264a: retarget SDKGenerationPath to a runtime ini value; SetupDumperFolder() refuses to write when it is empty or not absolute.
+# Recipe for ea0dab35eb8d99162ac94de276cfbbf26d67264a: retarget SDKGenerationPath to a runtime ini value; SetupDumperFolder() refuses to write when it is empty or not absolute; link the C++ runtime statically (/MT) so the DLL imports none of it from the game.
 RECIPES: dict[str, Recipe] = {
     "ea0dab35eb8d99162ac94de276cfbbf26d67264a": Recipe(
         revision="ea0dab35eb8d99162ac94de276cfbbf26d67264a",
@@ -136,6 +136,11 @@ RECIPES: dict[str, Recipe] = {
                     "\ttry\n"
                 ),
             ),
+            Edit(
+                path="Dumper/Dumper.vcxproj",
+                anchor="      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>",
+                replacement="      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>",
+            ),
         ],
         markers=(_GUARD_MESSAGE.encode("ascii"), _INI_KEY.encode("ascii")),
     ),
@@ -147,6 +152,22 @@ def _import_msvc():
     from nylib.winutils import msvc
 
     return msvc
+
+
+# imported DLL name prefixes (lower-cased) that mean the C/C++ runtime is linked dynamically
+_BANNED_IMPORT_PREFIXES = ("msvcp", "vcruntime", "concrt", "ucrtbase", "api-ms-win-crt-")
+
+
+def _runtime_imports(dll_path: pathlib.Path) -> list[str]:
+    sys.path.insert(0, str(REPO_ROOT))
+    from nylib.ue.pe import PeImage
+    from nylib.ue.tests.pe_file import map_pe_file
+
+    image = map_pe_file(str(dll_path))
+    module = image.modules()[0]
+    pe = PeImage(image, module.base)
+    dlls = {slot.dll for slot in pe.imports()}
+    return sorted(dll for dll in dlls if dll.startswith(_BANNED_IMPORT_PREFIXES))
 
 
 def resolve_revision(rev: str) -> str | None:
@@ -409,6 +430,9 @@ def cmd_verify(manifest_arg: str) -> int:
     data_lower = data.lower()
     if _BANNED_ROOT_ASCII.search(data_lower) or _BANNED_ROOT_UTF16LE.search(data_lower):
         print("verify: forbidden path pattern found in dll bytes")
+        ok = False
+    for dll in _runtime_imports(dll_path):
+        print(f"verify: dll imports the C/C++ runtime dynamically: {dll}")
         ok = False
     if ok:
         print(f"verify: ok ({dll_path})")
