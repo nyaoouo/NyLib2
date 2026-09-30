@@ -46,7 +46,7 @@ class Process:
         return winapi.VirtualAllocEx(self.handle, address, size, 0x1000 | 0x2000, protect)  # MEM_COMMIT|MEM_RESERVE
 
     def free(self, address: int, size: int = 0):
-        return winapi.VirtualFreeEx(self.handle, address, size, 0x4000)  # MEM_DECOMMIT
+        return winapi.VirtualFreeEx(self.handle, address, size, 0x4000 if size else 0x8000)  # MEM_DECOMMIT / MEM_RELEASE
 
     def virtual_query(self, address: int):
         winapi.VirtualQueryEx(self.handle, address, ctypes.byref(mbi := winapi.MEMORY_BASIC_INFORMATION()), ctypes.sizeof(mbi))
@@ -214,13 +214,17 @@ class Process:
                     return self.alloc(size, protect, pos)
         raise ValueError("No suitable memory region")
 
-    def read(self, address, type_: typing.Type[_T] | int) -> _T:
+    def read(self, address, type_: typing.Type[_T] | int, *, strict: bool = False) -> _T:
         if isinstance(type_, int):
             value = (ctypes.c_ubyte * type_)()
             try:
                 winapi.ReadProcessMemory(self.handle, address, ctypes.byref(value), type_, None)
             except WindowsError as e:
-                if e.winerror != 299: raise
+                if e.winerror != 299 or strict: raise
+                with contextlib.suppress(WindowsError):  # the walk needs query access; without it the rest stays zero
+                    for sub_addr, sub_size in self.iter_readable_subregions(address, type_):
+                        with contextlib.suppress(WindowsError):
+                            winapi.ReadProcessMemory(self.handle, sub_addr, ctypes.byref(value, sub_addr - address), sub_size, None)
             return bytes(value)
         if issubclass(type_, m_ctype.CData):
             return type_(_accessor_=self.ctype_accessor, _address_=address)
@@ -392,20 +396,15 @@ class Process:
         raise KeyError(f'dll {dll_name!r} not found')
 
     def scanner(self, dll_name: str, force_new=False) -> 'CachedRawMemoryPatternScanner':
-        if dll_name not in self._cached_scanners or force_new:
-            for data in self.enum_ldr_data():
-                if data.BaseDllName.remote_value(self) == dll_name:
-                    self._cached_scanners[dll_name] = CachedRawMemoryPatternScanner(self, data.DllBase, data.SizeOfImage)
-                    break
-            else:
-                raise KeyError(f'dll {dll_name!r} not found')
-        return self._cached_scanners[dll_name]
+        key = dll_name.lower()
+        if key not in self._cached_scanners or force_new:
+            data = self.get_ldr_data(dll_name, rescan=force_new)
+            self._cached_scanners[key] = CachedRawMemoryPatternScanner(self, data.DllBase, data.SizeOfImage)
+        return self._cached_scanners[key]
 
     def static_scanner(self, dll_name) -> 'StaticPatternSearcher':
-        for data in self.enum_ldr_data():
-            if data.BaseDllName.remote_value(self) == dll_name:
-                return StaticPatternSearcher(data.FullDllName.remote_value(self), data.DllBase)
-        raise KeyError(f'dll {dll_name!r} not found')
+        data = self.get_ldr_data(dll_name, rescan=True)
+        return StaticPatternSearcher(data.FullDllName.remote_value(self), data.DllBase)
 
     def base_scanner(self, force_new=False):
         return self.scanner(self.base_ldr_data.BaseDllName.remote_value(self), force_new)
@@ -413,15 +412,63 @@ class Process:
     def base_static_scanner(self):
         return self.static_scanner(self.base_ldr_data.BaseDllName.remote_value(self))
 
-    def get_proc_address(self, dll: str | int, func_name: str):
-        if not hasattr(Process.get_proc_address, 'pGetProcAddress'):
-            Process.get_proc_address.pGetProcAddress = winapi.GetProcAddress(
-                self.get_ldr_data('kernel32.dll').DllBase,
-                b"GetProcAddress"
-            )
-        if isinstance(func_name, str): func_name = func_name.encode('utf-8')
-        if isinstance(dll, str): dll = self.get_ldr_data(dll).DllBase
-        return self.call(Process.get_proc_address.pGetProcAddress, dll, func_name)
+    def get_proc_address(self, dll: str | int, func_name: str | bytes | int) -> int:
+        for _ in range(16):  # forwarder chain limit
+            if isinstance(dll, str): dll = self.get_ldr_data(dll).DllBase
+            if isinstance(func_name, bytes): func_name = func_name.decode('utf-8')
+            if isinstance(func_name, str) and func_name.startswith('#'): func_name = int(func_name[1:])
+            opt = dll + self.read_u32(dll + 0x3C) + 0x18
+            dir_rva, dir_size = struct.unpack('<2I', self.read(opt + (0x70 if self.read_u16(opt) == 0x20B else 0x60), 8))
+            if not dir_rva: raise KeyError(f'module {dll:#x} has no export directory')
+            name_rva, ord_base, n_funcs, n_names, funcs_rva, names_rva, ords_rva = struct.unpack('<7I', self.read(dll + dir_rva + 0xC, 28))
+            if isinstance(func_name, int):
+                idx = func_name - ord_base
+            else:
+                target, image_end, idx = func_name.encode('utf-8') + b'\0', dll + self.read_u32(opt + 0x38), -1
+                names = self.read(dll + names_rva, n_names * 4)
+                lo, hi = 0, n_names
+                while lo < hi:  # export names are sorted, same binary search as the loader
+                    mid = (lo + hi) // 2
+                    p_name = dll + int.from_bytes(names[mid * 4:mid * 4 + 4], 'little')
+                    if (name := self.read(p_name, min(len(target), image_end - p_name))) == target:
+                        idx = self.read_u16(dll + ords_rva + mid * 2)
+                        break
+                    if name < target:
+                        lo = mid + 1
+                    else:
+                        hi = mid
+            if not 0 <= idx < n_funcs or not (rva := self.read_u32(dll + funcs_rva + idx * 4)):
+                raise KeyError(f'export {func_name!r} not found in module {dll:#x}')
+            if not dir_rva <= rva < dir_rva + dir_size: return dll + rva
+            mod_name = self.read_bytes_zero_trim(dll + name_rva).decode('utf-8').lower()
+            fwd_dll, _, fwd_func = self.read_bytes_zero_trim(dll + rva).decode('utf-8').partition('.')
+            if not (fwd_dll := fwd_dll.lower()).endswith('.dll'): fwd_dll += '.dll'
+            if fwd_dll.startswith(('api-', 'ext-')): fwd_dll = self._resolve_api_set(fwd_dll, mod_name)
+            try:
+                dll = self.get_ldr_data(fwd_dll).DllBase
+            except KeyError:
+                raise KeyError(f'forwarder target {fwd_dll!r} (from {mod_name}!{func_name}) not loaded') from None
+            func_name = fwd_func
+        raise KeyError(f'forwarder chain too long at {dll!r}!{func_name!r}')
+
+    def _resolve_api_set(self, name: str, importer: str = '') -> str:
+        if (m := getattr(self, '_api_set_map', None)) is None:
+            p_map = self.read_ptr(self.process_basic_information.PebBaseAddress + 0x68)  # PEB.ApiSetMap (x64)
+            m = self._api_set_map = self.read(p_map, self.read_u32(p_map + 4))
+        if (version := struct.unpack_from('<I', m)[0]) != 6: raise KeyError(f'unsupported api set schema {version}')
+        u16 = lambda off, size: m[off:off + size].decode('utf-16-le').lower()
+        key = name.removesuffix('.dll').rpartition('-')[0]
+        count, entry_off = struct.unpack_from('<2I', m, 0xC)
+        for i in range(count):
+            _, n_off, _, n_hashed, v_off, v_cnt = struct.unpack_from('<6I', m, entry_off + i * 0x18)
+            if u16(n_off, n_hashed) != key: continue
+            host = ''
+            for j in range(v_cnt):  # value 0 is the default host, later ones are per-importer exceptions
+                _, i_off, i_len, h_off, h_len = struct.unpack_from('<5I', m, v_off + j * 0x14)
+                if j == 0 or i_len and u16(i_off, i_len) == importer: host = u16(h_off, h_len)
+            if host: return host
+            break
+        raise KeyError(f'api set {name!r} has no host')
 
     def name_space(self):
         return Namespace(self)
@@ -465,8 +512,11 @@ class Process:
     def _call(self, call_address, params=None, block=True):
         params = params or 0
         thread_h = winapi.CreateRemoteThread(self.handle, None, 0, call_address, params, 0, None)
-        if block: winapi.WaitForSingleObject(thread_h, -1)
-        return thread_h
+        if not block: return thread_h  # caller owns the handle
+        try:
+            _wait_object(thread_h)
+        finally:
+            winapi.CloseHandle(thread_h)
 
     def call(self, func_ptr, *args: int | float | bytes | bool, push_stack_depth=0x28, block=True, read_xmm=False, get_bytes=False):
         _MOV_RBX = b'\x48\xBB'  # MOV rbx, n
@@ -543,10 +593,52 @@ class Process:
                              b"\xC3"  # RET
                      )
             code_address = name_space.store(shell)
-            self._call(code_address, block=block)
-            if get_bytes:
-                return self.read(return_address, 8)
-            return self.read_u64(return_address)
+            pending = RemoteCall(self, self._call(code_address, block=False), name_space.detach(), return_address, get_bytes)
+        return pending.wait() if block else pending
+
+
+class RemoteCall:
+    def __init__(self, process: Process, thread_handle, name_space: Namespace | None, return_address: int, get_bytes=False, result=None):
+        self.process = process
+        self.thread_handle = thread_handle  # None once finished and released
+        self.name_space = name_space
+        self.return_address = return_address
+        self.get_bytes = get_bytes
+        self.result = result
+
+    @property
+    def done(self) -> bool:
+        return self.thread_handle is None or _wait_object(self.thread_handle, 0)
+
+    def wait(self, timeout_ms=-1):
+        if self.thread_handle is None: return self.result
+        if not _wait_object(self.thread_handle, timeout_ms): raise TimeoutError(f'remote call not finished in {timeout_ms} ms')
+        self.result = self.process.read(self.return_address, 8) if self.get_bytes else self.process.read_u64(self.return_address)
+        self._release(True)
+        return self.result
+
+    def _release(self, free_memory: bool):
+        winapi.CloseHandle(self.thread_handle)
+        self.thread_handle = None
+        if free_memory:
+            with contextlib.suppress(OSError):  # target process is gone
+                self.name_space.free()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.wait()
+
+    def __del__(self):
+        if self.thread_handle is not None:
+            self._release(self.done)  # still running: leak the shellcode memory instead of freeing it under the thread
+
+
+def _wait_object(handle, timeout_ms=-1) -> bool:
+    res = winapi.WaitForSingleObject(handle, timeout_ms) & 0xFFFFFFFF  # DWORD result; WAIT_FAILED is not raised by the wrapper
+    if res == 0xFFFFFFFF: raise ctypes.WinError()
+    return res == 0  # WAIT_OBJECT_0
 
 
 def _local_call(func_ptr, *args: int | float | bytes | bool, push_stack_depth=0x28, block=True):
@@ -562,12 +654,15 @@ def _local_call(func_ptr, *args: int | float | bytes | bool, push_stack_depth=0x
             a.append(ctypes.c_bool)
         else:
             raise TypeError(f'not support arg type {type(v)}')
-    return ctypes.CFUNCTYPE(*a)(func_ptr)(*args)
+    res = ctypes.CFUNCTYPE(*a)(func_ptr)(*args)
+    return res if block else RemoteCall(Process.current, None, None, 0, result=res)  # already completed
 
 
-def _local_read(address, type_: typing.Type[_T] | int) -> _T:
+def _local_read(address, type_: typing.Type[_T] | int, *, strict: bool = False) -> _T:
     if isinstance(type_, int):
         return ctypes.string_at(address, type_)
+    if issubclass(type_, m_ctype.CData):
+        return type_(_address_=address, _accessor_=m_ctype.CAccessorLocal.get_instance())
     return type_.from_address(address)
 
 

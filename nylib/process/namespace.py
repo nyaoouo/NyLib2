@@ -49,7 +49,12 @@ class Namespace:
 
     def free(self):
         while self.res:
-            self.process.free(*self.res.pop())
+            self.process.free(self.res.pop()[0])
+
+    def detach(self) -> 'Namespace':
+        ns = Namespace(self.process)
+        ns.res, self.res, self.ptr, self.remain = self.res, [], 0, 0
+        return ns
 
     def __enter__(self):
         return self
