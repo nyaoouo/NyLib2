@@ -14,7 +14,8 @@ from nylib.process import Process
 from nylib.ue import memory as memory_module
 from nylib.ue.errors import MemoryReadError, MemoryWriteError, TargetError
 from nylib.ue.memory import (
-    MEM_FREE, PAGE_EXECUTE_READ, PAGE_GUARD, PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, USER_MAX, USER_MIN,
+    MEM_COMMIT, MEM_FREE, MEM_PRIVATE, PAGE_EXECUTE_READ, PAGE_GUARD, PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE,
+    USER_MAX, USER_MIN,
     PROCESS_CREATE_THREAD, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE,
     ProcessSource, Region, current_process, handle_rights, open_process,
 )
@@ -222,6 +223,40 @@ class OpenProcessTests(unittest.TestCase):
         finally:
             Process.current.free(g)
 
+    def test_current_thread_safety(self):
+        # two threads racing current_process(): under the lock, the second must block until the first
+        # finishes constructing and observe the cached object, never construct its own.
+        orig, memory_module._current = memory_module._current, None
+        started, proceed, calls, results = threading.Event(), threading.Event(), [], []
+
+        class SlowProcess(Process):
+            def __init__(self, *a, **kw):
+                calls.append(1)
+                if len(calls) == 1:
+                    started.set()
+                    proceed.wait(1)
+                super().__init__(*a, **kw)
+
+        def worker1():
+            results.append(current_process())
+
+        def worker2():
+            started.wait(1)
+            results.append(current_process())
+            proceed.set()
+
+        try:
+            with mock.patch.object(memory_module, 'Process', SlowProcess):
+                t1, t2 = threading.Thread(target=worker1), threading.Thread(target=worker2)
+                t1.start()
+                t2.start()
+                t1.join()
+                t2.join()
+        finally:
+            memory_module._current = orig
+        self.assertEqual(len(calls), 1)  # only one Process was ever constructed
+        self.assertIs(results[0], results[1])
+
     def test_close(self):
         with _Child() as child:
             p = open_process(child.pid)
@@ -293,6 +328,94 @@ class ProcessSourceTests(_OwnMemory):
         lazy = ProcessSource(object())  # the constructor never touches the target
         with self.assertRaises(AttributeError):
             lazy.read(USER_MIN, 1)
+
+    def test_ctor_rejects_by_identity_not_equality(self):
+        class AlwaysEqual:  # equal to anything by __eq__, but never identical to Process.current
+            def __eq__(self, other):
+                return True
+
+            def __hash__(self):
+                return 0
+
+        impostor = AlwaysEqual()
+        self.assertIsNot(impostor, Process.current)
+        self.assertEqual(impostor, Process.current)  # sanity: equal, but not the same object
+        s = ProcessSource(impostor)  # only identity is checked, so this must not raise
+        self.assertIs(s.process, impostor)
+
+    def test_query_span_uses_mbi_region_end(self):
+        class _FakeMbi:
+            def __init__(self, base, size):
+                self.BaseAddress, self.RegionSize = base, size
+
+        class _FakeProcess:
+            def __init__(self):
+                self.calls = []
+
+            def virtual_query(self, addr):
+                self.calls.append(addr)
+                # like real VirtualQuery: the region containing addr may start well before it
+                return _FakeMbi(addr - 0x1000, 0x3000)
+
+        stub = type('Stub', (), {})()
+        stub.process = _FakeProcess()
+        mbis = list(ProcessSource._query_span(stub, 0x1000, 0x5000))
+        self.assertEqual([(m.BaseAddress, m.RegionSize) for m in mbis], [(0, 0x3000), (0x2000, 0x3000)])
+        self.assertEqual(stub.process.calls, [0x1000, 0x3000])  # each step resumes at the mbi's own end
+
+    def test_map_walk_only_suppresses_oserror(self):
+        class Boom(Exception):
+            pass
+
+        def bad_iter(lo, hi):
+            yield from ()
+            raise Boom('not an OSError')
+
+        p = Process(Process.current.process_id, Process.current.handle)
+        p.iter_memory_region = bad_iter
+        with self.assertRaises(Boom):
+            ProcessSource(p).regions()
+
+    def test_runs_clips_to_user_max(self):
+        s = ProcessSource(self.cp, requery_interval=0)
+        s.regions()
+        st = s._state
+        # Pretend the top of user space is one committed, readable region (an edge case a real host may hit).
+        top = Region(USER_MAX - PAGE, PAGE, PAGE_READWRITE, MEM_COMMIT, MEM_PRIVATE)
+        st.regions, st.bases, st.stamps = [top], [top.base], [float('inf')]
+        for addr in (USER_MAX, USER_MAX + 0x10000, (1 << 64) - 8):
+            self.assertEqual(s._runs(addr, addr + 8), [], hex(addr))
+
+    def test_bypass_creates_no_pages(self):
+        a, data = self.filled(3 * PAGE, seed=20)
+        spy = _Spy()
+        s = ProcessSource(spy.process, page_size=PAGE, max_cache_bytes=2 * PAGE)
+        self.assertEqual(s.read(a, 3 * PAGE), data)  # touches 3 pages > the 2-page cap: bypass
+        self.assertEqual(s._state.pages, {})  # the bypass must not create or use page records
+        before = len(spy.reads)
+        self.assertEqual(s.read(a, 8), data[:8])
+        self.assertEqual(len(spy.reads), before + 1)  # still not cached
+
+    def test_write_oserror_requeries(self):
+        a = self.alloc(PAGE)
+        spy = _Spy()
+        orig_write = spy.process.write
+        calls = []
+
+        def fail_once(address, data):
+            calls.append((address, data))
+            if len(calls) == 1:
+                raise ctypes.WinError(5)
+            return orig_write(address, data)
+
+        spy.process.write = fail_once
+        s = ProcessSource(spy.process)
+        s.regions()
+        spy.queries = 0
+        with self.assertRaises(MemoryWriteError) as cm:
+            s.write(a, b'X')
+        self.assertEqual(cm.exception.reason, 'winerror 5')
+        self.assertEqual(spy.queries, 2)  # the pre-write re-query, plus the post-failure re-query
 
     def _holes(self):
         a = self.alloc(3 * PAGE)
