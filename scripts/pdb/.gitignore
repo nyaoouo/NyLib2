@@ -1,0 +1,11 @@
+/build/
+/build_tmp/
+__pycache__/
+*.pyc
+*.pyd
+*.pdb
+*.exp
+*.lib
+*.obj
+*.ilk
+*.exe
