@@ -3,6 +3,7 @@ CLAUDE.md
 .idea/
 .ignore/
 .agent-memory/
+plans/
 ### Python template
 # Byte-compiled / optimized / DLL files
 __pycache__/
