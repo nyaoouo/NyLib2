@@ -325,6 +325,12 @@ class Process:
         winapi.GetExitCodeProcess(self.handle, ctypes.byref(exit_code))
         return exit_code.value == 259
 
+    def close(self) -> None:
+        """Close the process handle; a no-op when already closed or for the current-process pseudo-handle."""
+        if (handle := self.handle) is None or handle == 0xFFFFFFFFFFFFFFFF: return
+        self.handle = None
+        winapi.CloseHandle(handle)
+
     def read_bytes_zero_trim_unk_size(self, address: int, chunk_size=0x100):
         mbi = self.virtual_query(address)
         max_addr = mbi.BaseAddress + mbi.RegionSize
