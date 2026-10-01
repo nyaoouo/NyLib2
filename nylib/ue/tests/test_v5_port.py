@@ -25,7 +25,7 @@ class PortGateTests(unittest.TestCase):
         from . import port  # only with a session: imports the port (stages 4-6)
         for session in cls.sessions:
             with tempfile.TemporaryDirectory(prefix='nylib-ue-port-', ignore_cleanup_errors=True) as tmp:
-                run = port.run_port(session, tmp)
+                run = port.run_port(session, tmp, extra=True)  # 6-G.4 (review M10): extras run in the committed gate
             print(run.report(), file=sys.stderr)
             cls.runs.append(run)
 
@@ -80,6 +80,15 @@ class PortGateTests(unittest.TestCase):
 
     def test_cdo_types(self):
         self._check('cdo-types')
+
+    def test_dumpspace(self):
+        self._check('dumpspace')
+
+    def test_extra_from_snapshot(self):
+        self._check('extra:from_snapshot')
+
+    def test_extra_live_resolver(self):
+        self._check('extra:live_resolver')
 
 
 class PortRegressionTests(unittest.TestCase):
@@ -262,6 +271,88 @@ class PortRegressionTests(unittest.TestCase):
             self.assertIn('decrypt', cm.exception.detail)
         finally:
             image.close()
+
+    def test_gobjects_changed_row_fails(self):
+        from . import port
+        from .oracle import GObjectsDump
+        rows = [(i, 0x1000 + i, f'Class /Script/Engine.Obj{i}') for i in range(10001)]
+        oracle = GObjectsDump(line1='x', stem='', count=len(rows), rows=rows, props={})
+        ours_rows = list(rows)
+        ours_rows[-1] = (ours_rows[-1][0], ours_rows[-1][1], 'Class /Script/Engine.Changed')
+        ours = GObjectsDump(line1='x', stem='', count=len(ours_rows), rows=ours_rows, props={})
+        dr = port.compare_gobjects_capture(ours, oracle, target='pal', check='gobjects')
+        self.assertFalse(dr.ok)
+        self.assertEqual(dr.changed, 1)
+
+    def test_dumpspace_detects_differences(self):
+        from . import port
+        from ..flags import EFunctionFlags, EPropertyFlags
+        from ..model import ClassRecord, PropertyRecord, PropType
+
+        def make():
+            prop_score = PropertyRecord(name='Score', offset=0, size=4, array_dim=1, flags=0,
+                                        type=PropType(prop='IntProperty', kind='IntProperty'), address=None)
+            prop_flag = PropertyRecord(name='bFlag', offset=4, size=1, array_dim=1, flags=0,
+                                       type=PropType(prop='BoolProperty', kind='BoolProperty', field_size=1, byte_offset=0,
+                                                     byte_mask=1, field_mask=0x02), address=None)
+            rec_base = ClassRecord(path='/Script/Test.Base', name='Base', cpp_name='UBase', package='/Script/Test',
+                                   super=None, size=8, min_alignment=8, properties=[], address=None)
+            rec_child = ClassRecord(path='/Script/Test.Child', name='Child', cpp_name='UChild', package='/Script/Test',
+                                    super='/Script/Test.Base', size=16, min_alignment=8,
+                                    properties=[prop_score, prop_flag], address=None)
+            param_in = PropertyRecord(name='InVal', offset=0, size=4, array_dim=1, flags=int(EPropertyFlags.Parm),
+                                      type=PropType(prop='IntProperty', kind='IntProperty'), address=None)
+            param_out = PropertyRecord(name='OutVal', offset=4, size=4, array_dim=1, flags=int(EPropertyFlags.Parm),
+                                       type=PropType(prop='IntProperty', kind='IntProperty'), address=None)
+            fn = port.FunctionRecord(path='/Script/Test.Child:DoThing', name='DoThing', package='/Script/Test',
+                                     flags=int(EFunctionFlags.Native | EFunctionFlags.BlueprintCallable), params_size=8,
+                                     params=[param_in, param_out], exec_rva=0x1234, address=None)
+            rec_child.functions = {'DoThing': fn}
+            flags_str = port._stringify_function_flags(fn.flags)
+            oracle = port.DumpspaceTypes(
+                types={
+                    'UBase': [[{'__InheritInfo': []}, {'__MDKClassSize': 8}]],
+                    'UChild': [[{'__InheritInfo': ['UBase']}, {'__MDKClassSize': 16},
+                                {'Score': [['int32', 'D', '', []], 0, 4, 1]},
+                                {'bFlag': [['uint8', 'D', '', []], 4, 1, 1, 1]}]],
+                },
+                functions={'UChild': [[{'DoThing': [['void', 'D', '', []],
+                                                     [[['int32', 'D', '', []], '', 'InVal'],
+                                                      [['int32', 'D', '', []], '', 'OutVal']], 0x1234, flags_str]}]]},
+            )
+            return rec_base, rec_child, oracle
+
+        rec_base, rec_child, oracle = make()
+        dr = port.compare_dumpspace([rec_base, rec_child], oracle, target='pal', min_types=0, min_members=0)
+        self.assertEqual(dr.changed, 0, dr.samples)
+
+        def mutated(mutate):
+            rec_base, rec_child, oracle = make()
+            mutate(rec_base, rec_child, oracle)
+            return port.compare_dumpspace([rec_base, rec_child], oracle, target='pal', min_types=0, min_members=0)
+
+        mutations = {
+            'member offset': lambda b, c, o: setattr(c.properties[0], 'offset', 99),
+            'member size': lambda b, c, o: setattr(c.properties[0], 'size', 99),
+            'array_dim': lambda b, c, o: setattr(c.properties[0], 'array_dim', 2),
+            'bit index': lambda b, c, o: o.types['UChild'][0].__setitem__(
+                3, {'bFlag': [['uint8', 'D', '', []], 4, 1, 1, 7]}),
+            'member type name': lambda b, c, o: (setattr(c.properties[0].type, 'kind', 'FloatProperty'),
+                                                 setattr(c.properties[0].type, 'prop', 'FloatProperty')),
+            'function flag': lambda b, c, o: setattr(next(iter(c.functions.values())), 'flags', int(EFunctionFlags.Native)),
+            'exec offset': lambda b, c, o: setattr(next(iter(c.functions.values())), 'exec_rva', 0x9999),
+            'parameter order': lambda b, c, o: o.functions['UChild'][0].__setitem__(
+                0, {'DoThing': [['void', 'D', '', []],
+                                [[['int32', 'D', '', []], '', 'OutVal'], [['int32', 'D', '', []], '', 'InVal']],
+                                0x1234, port._stringify_function_flags(int(EFunctionFlags.Native | EFunctionFlags.BlueprintCallable))]}),
+            'super-chain entry': lambda b, c, o: o.types['UChild'].__setitem__(
+                0, [{'__InheritInfo': ['UOther']}] + o.types['UChild'][0][1:]),
+            '__MDKClassSize': lambda b, c, o: o.types['UChild'][0].__setitem__(1, {'__MDKClassSize': 999}),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(mutation=label):
+                dr = mutated(mutate)
+                self.assertEqual(dr.changed, 1, f'{label}: {dr.samples}')
 
 
 if __name__ == '__main__':

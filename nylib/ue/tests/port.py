@@ -1,11 +1,13 @@
 """Port gate: run stages 4-6 on one captured session and compare the result with its Dumper-7 oracle."""
 import argparse
+import collections
 import dataclasses
 import datetime
 import json
 import math
 import os
 import pathlib
+import re
 import sys
 import tempfile
 import time
@@ -19,7 +21,9 @@ from ..engine.gnames import FNameEntry
 from ..engine.unreal import UEEnum
 from ..errors import MemoryReadError
 from ..exports import run_export
-from ..flags import EObjectFlags
+from ..flags import EFunctionFlags, EObjectFlags, EPropertyFlags
+from ..model import ClassRecord, EnumRecord, FunctionRecord, StructRecord
+from ..names import make_name_valid, strip_path
 from ..snapshot import Snapshot
 from . import real
 from .oracle import (DriftResult, GObjectsDump, compare_gobjects, compare_idmap, compare_offsets, flatten_oracle_offsets,
@@ -28,17 +32,13 @@ from .oracle import (DriftResult, GObjectsDump, compare_gobjects, compare_idmap,
 CAPTURE_RESIDENT_BYTES = 1 << 30
 K14_REASON = ("K14 (root Q30 = A): the oracle's GNames is Dumper-7 ea0dab3's first FNamePool candidate, which it never "
               "validates and which holds zeros in this capture; nylib.ue uses the pool that InitializeNamePool accepts")
-ENUM_INT_REASON = 'oracle EnumsInfo.json stores values as C++ int'
 # (target, check, item) -> recorded reason. Items: offsets = flattened key, gobjects / gobjects-props / props-exact /
-# cdo-types = row index as '%08X', idmap = record name, names = name component, enums = enum name.
+# cdo-types = row index as '%08X', idmap = record name, names = name component, enums = enum name, dumpspace = oracle type key.
 ACCEPTED: dict[tuple[str, str, str], str] = {        # (target, check, item) -> recorded reason; 6-G.2 adds entries, the review checks them
     ('pal', 'offsets', 'Offsets.GNames'): K14_REASON,             # pre-declared under Q30 = A; empty under Q30 = B
     ('pal', 'offsets', 'OffsetsInfo.OFFSET_GNAMES'): K14_REASON,
     ('fb', 'offsets', 'Offsets.GNames'): K14_REASON,
     ('fb', 'offsets', 'OffsetsInfo.OFFSET_GNAMES'): K14_REASON,
-    ('pal', 'enums', 'ESkeletalMeshAsyncProperties'): ENUM_INT_REASON,
-    ('fb', 'enums', 'ESkeletalMeshAsyncProperties'): ENUM_INT_REASON,
-    ('fb', 'enums', 'EHardwareDeviceSupportedFeatures'): ENUM_INT_REASON,
 }
 ORACLE_KEY_CATALOGUE: tuple[str, ...] = (
     'Offsets.GObjects', 'Offsets.AppendString', 'Offsets.GetNameEntry', 'Offsets.GNames', 'Offsets.GWorld', 'Offsets.ProcessEvent',
@@ -69,8 +69,11 @@ ORACLE_KEY_CATALOGUE: tuple[str, ...] = (
 NAME_MISS_FLOOR = 10
 NAME_MISS_SHARE = 0.0001
 NAME_MIN_COMPONENTS = 10000
+DUMPSPACE_MIN_TYPES = 1000
+DUMPSPACE_MIN_MEMBERS = 10000
+DUMPSPACE_DRIFT_BOUND = 0.01
 
-CHECKS = ('offsets', 'gobjects', 'gobjects-props', 'idmap', 'stem', 'names', 'counts', 'enums', 'props-exact', 'cdo-types')
+CHECKS = ('offsets', 'gobjects', 'gobjects-props', 'idmap', 'stem', 'names', 'counts', 'enums', 'props-exact', 'cdo-types', 'dumpspace')
 EXTRA_CHECKS = ('extra:from_snapshot', 'extra:live_resolver')
 OFFSETS_MIN_VALUES = 25
 IDMAP_MIN_RECORDS = 1000
@@ -84,6 +87,13 @@ _NAME_MISS_LISTED = 200
 _U64 = (1 << 64) - 1
 _ENUM_TYPE_SIZES = {'uint8': 1, 'uint16': 2, 'uint32': 4, 'uint64': 8}
 _CATALOGUE = frozenset(ORACLE_KEY_CATALOGUE)
+
+
+@dataclasses.dataclass(frozen=True)
+class DumpspaceTypes:
+    """Parsed Dumpspace StructsInfo.json + ClassesInfo.json and FunctionsInfo.json (6-G.4, review I4)."""
+    types: dict[str, list[list]]          # key -> one body per occurrence (file order; StructsInfo then ClassesInfo)
+    functions: dict[str, list[list]]      # class key -> one FunctionsInfo body per occurrence
 
 
 @dataclasses.dataclass
@@ -277,6 +287,18 @@ def compare_offset_keys(ours: dict, oracle: dict, *, target: str) -> DriftResult
     return dataclasses.replace(base, ok=base.ok and not missing and not extra, reason='; '.join(reasons), samples=samples)
 
 
+def compare_gobjects_capture(ours: GObjectsDump, oracle: GObjectsDump, *, target: str, check: str) -> DriftResult:
+    """compare_gobjects after dropping ACCEPTED rows, failing on any changed key (6-G.4, review I3: no allowance on a capture)."""
+    if check not in ('gobjects', 'gobjects-props'):
+        raise ValueError(f"check must be 'gobjects' or 'gobjects-props', got {check!r}")
+    accepted = _accepted(target, check)
+    dr = compare_gobjects(_drop_rows(ours, accepted), _drop_rows(oracle, accepted), compare_props=(check == 'gobjects-props'))
+    if dr.changed > 0:
+        reason = f'{dr.changed} changed keys (no allowance on a capture)'
+        dr = dataclasses.replace(dr, ok=False, reason='; '.join(filter(None, (reason, dr.reason))))
+    return dr
+
+
 class _PoolStrings(set):
     read_errors = 0
 
@@ -382,7 +404,9 @@ def _our_enums(snapshot) -> dict[str, list[tuple[int, list[int]]]]:
     out = {}
     for rec in snapshot.types():
         if rec.kind == 'enum':
-            out.setdefault(rec.cpp_name, []).append((rec.underlying_size, sorted(v & _U64 for _, v in rec.values)))
+            # 6-G.4 (review M3): the oracle's EnumsInfo.json stores values as C++ int; truncate ours the same way first.
+            out.setdefault(rec.cpp_name, []).append(
+                (rec.underlying_size, sorted(((v + 2**31) % 2**32 - 2**31) & _U64 for _, v in rec.values)))
     return out
 
 
@@ -412,6 +436,448 @@ def _compare_enums(ours: dict, oracle: dict, *, target: str) -> DriftResult:
         reasons.append(f'drift {drift:.4f} exceeds {ENUMS_DRIFT_BOUND} (changed {changed}, oracle-only {len(oracle_only)}, ours-only {len(ours_only)})')
     return DriftResult(ok=not reasons, matched=len(common) - changed, changed=changed, drift=drift,
                        reason='; '.join(reasons), samples=tuple(samples))
+
+
+# ---- dumpspace (6-G.4, review I4) -------------------------------------------------------------
+
+def _ds_one_key(obj, *, where: str):
+    if not isinstance(obj, dict) or len(obj) != 1:
+        raise ValueError(f'{where} must be a one-key object')
+    return next(iter(obj.items()))
+
+
+def _ds_file(folder, name: str):
+    p = pathlib.Path(folder) / name
+    doc = json.loads(p.read_text(encoding='utf-8'))
+    if not isinstance(doc, dict) or not isinstance(doc.get('data'), list):
+        raise ValueError(f"{p}: 'data' must be a JSON array")
+    return p, doc['data']
+
+
+def parse_dumpspace(folder: str | os.PathLike) -> DumpspaceTypes:
+    """Parse a Dumper-7 Dumpspace folder's StructsInfo.json + ClassesInfo.json and FunctionsInfo.json."""
+    if not isinstance(folder, (str, os.PathLike)):
+        raise TypeError(f'folder must be str or os.PathLike, got {type(folder).__name__}')
+    types: dict[str, list] = {}
+    for fname in ('StructsInfo.json', 'ClassesInfo.json'):
+        p, data = _ds_file(folder, fname)
+        for i, item in enumerate(data):
+            key, body = _ds_one_key(item, where=f'{p}: data[{i}]')
+            if not (isinstance(body, list) and len(body) >= 2):
+                raise ValueError(f'{p}: data[{i}] {key!r} must be a list of at least 2 entries')
+            h0, h1 = body[0], body[1]
+            if not (isinstance(h0, dict) and list(h0) == ['__InheritInfo'] and isinstance(h0['__InheritInfo'], list)
+                    and all(isinstance(s, str) for s in h0['__InheritInfo'])):
+                raise ValueError(f'{p}: data[{i}] {key!r} missing a valid __InheritInfo header')
+            if not (isinstance(h1, dict) and list(h1) == ['__MDKClassSize']
+                    and isinstance(h1['__MDKClassSize'], int) and not isinstance(h1['__MDKClassSize'], bool)):
+                raise ValueError(f'{p}: data[{i}] {key!r} missing a valid __MDKClassSize header')
+            for j, m in enumerate(body[2:], start=2):
+                mname, mval = _ds_one_key(m, where=f'{p}: data[{i}] {key!r} member[{j}]')
+                if not (isinstance(mval, list) and len(mval) in (4, 5)):
+                    raise ValueError(f'{p}: data[{i}] {key!r} member {mname!r} must be a 4- or 5-element list')
+            types.setdefault(key, []).append(body)
+    p, data = _ds_file(folder, 'FunctionsInfo.json')
+    functions: dict[str, list] = {}
+    for i, item in enumerate(data):
+        key, body = _ds_one_key(item, where=f'{p}: data[{i}]')
+        if not isinstance(body, list):
+            raise ValueError(f'{p}: data[{i}] {key!r} must be a list')
+        for j, fn in enumerate(body):
+            fname, fval = _ds_one_key(fn, where=f'{p}: data[{i}] {key!r} function[{j}]')
+            if not (isinstance(fval, list) and len(fval) == 4 and isinstance(fval[1], list)):
+                raise ValueError(f'{p}: data[{i}] {key!r} function {fname!r} must be [return, params, offset, flags]')
+        functions.setdefault(key, []).append(body)
+    return DumpspaceTypes(types=types, functions=functions)
+
+
+class _DsUnresolved(Exception):
+    """A referenced path or name has no record: a difference, not a skip."""
+
+
+class _DsNonUnique(Exception):
+    """A referenced name occurs more than once: the rendering is skipped and counted."""
+
+
+def _ds_align(size: int, alignment: int) -> int:
+    return size if alignment <= 0 else -(-size // alignment) * alignment
+
+
+# ea0dab3 Enums.h StringifyFunctionFlags: display string per flag, in declaration order. A literal typo in that C++
+# source ("HasOutParams") diverges from the EFunctionFlags member name ("HasOutParms"); kept verbatim for parity.
+_FUNCTION_FLAG_DISPLAY = {f.name: f.name for f in EFunctionFlags} | {'HasOutParms': 'HasOutParams'}
+
+
+def _stringify_function_flags(flags: int) -> str:
+    """ea0dab3 Enums.h StringifyFunctionFlags(flags, '|'): its 30 names, in declaration order."""
+    return '|'.join(_FUNCTION_FLAG_DISPLAY[f.name] for f in EFunctionFlags if flags & f)
+
+
+_DIGIT_SUFFIX_RE = re.compile(r'(.+)_(\d+)')
+
+
+def _ds_name_candidates(oracle_name: str, *, prefix: str | None = None, name_suffix: str | None = None) -> list[str]:
+    """Possible base names after CollisionManager's optional trailing `_<digits>`, optional `_<name_suffix>`, optional leading
+    `prefix`, most-specific (least stripped) first: an exact match must win over a stripped one (6-G.4 debugging)."""
+    variants = [oracle_name]
+    m = _DIGIT_SUFFIX_RE.fullmatch(oracle_name)
+    no_digits = m.group(1) if m else oracle_name
+    if no_digits not in variants:
+        variants.append(no_digits)
+    if name_suffix:
+        suffix = f'_{name_suffix}'
+        for v in list(variants):
+            if v.endswith(suffix) and len(v) > len(suffix) and v[:-len(suffix)] not in variants:
+                variants.append(v[:-len(suffix)])
+    if prefix:
+        for v in list(variants):
+            if v.startswith(prefix) and len(v) > len(prefix) and v[len(prefix):] not in variants:
+                variants.append(v[len(prefix):])
+    return variants
+
+
+def _ds_pair_by_name(oracle_items, our_items, *, key_of_our, candidates_of_oracle):
+    """FIFO pairing by name: oracle_items = [(name, value), ...]; returns (pairs, unpaired_oracle, unpaired_ours)."""
+    queues: dict[str, collections.deque] = {}
+    for obj in our_items:
+        queues.setdefault(key_of_our(obj), collections.deque()).append(obj)
+    pairs, unpaired_oracle = [], []
+    for name, value in oracle_items:
+        found = None
+        for cand in candidates_of_oracle(name):
+            q = queues.get(cand)
+            if q:
+                found = q.popleft()
+                break
+        if found is None:
+            unpaired_oracle.append((name, value))
+        else:
+            pairs.append((name, value, found))
+    unpaired_ours = [o for q in queues.values() for o in q]
+    return pairs, unpaired_oracle, unpaired_ours
+
+
+_DS_SIMPLE_TYPE_NAMES = {
+    'UInt16Property': 'uint16', 'UInt32Property': 'uint32', 'UInt64Property': 'uint64',
+    'Int8Property': 'int8', 'Int16Property': 'int16', 'IntProperty': 'int32', 'Int64Property': 'int64',
+    'FloatProperty': 'float', 'DoubleProperty': 'double',
+    'NameProperty': 'FName', 'StrProperty': 'FString', 'TextProperty': 'FText',
+}
+
+
+def _ds_struct_node(path: str | None, by_path: dict, name_counts: collections.Counter, *, default_name: str | None, default_et: str = 'C'):
+    """ea0dab3 DumpspaceGenerator::GetMemberType(const StructWrapper&): [cpp_name, 'C'|'S', '*' or '', []]."""
+    if path is None:
+        if default_name is None:
+            raise _DsUnresolved
+        return [default_name, default_et, '*' if default_et == 'C' else '', []]
+    rec = by_path.get(path)
+    if rec is None:
+        raise _DsUnresolved
+    if name_counts.get(rec.cpp_name, 0) != 1:
+        raise _DsNonUnique
+    et = 'C' if rec.kind == 'class' else 'S'
+    return [rec.cpp_name, et, '*' if et == 'C' else '', []]
+
+
+def _ds_compare_node(ptype, flags: int, oracle, *, top_level: bool, by_path: dict, name_counts: collections.Counter) -> bool:
+    """Compare our PropType against one oracle `<type>` node (ea0dab3 DumpspaceGenerator::GetMember{EType,TypeStr})."""
+    if not (isinstance(oracle, list) and len(oracle) == 4):
+        return False
+    o_name, o_et, o_ext, o_sub = oracle
+    kind = ptype.kind
+
+    def nested(sub_ptype, sub_oracle) -> bool:
+        return _ds_compare_node(sub_ptype, 0, sub_oracle, top_level=False, by_path=by_path, name_counts=name_counts)
+
+    if kind == 'ByteProperty':
+        if ptype.enum is not None:
+            rec = by_path.get(ptype.enum)
+            if rec is None:
+                raise _DsUnresolved
+            if name_counts.get(rec.cpp_name, 0) != 1:
+                raise _DsNonUnique
+            return oracle == [rec.cpp_name, 'E', '', []]
+        return oracle == ['uint8', 'D', '', []]
+    if kind in _DS_SIMPLE_TYPE_NAMES:
+        return oracle == [_DS_SIMPLE_TYPE_NAMES[kind], 'D', '', []]
+    if kind == 'ClassProperty':  # FClassProperty : FObjectProperty -> IsA(ObjectProperty) -> ET_Class
+        if top_level:
+            if flags & EPropertyFlags.UObjectWrapper:
+                return oracle == ['TSubclassOf', 'C', '', [_ds_struct_node(ptype.meta_class, by_path, name_counts, default_name=None)]]
+            return oracle == ['UClass', 'C', '*', []]
+        # Nested (array/map/set/optional element): UObjectWrapper isn't recorded on a nested PropType (R2), so
+        # either rendering matches (6-G.4, review I4: "a nested class property ... matches either").
+        if o_name == 'TSubclassOf':
+            return oracle == ['TSubclassOf', 'C', '', [_ds_struct_node(ptype.meta_class, by_path, name_counts, default_name=None)]]
+        return oracle == ['UClass', 'C', '*', []]
+    if kind == 'SoftClassProperty':
+        return oracle == ['TSoftClassPtr', 'D', '', [_ds_struct_node(ptype.cls, by_path, name_counts, default_name='UClass')]]
+    if kind == 'ObjectProperty':
+        if ptype.cls is not None:
+            rec = by_path.get(ptype.cls)
+            if rec is None:
+                raise _DsUnresolved
+            if name_counts.get(rec.cpp_name, 0) != 1:
+                raise _DsNonUnique
+            et = 'C' if rec.kind == 'class' else 'S'
+            return oracle == [rec.cpp_name, et, '*', []]
+        return oracle == ['UObject', 'C', '*', []]
+    if kind == 'WeakObjectProperty':
+        return oracle == ['TWeakObjectPtr', 'D', '', [_ds_struct_node(ptype.cls, by_path, name_counts, default_name='UObject')]]
+    if kind == 'LazyObjectProperty':
+        return oracle == ['TLazyObjectPtr', 'D', '', [_ds_struct_node(ptype.cls, by_path, name_counts, default_name='UObject')]]
+    if kind == 'SoftObjectProperty':
+        return oracle == ['TSoftObjectPtr', 'D', '', [_ds_struct_node(ptype.cls, by_path, name_counts, default_name='UObject')]]
+    if kind == 'InterfaceProperty':
+        return oracle == ['TScriptInterface', 'D', '', [_ds_struct_node(ptype.cls, by_path, name_counts, default_name='IInterface')]]
+    if kind == 'StructProperty':
+        if ptype.struct is None:
+            raise _DsUnresolved
+        rec = by_path.get(ptype.struct)
+        if rec is None:
+            raise _DsUnresolved
+        if name_counts.get(rec.cpp_name, 0) != 1:
+            raise _DsNonUnique
+        return oracle == [rec.cpp_name, 'S', '', []]
+    if kind == 'ArrayProperty':
+        if ptype.inner is None or len(o_sub) != 1:
+            return False
+        return [o_name, o_et, o_ext] == ['TArray', 'C', ''] and nested(ptype.inner, o_sub[0])
+    if kind == 'SetProperty':
+        if ptype.element is None or len(o_sub) != 1:
+            return False
+        return [o_name, o_et, o_ext] == ['TSet', 'C', ''] and nested(ptype.element, o_sub[0])
+    if kind == 'MapProperty':
+        if ptype.key is None or ptype.value is None or len(o_sub) != 2:
+            return False
+        return ([o_name, o_et, o_ext] == ['TMap', 'C', ''] and nested(ptype.key, o_sub[0]) and nested(ptype.value, o_sub[1]))
+    if kind == 'EnumProperty':
+        if ptype.enum is not None:
+            rec = by_path.get(ptype.enum)
+            if rec is None:
+                raise _DsUnresolved
+            if name_counts.get(rec.cpp_name, 0) != 1:
+                raise _DsNonUnique
+            return oracle == [rec.cpp_name, 'E', '', []]
+        return oracle == ['NamelessEnumIGuessIdkWhatToPutHereWithRegardsTheGuyFromDumper7', 'E', '', []]
+    if kind == 'BoolProperty':
+        native = ptype.field_mask == 0xFF
+        return oracle == (['bool', 'D', '', []] if native else ['uint8', 'D', '', []])
+    if kind == 'FieldPathProperty':
+        sub = [f'F{ptype.field_class}', 'S', '', []] if ptype.field_class is not None else ['FField', 'S', '', []]
+        return oracle == ['TFieldPath', 'D', '', [sub]]
+    if kind == 'OptionalProperty':
+        if ptype.value is None or len(o_sub) != 1:
+            return False
+        return [o_name, o_et, o_ext] == ['TOptional', 'D', ''] and nested(ptype.value, o_sub[0])
+    # Delegate kinds, Utf8Str/AnsiStr, unknown: ea0dab3's unknown-property fallback (Class.GetCppName() + '_')
+    return oracle == [f'F{ptype.prop}_', 'D', '', []]
+
+
+def _ds_build_index(types) -> tuple[dict, collections.Counter, list, list, list]:
+    by_path: dict[str, object] = {}
+    name_counts = collections.Counter()
+    classes, structs, enums = [], [], []
+    for rec in types:
+        if not isinstance(rec, (StructRecord, ClassRecord, EnumRecord, FunctionRecord)):
+            raise TypeError(f'expected a TypeRecord, got {type(rec).__name__}')
+        if isinstance(rec, FunctionRecord):
+            continue  # not addressable by a property reference
+        by_path[rec.path] = rec
+        name_counts[rec.cpp_name] += 1
+        (classes if isinstance(rec, ClassRecord) else structs if isinstance(rec, StructRecord) else enums).append(rec)
+    return by_path, name_counts, classes, structs, enums
+
+
+def _ds_inherit_chain(rec, by_path: dict) -> list[str] | None:
+    chain, seen, cur = [], set(), rec
+    while cur.super is not None:
+        if cur.super in seen:
+            return None
+        seen.add(cur.super)
+        nxt = by_path.get(cur.super)
+        if nxt is None:
+            return None
+        chain.append(nxt.cpp_name)
+        cur = nxt
+    return chain
+
+
+def _ds_size_ok(oracle_size: int, rec) -> bool:
+    if oracle_size == rec.size or oracle_size == _ds_align(rec.size, rec.min_alignment):
+        return True
+    if oracle_size == 0:
+        is_interface = isinstance(rec, ClassRecord) and rec.cpp_name.startswith('I')
+        is_empty = rec.size == 1 and not rec.properties
+        return is_interface or is_empty
+    return False
+
+
+def _ds_compare_members(rec, oracle_members: list, by_path: dict, name_counts: collections.Counter) -> tuple[bool, int, int, int]:
+    """Returns (any_difference, pairs_compared, renamed_pairs, skipped_renderings)."""
+    usable = [(name, val) for name, val in oracle_members if val[0][0] != 'Unsupported_Predefined_Member']
+    # CollisionManager's suffix is Struct.GetValidName(): the plain valid name, without the U/A/I/F/E cpp_name prefix.
+    valid_name = make_name_valid(strip_path(rec.name))
+    pairs, unpaired_o, unpaired_u = _ds_pair_by_name(
+        usable, rec.properties, key_of_our=lambda p: make_name_valid(p.name),
+        candidates_of_oracle=lambda n: _ds_name_candidates(n, name_suffix=valid_name))
+    differs = bool(unpaired_o or unpaired_u)
+    skipped = renamed = 0
+    for name, val, prop in pairs:
+        if name != make_name_valid(prop.name):
+            renamed += 1
+        otype, ooffset, osize, oarraydim, *obit = val
+        if prop.offset != ooffset or prop.size * prop.array_dim != osize or prop.array_dim != oarraydim:
+            differs = True
+        our_bit = prop.type.bit
+        if bool(obit) != (our_bit is not None) or (obit and our_bit != obit[0]):
+            differs = True
+        try:
+            if not _ds_compare_node(prop.type, prop.flags, otype, top_level=True, by_path=by_path, name_counts=name_counts):
+                differs = True
+        except _DsNonUnique:
+            skipped += 1
+        except _DsUnresolved:
+            differs = True
+    return differs, len(pairs), renamed, skipped
+
+
+def _ds_compare_functions(rec, oracle_fn_bodies: list | None, by_path: dict, name_counts: collections.Counter) -> tuple[bool, int, int, int]:
+    """Returns (any_difference, functions_compared, parameters_compared, skipped_renderings)."""
+    if oracle_fn_bodies is None or len(oracle_fn_bodies) != 1:
+        return False, 0, 0, 0
+    oracle_fns = [_ds_one_key(item, where='FunctionsInfo member') for item in oracle_fn_bodies[0]]
+    pairs, unpaired_o, unpaired_u = _ds_pair_by_name(
+        oracle_fns, list(rec.functions.values()), key_of_our=lambda f: make_name_valid(strip_path(f.name)),
+        candidates_of_oracle=lambda n: _ds_name_candidates(n, prefix='Func_'))
+    differs = bool(unpaired_o or unpaired_u)
+    skipped = 0
+    params_compared = 0
+    for _name, val, fn in pairs:
+        oret, oparams, ooffset, oflags = val
+        if _stringify_function_flags(fn.flags) != oflags:
+            differs = True
+        want_offset = (fn.exec_rva & _U64) if fn.exec_rva is not None else None
+        if want_offset is None:
+            if not (isinstance(ooffset, int) and ooffset >= 2**63):
+                differs = True
+        elif ooffset != want_offset:
+            differs = True
+        rp = fn.return_param
+        try:
+            if rp is None:
+                if oret != ['void', 'D', '', []]:
+                    differs = True
+            elif not _ds_compare_node(rp.type, rp.flags, oret, top_level=True, by_path=by_path, name_counts=name_counts):
+                differs = True
+        except _DsNonUnique:
+            skipped += 1
+        except _DsUnresolved:
+            differs = True
+        ours_params = sorted((p for p in fn.params if p.flags & EPropertyFlags.Parm and not p.flags & EPropertyFlags.ReturnParm),
+                             key=lambda p: (p.offset, p.type.bit if p.type.bit is not None else -1))
+        param_pairs, param_unpaired_o, param_unpaired_u = _ds_pair_by_name(
+            [(oparam[2], oparam) for oparam in oparams], ours_params, key_of_our=lambda p: make_name_valid(p.name),
+            candidates_of_oracle=lambda n: _ds_name_candidates(n, prefix='Param_'))
+        if param_unpaired_o or param_unpaired_u:
+            differs = True
+        # "They must come in the same order": the oracle-order pairing must also be monotonic in our offset-sorted order.
+        last_idx = -1
+        for _pname, _oparam, our_p in param_pairs:
+            idx = ours_params.index(our_p)
+            if idx <= last_idx:
+                differs = True
+            last_idx = idx
+        for _pname, oparam, our_p in param_pairs:
+            params_compared += 1
+            otype, oref, _oname = oparam
+            if oref != '':
+                differs = True
+            try:
+                if not _ds_compare_node(our_p.type, our_p.flags, otype, top_level=True, by_path=by_path, name_counts=name_counts):
+                    differs = True
+            except _DsNonUnique:
+                skipped += 1
+            except _DsUnresolved:
+                differs = True
+    return differs, len(pairs), params_compared, skipped
+
+
+def compare_dumpspace(types, oracle: DumpspaceTypes, *, target: str,
+                      min_types: int = DUMPSPACE_MIN_TYPES, min_members: int = DUMPSPACE_MIN_MEMBERS) -> DriftResult:
+    """Compare our struct/class/function records with a Dumpspace oracle (6-G.4, review I4)."""
+    if not isinstance(target, str):
+        raise TypeError('target must be a str')
+    for name, value in (('min_types', min_types), ('min_members', min_members)):
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise TypeError(f'{name} must be an int')
+        if value < 0:
+            raise ValueError(f'{name} must be >= 0')
+    accepted = _accepted(target, 'dumpspace')
+    types = list(types)
+    by_path, name_counts, classes, structs, _enums = _ds_build_index(types)
+    ours_by_key = {}
+    for rec in (*classes, *structs):
+        if name_counts[rec.cpp_name] == 1:
+            ours_by_key.setdefault(rec.cpp_name, rec)
+    oracle_qualified = {k for k, v in oracle.types.items() if '::' not in k and len(v) == 1}
+
+    compared = sorted((oracle_qualified & ours_by_key.keys()) - accepted)
+    oracle_only = (oracle_qualified - ours_by_key.keys()) - accepted
+    ours_only = (ours_by_key.keys() - oracle_qualified) - accepted
+    qualifying_oracle = len(oracle_qualified - accepted)
+
+    matched = changed = 0
+    member_pairs_total = function_pairs_total = param_pairs_total = skipped_total = renamed_total = 0
+    samples = []
+    for key in compared:
+        rec = ours_by_key[key]
+        body = oracle.types[key][0]
+        inherit_diff = _ds_inherit_chain(rec, by_path) != body[0]['__InheritInfo']
+        size_diff = not _ds_size_ok(body[1]['__MDKClassSize'], rec)
+        members_diff, pairs_n, mem_renamed, mem_skipped = _ds_compare_members(
+            rec, [_ds_one_key(m, where=f'{key} member') for m in body[2:]], by_path, name_counts)
+        fn_bodies = oracle.functions.get(key) if isinstance(rec, ClassRecord) else None
+        fn_diff, fn_n, param_n, fn_skipped = _ds_compare_functions(rec, fn_bodies, by_path, name_counts) if isinstance(rec, ClassRecord) else (False, 0, 0, 0)
+        member_pairs_total += pairs_n
+        renamed_total += mem_renamed
+        function_pairs_total += fn_n
+        param_pairs_total += param_n
+        skipped_total += mem_skipped + fn_skipped
+        is_changed = inherit_diff or size_diff or members_diff or fn_diff
+        if is_changed:
+            changed += 1
+            if len(samples) < 5:
+                what = []
+                if inherit_diff:
+                    what.append('__InheritInfo')
+                if size_diff:
+                    what.append('__MDKClassSize')
+                if members_diff:
+                    what.append('members')
+                if fn_diff:
+                    what.append('functions')
+                samples.append(f'{key}: {", ".join(what)} differ')
+        else:
+            matched += 1
+    samples += [f'{k}: oracle-only' for k in sorted(oracle_only)[:max(0, 5 - len(samples))]]
+    samples += [f'{k}: ours-only' for k in sorted(ours_only)[:max(0, 5 - len(samples))]]
+
+    one_sided = len(oracle_only) + len(ours_only)
+    drift = one_sided / max(1, qualifying_oracle)
+    reasons = []
+    if changed:
+        reasons.append(f'{changed} keys differ (no allowance)')
+    if drift > DUMPSPACE_DRIFT_BOUND:
+        reasons.append(f'drift {drift:.4f} exceeds {DUMPSPACE_DRIFT_BOUND}')
+    if len(compared) < min_types:
+        reasons.append(f'too few keys compared ({len(compared)} < {min_types})')
+    if member_pairs_total < min_members:
+        reasons.append(f'too few member pairs compared ({member_pairs_total} < {min_members})')
+    samples.append(f'keys: {len(compared)}, members: {member_pairs_total} ({renamed_total} renamed), '
+                   f'functions: {function_pairs_total}, parameters: {param_pairs_total}, skipped renderings: {skipped_total}')
+    return DriftResult(ok=not reasons, matched=matched, changed=changed, drift=drift, reason='; '.join(reasons), samples=tuple(samples))
 
 
 def _drop_rows(dump: GObjectsDump, indices: set[str]) -> GObjectsDump:
@@ -673,9 +1139,8 @@ def run_port(session: real.Session, work_dir: str, *, extra: bool = False) -> Po
                     dr = dataclasses.replace(dr, ok=False, reason='; '.join(filter(None, [dr.reason, f'ACCEPTED K14 entries not confirmed ({line})'])))
             return dr
         steps.check('check:offsets', _offsets)
-        steps.check('check:gobjects', lambda: compare_gobjects(_drop_rows(u_dump, _accepted(t, 'gobjects')), _drop_rows(o_dump, _accepted(t, 'gobjects'))))
-        steps.check('check:gobjects-props', lambda: compare_gobjects(_drop_rows(u_props, _accepted(t, 'gobjects-props')),
-                                                                    _drop_rows(o_props, _accepted(t, 'gobjects-props')), compare_props=True))
+        steps.check('check:gobjects', lambda: compare_gobjects_capture(u_dump, o_dump, target=t, check='gobjects'))
+        steps.check('check:gobjects-props', lambda: compare_gobjects_capture(u_props, o_props, target=t, check='gobjects-props'))
         idmaps = [rel for rel in session.data['oracle']['files'] if rel.startswith('IDAMappings/') and rel.endswith('.idmap')]
         steps.check('check:idmap', lambda: _check_idmap(parse_idmap(pathlib.Path(paths['idmap'])), parse_idmap(od.joinpath(*idmaps[0].split('/'))), target=t))
         steps.check('check:stem', lambda: _check_equal([('meta.target.stem', snap.meta['target']['stem'], session.data['oracle']['stem']),
@@ -693,12 +1158,32 @@ def run_port(session: real.Session, work_dir: str, *, extra: bool = False) -> Po
 
         def _counts():
             counts = snap.meta.get('counts')
-            n = counts.get('objects') if isinstance(counts, dict) else None
+            counts = counts if isinstance(counts, dict) else {}
             written, table = run.walk.written['objects'], len(snap.objects)
-            dr = _check_equal([('meta.counts.objects vs rows written', n, written), ('rows written vs objects.jsonl rows', written, table)])
+            n_classes = n_structs = n_enums = n_functions = 0
+            for rec in snap.types():
+                if rec.kind == 'class':
+                    n_classes += 1
+                    n_functions += len(rec.functions)
+                elif rec.kind == 'struct':
+                    n_structs += 1
+                elif rec.kind == 'enum':
+                    n_enums += 1
+                elif rec.kind == 'function':
+                    n_functions += 1
+            # 6-G.4 (review M4): the recount over snapshot.types() proves meta() ran after the types stream.
+            dr = _check_equal([
+                ('meta.counts.objects vs rows written', counts.get('objects'), written),
+                ('rows written vs objects.jsonl rows', written, table),
+                ('meta.counts.classes vs recount', counts.get('classes'), n_classes),
+                ('meta.counts.structs vs recount', counts.get('structs'), n_structs),
+                ('meta.counts.enums vs recount', counts.get('enums'), n_enums),
+                ('meta.counts.functions vs recount', counts.get('functions'), n_functions),
+            ])
             return dr if written > 0 else dataclasses.replace(dr, ok=False, reason='no object rows written')
         steps.check('check:counts', _counts)
         steps.check('check:enums', lambda: _compare_enums(_our_enums(snap), _oracle_enums(od / 'Dumpspace' / 'EnumsInfo.json'), target=t))
+        steps.check('check:dumpspace', lambda: compare_dumpspace(snap.types(), parse_dumpspace(od / 'Dumpspace'), target=t))
         steps.check('check:props-exact', lambda: _props_exact(_drop_rows(u_props, _accepted(t, 'props-exact')), _drop_rows(o_props, _accepted(t, 'props-exact'))))
         steps.check('check:cdo-types', lambda: _cdo_types(snap, target=t))
 
