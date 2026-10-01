@@ -5,11 +5,12 @@ import ast
 import importlib.util
 import os
 import pathlib
+import re
 import sys
 import tempfile
 import unittest
 
-from nylib.ue import model, names
+from nylib.ue import flags, model, names
 from nylib.ue.exports import idmap
 from nylib.ue.flags import EObjectFlags
 from nylib.ue.snapshot import Snapshot, write_snapshot
@@ -43,6 +44,19 @@ def _load_importer():
 def setUpModule():
     global uei
     uei = _load_importer()
+
+
+def _write(root: str, objects, types) -> str:
+    partial = write_snapshot(os.path.join(root, 'snap'), {}, {}, list(objects), list(types), [])['partial']
+    folder = partial[:-len('.partial')]
+    os.rename(partial, folder)
+    return folder
+
+
+def _int(name: str, offset: int, size: int = 4, flags_: int = 0):
+    kind = {1: 'Int8Property', 4: 'IntProperty'}[size]
+    return model.PropertyRecord(name=name, offset=offset, size=size, array_dim=1, flags=flags_,
+                                type=model.PropType(prop=kind, kind=kind))
 
 
 def _write_golden(root: str) -> str:
@@ -80,6 +94,34 @@ class TypeLookupTests(unittest.TestCase):
                 for n in names_:
                     self.assertEqual(view.type(f'/G/BP.BP_C:{n}')['params_size'], n.count(':'), n)
                 self.assertIsNone(view.type('/G/BP.BP_C:Task: missing'))
+
+
+class TypePlanTests(unittest.TestCase):
+    def _types(self, records, ident=None) -> dict:
+        with tempfile.TemporaryDirectory() as root, uei.load_snapshot(_write(root, [], records)) as view:
+            return uei.plan(view, core_types=False, ident=ident or uei._plain_ident)['types']
+
+    def test_member_in_super_tail_padding_is_kept(self):
+        base = model.StructRecord(path='/S/P.Base', name='Base', cpp_name='FBase', package='/S/P', super=None, size=0x10,
+                                  min_alignment=4, properties=[_int('a', 0), _int('b', 4), _int('c', 8, 1)])
+        for off, kept, base_size in ((0xC, True, 0xC), (0x8, False, 0x9)):
+            child = model.StructRecord(path='/S/P.Child', name='Child', cpp_name='FChild', package='/S/P', super='/S/P.Base',
+                                       size=0x10, min_alignment=4, properties=[_int('x', off)])
+            with self.subTest(offset=off):
+                tp = self._types([base, child])
+                u = next(u for u in tp['udts'] if u['name'] == 'FChild')
+                self.assertEqual([m[:3] for m in u['members']], [('x', off * 8, 32)] if kept else [])
+                self.assertEqual(tp['members_dropped'], 0 if kept else 1)
+                self.assertEqual(u['base_size'], base_size)
+
+    def test_ident_collisions_stay_unique(self):
+        recs = [model.ClassRecord(path=f'/Game/P.{n}', name=n, cpp_name=n, package='/Game/P', super=None, size=8,
+                                  min_alignment=8, properties=[]) for n in ('A测试_C', 'A试验_C')]
+        tp = self._types(recs, ident=lambda kind, n: re.sub(r'[^\x00-\x7f]', '_', n))
+        planned = {u['path']: u['name'] for u in tp['udts'] if u['path']}
+        self.assertEqual(sorted(planned), sorted(r.path for r in recs))
+        self.assertEqual(len(set(planned.values())), 2)
+        self.assertEqual(tp['records'], 2)
 
 
 class BuildCheckGuardTests(unittest.TestCase):
@@ -147,6 +189,12 @@ class NameRuleGuardTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             uei.make_name_valid(None)
 
+    def test_function_flag_names(self):
+        ours = sorted(uei._EFUNCTION_FLAGS, key=lambda x: x[1])
+        want = sorted(((m.name, int(m.value)) for m in flags.EFunctionFlags if int(m.value) and int(m.value) & (int(m.value) - 1) == 0),
+                      key=lambda x: x[1])
+        self.assertEqual(ours, want)
+
     def test_mangle_exec(self):
         self.assertEqual(uei.mangle_exec('AActor', 'K2_DestroyActor'), '_ZN6AActor19execK2_DestroyActorEv')
         self.assertEqual(uei.mangle_exec('UテストA', 'F名'), names.mangle_exec('UテストA', 'F名'))
@@ -155,9 +203,28 @@ class NameRuleGuardTests(unittest.TestCase):
 
 
 class CommentLengthGuardTests(unittest.TestCase):
-    """R2's 'also:' comment must stay inside IDA's single-comment byte cap (8-G.2: on the TS image, two
-    RVAs with 40+ dup _VFT names were silently truncated by IDA past 1024 bytes, breaking re-run idempotency).
-    """
+    """Planned comments stay within IDA's comment byte cap."""
+
+    def _exec_plan(self, functions: dict) -> dict:
+        objects, classes = [_obj(0, 0x1000, outer_index=-1, name=PKG)], []
+        for i, (letter, fns) in enumerate(functions.items(), 1):
+            objects.append(_obj(i, 0x2000 + i, name=letter))
+            classes.append(_cls(letter, functions={n: model.FunctionRecord(
+                path=f'{PKG}.{letter}:{n}', name=n, package=PKG, flags=int(flags.EFunctionFlags.Native), params_size=0,
+                params=params, exec_rva=0x1000) for n, params in fns.items()}))
+        with tempfile.TemporaryDirectory() as root, uei.load_snapshot(_write(root, objects, classes)) as view:
+            return uei.plan(view)
+
+    def test_exec_comment_capped(self):
+        params = [_int(f'SomeVeryLongParameterNameForTheCommentCap{i:03d}', 4 * i, flags_=0x80) for i in range(60)]
+        _rva, text, _is_exec = self._exec_plan({'A': {'F': params}})['comments'][0]
+        self.assertTrue(text.startswith(f'UFunction {PKG}.A:F\n'), text[:80])
+        self.assertLessEqual(len(text.encode('utf-8')), uei._COMMENT_BYTE_LIMIT)
+
+    def test_surrogate_path_with_duplicates(self):
+        _rva, text, _is_exec = self._exec_plan({'A': {'F\ud800': []}, 'B': {'G': []}})['comments'][0]
+        self.assertTrue(text.startswith(f'UFunction {PKG}.A:F�\n'), text[:80])
+        self.assertIn('also: _ZN2UB5execGEv', text)
 
     def test_also_line_untruncated_when_it_fits(self):
         self.assertEqual(uei._also_line(['A_VFT', 'B_VFT'], 0), 'also: A_VFT, B_VFT')
@@ -227,6 +294,7 @@ class RealSnapshotTests(unittest.TestCase):
             theirs = [rel for rel in s.data['oracle']['files'] if rel.startswith('IDAMappings/') and rel.endswith('.idmap')]
             drift = oracle.compare_idmap(records, oracle.parse_idmap(oracle_dir / theirs[0]))
             self.assertTrue(drift.ok, f'{drift.reason}: {drift.samples}')
+            self.assertEqual(uei.plan(view, ident=uei._plain_ident)['types']['members_dropped'], 0)
             text = lambda rel: (oracle_dir / rel).read_text(encoding='utf-8')
             want = {**oracle.parse_predefined_members(text('CppSDK/SDK/Basic.hpp')),
                     **oracle.parse_predefined_members(text('CppSDK/SDK/CoreUObject_classes.hpp'))}

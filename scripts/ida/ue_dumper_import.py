@@ -713,7 +713,7 @@ def _cdo_record(view: SnapshotView, o):
     return o[_V] & 0xFFFFFFFF, class_rec['cpp_name'] + '_VFT', class_rec
 
 
-def _walk_idmap(view: SnapshotView, dups: dict | None = None):
+def _walk_idmap(view: SnapshotView, dups: 'dict | None' = None):
     """Yield (rva, name, function or None, class record) in idmap order; skipped duplicate execs go to `dups`."""
     seen = set()
     for i in view.objects.order:
@@ -836,7 +836,7 @@ def _named(name: str):
     return ('named', name)
 
 
-def _ptr(name: str | None = None):
+def _ptr(name: 'str | None' = None):
     return ('ptr', ('void',) if name is None else ('named', name))
 
 
@@ -1108,28 +1108,31 @@ class _TypePlanner:
         self.enum_plans = collections.OrderedDict()
         self.value_refs = set()
         self.used_enums = set()
+        self.basics = set()
         self.dropped = 0
         self.untyped = 0
+        self._layouts = {}
+        self._visiting = set()
 
     def _assign_names(self) -> dict:
-        by_cpp = collections.defaultdict(list)
+        by_name = collections.defaultdict(list)
         for path, e in self.info.items():
-            by_cpp[e['cpp_name']].append(path)
-        taken = set(by_cpp)
+            by_name[self.ident('type', e['cpp_name'])].append(path)
+        taken = set(by_name)
         names = {}
-        for cpp, paths in by_cpp.items():
+        for name, paths in by_name.items():
             paths.sort()
-            names[paths[0]] = cpp
+            names[paths[0]] = name
             for p in paths[1:]:
                 seg = make_name_valid(self.info[p]['package'].rstrip('/').rsplit('/', 1)[-1])
-                cand = f'{cpp}__{seg}'
+                cand = self.ident('type', f'{name}__{seg}')
                 n = 2
                 while cand in taken:
-                    cand = f'{cpp}__{n}'
+                    cand = self.ident('type', f'{name}__{n}')
                     n += 1
                 taken.add(cand)
                 names[p] = cand
-        return {p: self.ident('type', n) for p, n in names.items()}
+        return names
 
     def _resolve_roots(self, roots) -> list:
         out = []
@@ -1254,21 +1257,21 @@ class _TypePlanner:
             self.support[name] = self._udt(name, size, members=members)
         return name
 
-    def _support_named(self, name: str) -> str | None:
+    def _support_named(self, name: str) -> 'str | None':
         """Create a support type the core layout or a member names: FName, FString, FText, TArray, TPair."""
         if name == 'FName':
             size = self.core_sizes.get('FName', 8)
             rows = self.core_rows.get('FName', [])
-            return self._support('FName', size, [(m, off * 8, sz * 8, spec) for m, off, sz, spec in rows])
+            return self._basic(self._support('FName', size, [(m, off * 8, sz * 8, spec) for m, off, sz, spec in rows]))
         if name == 'FString':
-            return self._support('FString', 0x10, [('Data', 0, 64, ('ptr', ('wchar',))), ('Num', 64, 32, _i(4)),
-                                                   ('Max', 96, 32, _i(4))])
+            return self._basic(self._support('FString', 0x10, [('Data', 0, 64, ('ptr', ('wchar',))), ('Num', 64, 32, _i(4)),
+                                                                ('Max', 96, 32, _i(4))]))
         if name == 'FText':
             try:
                 size = _Keys(self.view.offsets).i('Off.InSDK.Text.TextSize')
             except _Missing:
                 size = 0x18
-            return self._support('FText', size)
+            return self._basic(self._support('FText', size))
         if name == _PAIR_NAME:
             fsize = self.core_sizes.get('FName', 8)
             self._support_named('FName')
@@ -1280,6 +1283,10 @@ class _TypePlanner:
                 self._support_named(inner)
             return self._tarray(name, _named(inner))
         return None
+
+    def _basic(self, name: str) -> str:
+        self.basics.add(name)
+        return name
 
     def _tarray(self, name: str, elem_spec) -> str:
         return self._support(name, 0x10, [('Data', 0, 64, ('ptr', elem_spec)), ('Num', 64, 32, _i(4)), ('Max', 96, 32, _i(4))])
@@ -1388,15 +1395,51 @@ class _TypePlanner:
                 return e['width'] if e['kind'] == 'enum' else e['size']
         return 0
 
+    def _layout(self, path: str) -> dict:
+        """A record's planned members, base-class size in bytes and its super chain's member end in bits (R4, R6)."""
+        if (lay := self._layouts.get(path)) is not None:
+            return lay
+        rec = self.view.type(path)
+        name = self.names[path]
+        base, start, end = None, 0, 0
+        sup = rec['super']
+        if sup is not None and sup in self.info and self.info[sup]['kind'] != 'enum':
+            base, start = self.names[sup], self.info[sup]['size']
+            self._visiting.add(path)
+            try:
+                end = start * 8 if sup in self._visiting else self._layout(sup)['end']
+            finally:
+                self._visiting.discard(path)
+            low = min((p['offset'] for p in rec['properties']), default=start)
+            if low < start:  # the child reuses the super's tail padding (Dumper-7: Info.Size = LowestOffset)
+                start = min(start, max(low, (end + 7) // 8))
+        saved, self.value_refs = self.value_refs, set()
+        try:
+            members, dropped, untyped = self._layout_members(rec, name, start * 8)
+        finally:
+            saved, self.value_refs = self.value_refs, saved
+        end = max([end] + [lo + nbits for _n, lo, nbits, _s in members])
+        lay = {'base': base, 'start': start, 'end': end, 'members': members, 'dropped': dropped, 'untyped': untyped,
+               'refs': saved}
+        self._layouts[path] = lay
+        return lay
+
     def _plan_record(self, rec: dict):
         name = self.names[rec['path']]
-        base = base_size = None
-        if rec['super'] is not None and rec['super'] in self.info and self.info[rec['super']]['kind'] != 'enum':
-            base, base_size = self.names[rec['super']], self.info[rec['super']]['size']
+        lay = self._layout(rec['path'])
+        if lay['base'] is not None:
             self.value_refs.add(rec['super'])
+        self.value_refs |= lay['refs']
+        self.untyped += lay['untyped']
+        self.dropped += len(lay['dropped'])
+        comment = '\n'.join([_TYPE_MARK + _text(rec['path'])] + lay['dropped'])
+        self.udts[name] = self._udt(name, rec['size'], path=rec['path'], folder=_folder(rec['package']), base=lay['base'],
+                                    base_size=lay['start'] if lay['base'] else 0, members=self._name_members(lay['members']),
+                                    comment=comment)
+
+    def _layout_members(self, rec: dict, name: str, start: int) -> tuple:
         size = rec['size']
-        members, dropped, used = [], [], []
-        start = (base_size or 0) * 8
+        members, dropped, used, untyped_count = [], [], [], 0
         for p in rec['properties']:
             spec, bit, untyped = self._member_spec(p)
             dim = p['array_dim'] if p['array_dim'] > 1 else 1
@@ -1421,7 +1464,7 @@ class _TypePlanner:
             if reason:
                 dropped.append(f"dropped: {_text(p['name'])} @0x{p['offset']:X} size 0x{p['size'] * dim:X} ({reason})")
                 continue
-            self.untyped += untyped
+            untyped_count += untyped
             used.append((lo, lo + nbits, p['name']))
             members.append([p['name'], lo, nbits, spec])
         if self.core_types and name in _REFLECTED_CORE and rec['package'] == '/Script/CoreUObject':
@@ -1430,10 +1473,7 @@ class _TypePlanner:
                 if lo >= start and lo + nbits <= size * 8 and not any(lo < e and s < lo + nbits for s, e, _n in used):
                     used.append((lo, lo + nbits, m))
                     members.append([m, lo, nbits, self._core_spec(spec, sz)])
-        self.dropped += len(dropped)
-        comment = '\n'.join([_TYPE_MARK + _text(rec['path'])] + dropped)
-        self.udts[name] = self._udt(name, size, path=rec['path'], folder=_folder(rec['package']), base=base,
-                                    base_size=base_size or 0, members=self._name_members(members), comment=comment)
+        return members, dropped, untyped_count
 
     def _name_members(self, members: list) -> list:
         seen = set()
@@ -1545,7 +1585,8 @@ class _TypePlanner:
         order = _dependency_order(all_udts)
         return {'udts': [all_udts[n] for n in order], 'enums': list(self.enum_plans.values()), 'fwd': fwd,
                 'records': len(self.udts) - sum(1 for u in self.udts.values() if u['path'] is None),
-                'core': sum(1 for u in all_udts.values() if u['path'] is None),
+                'core': sum(1 for u in self.udts.values() if u['path'] is None) + len(self.basics),
+                'containers': len(self.support) - len(self.basics),
                 'members_dropped': self.dropped, 'members_untyped': self.untyped, 'missing_keys': self.missing_keys,
                 'selected': selected}
 
@@ -1629,6 +1670,25 @@ def _also_line(names: list, used: int) -> str:
     return best
 
 
+def _fit(s: str, limit: int) -> str:
+    """`s` cut to `limit` UTF-8 bytes on a character boundary, ending in '...' when cut; `s` has no lone surrogate."""
+    b = s.encode('utf-8')
+    if len(b) <= limit:
+        return s
+    return b[:max(0, limit - 3)].decode('utf-8', 'ignore') + '...'
+
+
+def _exec_comment(lines: list, also: list) -> list:
+    """The exec comment within IDA's cap: line 3 is shortened first, the 'also:' line takes what remains."""
+    lines = [_text(line) for line in lines]
+    shortest_also = len((_ALSO_MARK + f' (+{len(also)} more)').encode('utf-8')) + 1 if also else 0
+    head = len('\n'.join(lines[:2]).encode('utf-8')) + 1
+    lines[2] = _fit(lines[2], _COMMENT_BYTE_LIMIT - head - shortest_also)
+    if also and (line := _also_line(also, len('\n'.join(lines).encode('utf-8')) + 1)):
+        lines.append(line)
+    return lines
+
+
 def _check_options(types, roots):
     if types not in ('all', 'referenced', 'none'):
         raise ValueError(f"types must be 'all', 'referenced' or 'none', got {types!r}")
@@ -1650,7 +1710,7 @@ def plan(view: SnapshotView, *, types='all', roots=(), exec_names=True, vtables=
     ident = ident or _default_ident()
     planner = _TypePlanner(view, types=types, roots=roots, core_types=core_types, enums=enums, ident=ident)
     type_plan = planner.plan() if (types != 'none' or core_types or enums) else {
-        'udts': [], 'enums': [], 'fwd': [], 'records': 0, 'core': 0, 'members_dropped': 0, 'members_untyped': 0,
+        'udts': [], 'enums': [], 'fwd': [], 'records': 0, 'core': 0, 'containers': 0, 'members_dropped': 0, 'members_untyped': 0,
         'missing_keys': planner.missing_keys, 'selected': []}
     dups = {}
     by_rva = collections.OrderedDict()
@@ -1674,11 +1734,9 @@ def plan(view: SnapshotView, *, types='all', roots=(), exec_names=True, vtables=
     if comments:
         for rva, fn in exec_fn.items():
             also = [n for n in by_rva.get(rva, [])[1:]] + [n for n, _f, _c in dups.get(rva, ())]
-            lines = _comment_lines(planner, fn)
-            if also:
-                lines = lines + [_also_line(also, len('\n'.join(lines).encode('utf-8')) + 1)]
-            notes[rva] = lines
-    comment_plan = [(rva, _text('\n'.join(lines)), rva in exec_fn and comments) for rva, lines in notes.items()]
+            notes[rva] = _exec_comment(_comment_lines(planner, fn), also)
+    comment_plan = [(rva, _fit(_text('\n'.join(lines)), _COMMENT_BYTE_LIMIT), rva in exec_fn and comments)
+                    for rva, lines in notes.items()]
     globals_plan, skipped = [], []
     if global_names:
         recs = global_records(view)
@@ -1695,6 +1753,8 @@ def plan(view: SnapshotView, *, types='all', roots=(), exec_names=True, vtables=
 # --- IDA apply (IDA 9.x only) ---
 
 def _require_ida():
+    if sys.version_info < (3, 10):
+        raise RuntimeError(f'ue_dumper_import needs Python 3.10 or later; this IDA runs Python {sys.version.split()[0]}')
     try:
         import ida_typeinf
         import ida_kernwin  # noqa: F401
@@ -1735,6 +1795,7 @@ class _Applier:
                                                'members_untyped'), 0),
                        'comments': dict.fromkeys(('set', 'unchanged', 'replaced', 'kept', 'failed'), 0),
                        'kept': [], 'failures': []}
+        self.kept_kinds = []
         self.cancelled = False
         self._ticks = 0
 
@@ -1749,9 +1810,17 @@ class _Applier:
         self.report[bucket]['failed'] += 1
         self.report['failures'].append((what, reason))
 
+    def keep(self, bucket: str, kind: str, ea: int, cur: str, planned: str):
+        self.report[bucket]['kept'] += 1
+        self.report['kept'].append((ea, cur, planned))
+        self.kept_kinds.append(kind)
+
     def _rec(self, ea: int, tag: str):
-        v = self.nn.supstr(ea, ord(tag))
+        v = self.nn.supstr_ea(ea, ord(tag)) or self.nn.supstr(ea, ord(tag))  # then the absolute-ea key of older imports
         return tuple(v.split('\n', 1)) if v and '\n' in v else None
+
+    def _record(self, ea: int, tag: str, value: str):
+        self.nn.supset_ea(ea, value, ord(tag))
 
     # -- types
 
@@ -1810,7 +1879,7 @@ class _Applier:
         return ('udt', t.get_size(), u.is_fixed(), u.is_cppobj(),
                 [(m.name, int(m.offset), int(m.size), str(m.type), m.is_baseclass()) for m in u])
 
-    def _put_type(self, name: str, new, comment: str, folder: str) -> str | None:
+    def _put_type(self, name: str, new, comment: str, folder: str) -> 'str | None':
         import ida_typeinf as T
         cur = self._existing(name)
         if cur is not None and not cur.is_forward_decl():
@@ -1916,7 +1985,7 @@ class _Applier:
 
     # -- names
 
-    def _set_name(self, ea: int, planned: str) -> str | None:
+    def _set_name(self, ea: int, planned: str) -> 'str | None':
         import ida_name
         flags = ida_name.SN_NOCHECK | ida_name.SN_NOWARN
         if ida_name.set_name(ea, planned, flags):
@@ -1945,8 +2014,7 @@ class _Applier:
         elif rec and rec[1] == cur or self.overwrite:
             action = 'replaced'
         else:
-            r['kept'] += 1
-            self.report['kept'].append((ea, cur, planned))
+            self.keep('names', 'name', ea, cur, planned)
             return
         if ida_bytes.is_tail(flags):
             self.fail('names', f'name {planned} at {ea:#x}', 'the address is inside an instruction or data item')
@@ -1955,7 +2023,7 @@ class _Applier:
         if applied is None:
             self.fail('names', f'name {planned} at {ea:#x}', 'IDA refused the name')
             return
-        self.nn.supset(ea, f'{planned}\n{applied}', ord('N'))
+        self._record(ea, 'N', f'{planned}\n{applied}')
         r[action] += 1
 
     # -- comments and prototypes
@@ -1975,8 +2043,7 @@ class _Applier:
         elif cur.startswith(_COMMENT_MARK) or cur.startswith(_ALSO_MARK) or self.overwrite:
             action = 'replaced'
         else:
-            r['kept'] += 1
-            self.report['kept'].append((ea, cur.split('\n', 1)[0], text.split('\n', 1)[0]))
+            self.keep('comments', 'comment', ea, cur.split('\n', 1)[0], text.split('\n', 1)[0])
             return
         if not on_func and ida_bytes.is_tail(ida_bytes.get_flags(ea)):
             self.fail('comments', f'comment at {ea:#x}', 'the address is inside an instruction or data item')
@@ -2008,19 +2075,45 @@ class _Applier:
         if cur == planned:
             r['unchanged'] += 1
             return
+        kind = 'prototype' if function else 'type'
         if not cur:
             action = 'set'
         elif rec and rec[1] == cur or self.overwrite:
             action = 'replaced'
         else:
-            r['kept'] += 1
-            self.report['kept'].append((ea, cur, planned))
+            self.keep(bucket, kind, ea, cur, planned)
+            return
+        if not function and not self.overwrite and self._user_data_in_span(ea, t.get_size(), own_item=action == 'replaced'):
+            self.keep(bucket, kind, ea, '<user data in span>', planned)
             return
         if not T.apply_tinfo(ea, t, T.TINFO_DEFINITE):
             self.fail(bucket, f'type at {ea:#x}', f'IDA refused {decl!r}')
             return
-        self.nn.supset(ea, f'{planned}\n{planned}', ord('P'))
+        self._record(ea, 'P', f'{planned}\n{planned}')
         r[action] += 1
+
+    @staticmethod
+    def _user_data_in_span(ea: int, size: int, *, own_item: bool) -> bool:
+        """`ea` is inside another item, or [ea, ea+size) holds a user name, a comment or an item reaching past it.
+
+        `own_item`: the item at `ea` is ours, so its own size does not count.
+        """
+        import ida_bytes
+        import ida_idaapi
+        import ida_name
+        if ida_bytes.is_tail(ida_bytes.get_flags(ea)):
+            return True
+        end = ea + max(size, 1)
+        h = ea
+        while h != ida_idaapi.BADADDR and h < end:
+            f = ida_bytes.get_flags(h)
+            if h != ea and (ida_name.get_name(h) and not ida_bytes.has_dummy_name(f) and not ida_bytes.has_auto_name(f)
+                            or ida_bytes.get_cmt(h, False) or ida_bytes.get_cmt(h, True)):
+                return True
+            if h + ida_bytes.get_item_size(h) > end and not (own_item and h == ea):
+                return True
+            h = ida_bytes.next_head(h, end)
+        return False
 
 
 def _say(line: str):
@@ -2102,20 +2195,21 @@ def run(snapshot, *, types='all', roots=(), exec_names=True, vtables=True, globa
               'names': ap.report['names'], 'types': ap.report['types'], 'comments': ap.report['comments'],
               'kept': ap.report['kept'], 'failures': ap.report['failures'], 'seconds': round(time.monotonic() - started, 3),
               'cancelled': ap.cancelled}
-    _print_report(report, p, verbose)
+    _print_report(report, p, verbose, ap.kept_kinds)
     return report
 
 
-def _print_report(report: dict, p: dict, verbose: bool):
-    n, t, c = report['names'], report['types'], report['comments']
-    kept_names = [k for k in report['kept']]
+def _print_report(report: dict, p: dict, verbose: bool, kinds: list):
+    t = report['types']
+    kept_names = [k for k, kind in zip(report['kept'], kinds) if kind == 'name']
+    kept_other = [(k, kind) for k, kind in zip(report['kept'], kinds) if kind != 'name']
     _say(f"names     {_fmt(p['counts']['exec'])} exec · {_fmt(p['counts']['vtables'])} vtables · "
-         f"{len(p['globals'])} globals; kept {_fmt(n['kept'])} names you set by hand")
+         f"{len(p['globals'])} globals; kept {_fmt(len(kept_names))} names you set by hand")
     if p['globals_skipped']:
         _say('globals   skipped (no rva in the snapshot): ' + ' '.join(p['globals_skipped']))
     tp = p['types']
-    _say(f"types     {_fmt(tp['core'])} core · {_fmt(len(tp['enums']))} enums · {_fmt(tp['records'])} classes and structs; "
-         f"{_fmt(t['failed'])} failed")
+    _say(f"types     {_fmt(tp['core'])} core · {_fmt(tp['containers'])} containers · {_fmt(len(tp['enums']))} enums · "
+         f"{_fmt(tp['records'])} classes and structs; {_fmt(t['failed'])} failed")
     if tp['missing_keys']:
         _say('types     offsets.json keys missing, their core members are omitted: ' + ', '.join(tp['missing_keys']))
     _say(f"comments  {_fmt(len(p['exec_rvas']))} exec functions")
@@ -2131,6 +2225,12 @@ def _print_report(report: dict, p: dict, verbose: bool):
              else f'kept names ({len(kept_names)}):')
         for ea, cur, planned in shown:
             print(f'    0x{ea:X}  {cur:<28} (snapshot: {planned})')
+    if kept_other:
+        shown = kept_other if verbose else kept_other[:3]
+        _say(f'kept comments, prototypes and types (first {len(shown)} of {len(kept_other)}, the rest with -v):'
+             if len(shown) < len(kept_other) else f'kept comments, prototypes and types ({len(kept_other)}):')
+        for (ea, cur, planned), kind in shown:
+            print(f'    0x{ea:X}  {kind:<9} {cur:<28} (snapshot: {planned})')
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -2150,7 +2250,7 @@ def _parser() -> argparse.ArgumentParser:
     return ap
 
 
-def main(argv: list | None = None) -> int:
+def main(argv: 'list | None' = None) -> int:
     """Batch entry: 0 done, 1 error or a failed action, 2 usage, 3 build refused."""
     try:
         args = _parser().parse_args(sys.argv[1:] if argv is None else argv)
@@ -2278,6 +2378,15 @@ UE Dumper Import
         ida_kernwin.warning(f'unexpected {type(e).__name__}: {e}')
 
 
+def _dialog_or_say():
+    try:
+        _dialog()
+    except RuntimeError as e:  # an unsupported IDA or Python: one line, no traceback
+        _say(f'error: {e}')
+        import ida_kernwin
+        ida_kernwin.warning(str(e))
+
+
 if ida_idaapi is not None:
     class UeDumperImportPlugin(ida_idaapi.plugin_t):
         flags = 0
@@ -2290,7 +2399,7 @@ if ida_idaapi is not None:
             return ida_idaapi.PLUGIN_OK
 
         def run(self, arg):
-            _dialog()
+            _dialog_or_say()
 
         def term(self):
             pass
@@ -2308,7 +2417,7 @@ def _script_main():
         sys.exit(main())
     argv = list(idc.ARGV[1:]) if len(idc.ARGV) > 1 else []
     if not argv:
-        _dialog()
+        _dialog_or_say()
         return
     code = main(argv)
     if not ida_kernwin.is_idaq():
