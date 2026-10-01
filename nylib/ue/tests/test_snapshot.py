@@ -462,7 +462,7 @@ class TypeTests(unittest.TestCase):
             snap.type(123)
 
     def test_rpartition_on_multiple_colons(self):
-        # path.rpartition(':'), not partition(): only the LAST colon splits class from function.
+        # Each ':' is tried from the left: '/A/Foo' is no class, so the split falls through to '/A/Foo:Bar'.
         fn = model.FunctionRecord(path='/A/Foo:Bar:Baz', name='Baz', package='/A', flags=0, params_size=0,
                                    params=[], exec_rva=None)
         cls = model.ClassRecord(path='/A/Foo:Bar', name='Bar', cpp_name='UBar', package='/A', super=None, size=8,
@@ -470,6 +470,22 @@ class TypeTests(unittest.TestCase):
         table = model.ObjectTable([])
         snap = snapshot.Snapshot({}, {}, table, [cls])
         self.assertIs(snap.type('/A/Foo:Bar:Baz'), fn)
+
+    def test_colon_in_function_name(self):
+        names = ('Task: Update All Attribute', 'CSW::SetBrushAtKeyFrame')
+        fns = {n: model.FunctionRecord(path=f'/G/BP.BP_C:{n}', name=n, package='/G/BP', flags=0, params_size=0,
+                                       params=[], exec_rva=None) for n in names}
+        cls = model.ClassRecord(path='/G/BP.BP_C', name='BP_C', cpp_name='UBP_C', package='/G/BP', super=None, size=8,
+                                 min_alignment=8, properties=[], functions=fns)
+        mem = snapshot.Snapshot({}, {}, model.ObjectTable([]), [cls])
+        with tempfile.TemporaryDirectory() as d:
+            folder = os.path.join(d, 'snap')
+            os.rename(_write_minimal(folder, types=[cls])['partial'], folder)
+            with snapshot.Snapshot.load(folder) as loaded:
+                for snap in (mem, loaded):
+                    for n in names:
+                        self.assertEqual(snap.type(f'/G/BP.BP_C:{n}'), fns[n])
+                    self.assertIsNone(snap.type('/G/BP.BP_C:Task: missing'))
 
     def test_cache_bounded(self):
         n_fn = 300

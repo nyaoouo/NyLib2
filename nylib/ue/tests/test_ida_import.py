@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 
-from nylib.ue import names
+from nylib.ue import model, names
 from nylib.ue.exports import idmap
 from nylib.ue.snapshot import Snapshot, write_snapshot
 from nylib.ue.tests import oracle, real
@@ -62,6 +62,23 @@ class IdmapEquivalenceTests(unittest.TestCase):
             with Snapshot.load(folder) as snap:
                 ours = oracle.parse_idmap(pathlib.Path(idmap.write(snap, os.path.join(root, 'out'))))
             self.assertEqual(records, ours)
+
+
+class TypeLookupTests(unittest.TestCase):
+    def test_colon_in_function_name(self):
+        names_ = ('Task: Update All Attribute', 'CSW::SetBrushAtKeyFrame')
+        fns = {n: model.FunctionRecord(path=f'/G/BP.BP_C:{n}', name=n, package='/G/BP', flags=0, params_size=n.count(':'),
+                                       params=[], exec_rva=None) for n in names_}
+        cls = model.ClassRecord(path='/G/BP.BP_C', name='BP_C', cpp_name='UBP_C', package='/G/BP', super=None, size=8,
+                                 min_alignment=8, properties=[], functions=fns)
+        with tempfile.TemporaryDirectory() as root:
+            partial = write_snapshot(os.path.join(root, 'snap'), {}, {}, [], [cls], [])['partial']
+            folder = partial[:-len('.partial')]
+            os.rename(partial, folder)
+            with uei.load_snapshot(folder) as view:
+                for n in names_:
+                    self.assertEqual(view.type(f'/G/BP.BP_C:{n}')['params_size'], n.count(':'), n)
+                self.assertIsNone(view.type('/G/BP.BP_C:Task: missing'))
 
 
 class BuildCheckGuardTests(unittest.TestCase):

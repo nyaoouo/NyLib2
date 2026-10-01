@@ -648,11 +648,12 @@ class SnapshotView:
         """The type record at `path` (a class function as `Class:Func`), or None."""
         self._check()
         rec = self._exact(path)
-        if rec is None and ':' in path:
-            class_path, _, fn = path.rpartition(':')
-            cls = self._exact(class_path)
-            if cls is not None and cls['kind'] == 'class':
-                return cls['functions'].get(fn)
+        i = path.find(':') if rec is None else -1
+        while i >= 0:
+            cls = self._exact(path[:i])
+            if cls is not None and cls['kind'] == 'class' and (fn := cls['functions'].get(path[i + 1:])) is not None:
+                return fn
+            i = path.find(':', i + 1)
         return rec
 
     def type_of_object(self, index: int):

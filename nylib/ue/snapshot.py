@@ -492,12 +492,12 @@ class Snapshot:
         rec = self._type_exact(path)
         if rec is not None:
             return rec
-        if ':' in path:
-            class_path, _, fn_name = path.rpartition(':')
-            class_rec = self._type_exact(class_path)
-            if isinstance(class_rec, ClassRecord):
-                return class_rec.functions.get(fn_name)
-            return None
+        i = path.find(':')
+        while i >= 0:
+            class_rec = self._type_exact(path[:i])
+            if isinstance(class_rec, ClassRecord) and (fn := class_rec.functions.get(path[i + 1:])) is not None:
+                return fn
+            i = path.find(':', i + 1)
         return None
 
     def types(self):
