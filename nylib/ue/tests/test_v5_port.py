@@ -197,6 +197,72 @@ class PortRegressionTests(unittest.TestCase):
         finally:
             image.close()
 
+    def test_stem_skips_bad_candidate(self):
+        import struct
+        from ..capture import ImageSource
+        from ..engine.core import Engine
+        from ..engine.stem import detect_stem
+        from .pe_file import map_pe_file
+
+        def candidate(x, y, patch, changelist, data_ptr, num_elements, max_elements):
+            buf = bytearray(0x20)
+            struct.pack_into('<HH', buf, 0x0, x, y)
+            struct.pack_into('<H', buf, 0x4, patch)
+            struct.pack_into('<I', buf, 0x8, changelist)
+            struct.pack_into('<Q', buf, 0x10, data_ptr)
+            struct.pack_into('<i', buf, 0x18, num_elements)
+            struct.pack_into('<i', buf, 0x1C, max_elements)
+            return bytes(buf)
+
+        src = map_pe_file(sys._base_executable)
+        try:
+            image = ImageSource([(r.base, src.read(r.base, r.size)) for r in src.regions()], list(src.modules()), writable=True)
+        finally:
+            src.close()
+        try:
+            e = Engine(image)
+            section = max((s for s in e.platform.image.sections if s.writable and s.characteristics & 0x40000000), key=lambda s: s.size)
+            branch = '++UE5+Release-5.4'
+            branch_addr = section.address + 0x100
+            image.write(branch_addr, branch.encode('utf-16-le') + b'\x00\x00')
+            bad_addr, good_addr = section.address + 0x40, section.address + 0x80
+            image.write(bad_addr, candidate(5, 4, 4, 35576357, image.main_module.base + 0x7FFF0000, 1, 1))  # Data unmapped
+            image.write(good_addr, candidate(5, 4, 4, 35576357, branch_addr, len(branch) + 1, len(branch) + 1))
+
+            stem = detect_stem(e)
+            self.assertEqual(stem.engine_version, '5.4.4-35576357+++UE5+Release-5.4')
+            self.assertEqual(e.provenance['Settings.Generator.GameVersion'], 'auto: FEngineVersion::Current (memory)')
+        finally:
+            image.close()
+
+    def test_from_snapshot_rejects_decrypted(self):
+        from ..engine.context import EngineContext
+        from ..engine.core import Engine
+        from ..engine.stem import Stem
+        from ..errors import DetectionError
+        from .pe_file import map_pe_file
+        image = map_pe_file(sys._base_executable)
+        try:
+            e = Engine(image)
+            e.objects.GObjects = image.main_module.base + 0x2000
+            ctx = EngineContext(e, Stem(engine_version='5.4.4-0+branch', game_name='Test'))
+
+            meta = ctx.to_meta()
+            self.assertFalse(meta['globals']['GObjects']['decrypted'])
+            e.objects.init_decryption(lambda p: p, 'test')
+            meta = ctx.to_meta()
+            self.assertTrue(meta['globals']['GObjects']['decrypted'])
+
+            offsets = ctx.to_offsets()
+            meta['target']['engine_version_from'] = 'test'
+            meta['target']['game_name_from'] = 'test'
+            with self.assertRaises(DetectionError) as cm:
+                EngineContext.from_snapshot(meta, offsets, image)
+            self.assertEqual(cm.exception.step, 'EngineContext.from_snapshot')
+            self.assertIn('decrypt', cm.exception.detail)
+        finally:
+            image.close()
+
 
 if __name__ == '__main__':
     unittest.main()

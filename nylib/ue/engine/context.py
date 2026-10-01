@@ -7,6 +7,7 @@ from ..errors import DetectionError
 from ..memory import MemorySource
 from ..model import hexs, unhex
 from .core import Engine
+from .objects import _identity
 from .offsets import PINNABLE_KEYS, init_gworld, init_pe, init_pe_windows, init_text_offsets, off_init, property_sizes_init
 from .settings import init_settings
 from .state import FChunkedFixedUObjectArrayLayout, FChunkedFixedUObjectArrayLayouts, FFixedUObjectArrayLayout, FFixedUObjectArrayLayouts, Off, PropertySizes, Settings
@@ -169,6 +170,26 @@ def _decode(kind: str, key: str, value):
         raise problem(f'expected a hexs string, got {value!r}') from None
 
 
+def _gobjects_decrypted(meta: Mapping) -> bool:
+    """meta.json globals.GObjects.decrypted (M9); absent at any level means False (pre-6-G.4 snapshots)."""
+    globals_ = meta.get('globals') if isinstance(meta, Mapping) else None
+    if globals_ is None:
+        return False
+    if not isinstance(globals_, Mapping):
+        raise ValueError(f'meta.json: globals.GObjects.decrypted: expected an object, got {type(globals_).__name__}')
+    gobjects = globals_.get('GObjects')
+    if gobjects is None:
+        return False
+    if not isinstance(gobjects, Mapping):
+        raise ValueError(f'meta.json: globals.GObjects.decrypted: expected an object, got {type(gobjects).__name__}')
+    decrypted = gobjects.get('decrypted')
+    if decrypted is None:
+        return False
+    if not isinstance(decrypted, bool):
+        raise ValueError(f'meta.json: globals.GObjects.decrypted: expected a boolean, got {type(decrypted).__name__}')
+    return decrypted
+
+
 class EngineContext:
     """One initialised Engine with its stem; serialises to the offsets.json / meta.json parts stage 5 owns."""
     __slots__ = ('engine', 'stem')
@@ -214,7 +235,7 @@ class EngineContext:
             'globals': {
                 'GObjects': {'rva': hexs(objarr.GObjects), 'layout': layout, 'elements_per_chunk': objarr.ChunkSize if fuoa.bIsChunked else None,
                              'item_size': hexs(objarr.FUObjectItemSize), 'item_object_offset': hexs(objarr.FUObjectItemInitialOffset),
-                             'num_elements': e.objects.num()},
+                             'num_elements': e.objects.num(), 'decrypted': e.objects.DecryptPtr is not _identity},
                 'GNames': {'rva': hexs(o.InSDK.NameArray.GNames), 'kind': 'FNamePool' if e.settings.Internal.bUseNamePool else 'TNameEntryArray',
                            'block_offset_bits': o.InSDK.NameArray.FNamePoolBlockOffsetBits, 'entry_stride': o.InSDK.NameArray.FNameEntryStride,
                            'length_shift': e.names.FNameEntryLengthShiftCount},
@@ -257,6 +278,9 @@ class EngineContext:
                 raise ValueError(f'meta.json: target.{key}: missing')
             if not isinstance(target[key], str) and not (key == 'branch' and target[key] is None):
                 raise ValueError(f'meta.json: target.{key}: expected a string, got {type(target[key]).__name__}')
+
+        if _gobjects_decrypted(meta):  # M9: refused before any GObjects read
+            raise DetectionError('EngineContext.from_snapshot', 'a snapshot taken with GObjects decryption cannot be re-attached')
 
         if not values['Off.FUObjectArray.bIsChunked']:
             raise DetectionError('EngineContext.from_snapshot', 'a fixed GObjects layout cannot be re-attached')

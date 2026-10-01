@@ -115,17 +115,16 @@ def _find(e: 'Engine', pins: Mapping[str, int], key: str, func: str, finder, *ar
         _assign(e, key, value, _finder_label(func, value, zero_is_not_found), pins)
 
 
-def _field_class_cast_flags_label(e: 'Engine', value: int) -> str:
+def _field_class_cast_flags_found(e: 'Engine', value: int) -> bool:
     """Tells dd8fe34's found 0x10 from its 0x10 default: a found 0x10 matched at +0x10 of a non-null pair."""
-    found = value != 0x10
-    if not found:
-        base = EClassCastFlags.Field | EClassCastFlags.Property | EClassCastFlags.NumericProperty
-        for struct_name, flag in (('Guid', EClassCastFlags.IntProperty), ('Color', EClassCastFlags.ByteProperty)):
-            address = e.objects.find_struct_fast(struct_name).get_child_properties().get_class().get_address()
-            if address and e.mem.u64(address + 0x10) == base | flag:
-                found = True
-                break
-    return 'auto: OffsetFinder::FindFieldClassCastFlagsOffset (dd8fe34)' if found else 'default: 0x10 (dd8fe34)'
+    if value != 0x10:
+        return True
+    base = EClassCastFlags.Field | EClassCastFlags.Property | EClassCastFlags.NumericProperty
+    for struct_name, flag in (('Guid', EClassCastFlags.IntProperty), ('Color', EClassCastFlags.ByteProperty)):
+        address = e.objects.find_struct_fast(struct_name).get_child_properties().get_class().get_address()
+        if address and e.mem.u64(address + 0x10) == base | flag:
+            return True
+    return False
 
 
 def off_init(e: 'Engine', *, pins: Mapping[str, int] | None = None) -> None:
@@ -209,9 +208,13 @@ def off_init(e: 'Engine', *, pins: Mapping[str, int] | None = None) -> None:
         _assign(e, 'Off.FField.Flags', _i32(name + off.InSDK.Name.FNameSize), _computed_label('Off.FField.Name', name), pins)
         e.cerr(f'Off::FField::Flags: 0x{off.FField.Flags:X}\n')
 
+        before = off.FFieldClass.CastFlags
         ok, value = _tolerated(e, ('Off.FFieldClass.CastFlags',), pins, lambda: OffsetFinder.find_field_class_cast_flags_offset(e))
         if ok:
-            _assign(e, 'Off.FFieldClass.CastFlags', value, _field_class_cast_flags_label(e, value), pins)
+            if _field_class_cast_flags_found(e, value):
+                _assign(e, 'Off.FFieldClass.CastFlags', value, 'auto: OffsetFinder::FindFieldClassCastFlagsOffset (dd8fe34)', pins)
+            else:  # B3 (review M8): keep ea0dab3's effective value on a miss, not dd8fe34's 0x10 fallback
+                _assign(e, 'Off.FFieldClass.CastFlags', before, f'default: {_hexs(before)} (dd8fe34 finder missed)', pins)
         e.cerr(f'Off::FFieldClass::CastFlags: 0x{off.FFieldClass.CastFlags:X}\n\n')
 
     _find(e, pins, 'Off.UClass.ClassDefaultObject', 'FindDefaultObjectOffset', OffsetFinder.find_default_object_offset)

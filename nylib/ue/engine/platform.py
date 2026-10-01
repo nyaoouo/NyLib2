@@ -312,7 +312,7 @@ class Platform:
         """Utils.h FindUnrealExecFunctionByString @ ea0dab3 (A9)."""
         image_base, image_size = self.get_image_base_and_size()
         search_start = start_address or image_base
-        limit = search_start + image_size - 8
+        limit = search_start + image_size - 16  # A9: the C++ loop also reads the next qword (start + size - 8 is never tested)
         needle = text.encode('utf-16-le') if wide else text.encode('ascii')
         occurrences = self.scanner.find_bytes(needle, align=1, executable=None)
         if not occurrences or limit < search_start:
