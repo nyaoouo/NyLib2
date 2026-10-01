@@ -675,6 +675,13 @@ def _ds_compare_node(ptype, flags: int, oracle, *, top_level: bool, by_path: dic
     return oracle == [f'F{ptype.prop}_', 'D', '', []]
 
 
+# ea0dab3 StructManager::InitAlignmentsAndNames hardcodes a '2' onto whichever single class
+# ObjectArray::FindClassFast("OnlineEngineInterfaceImpl") matches, on every target, whether or not a
+# real second class of that name exists there (StructManager.cpp, grep "Hardcoded fix for two"); PAL
+# has exactly one such class (00000219), so the oracle's rename is cosmetic, not a true collision.
+_ORACLE_HARDCODED_RENAME = {'UOnlineEngineInterfaceImpl2': 'UOnlineEngineInterfaceImpl'}
+
+
 def _ds_build_index(types) -> tuple[dict, collections.Counter, list, list, list]:
     by_path: dict[str, object] = {}
     name_counts = collections.Counter()
@@ -822,23 +829,32 @@ def compare_dumpspace(types, oracle: DumpspaceTypes, *, target: str,
         if name_counts[rec.cpp_name] == 1:
             ours_by_key.setdefault(rec.cpp_name, rec)
     oracle_qualified = {k for k, v in oracle.types.items() if '::' not in k and len(v) == 1}
+    # Map each oracle key to the name we'd compare it under, applying _ORACLE_HARDCODED_RENAME unless
+    # that would collide with a genuine, distinct oracle key already claiming the renamed form.
+    oracle_logical: dict[str, str] = {}
+    for k in oracle_qualified:
+        logical = _ORACLE_HARDCODED_RENAME.get(k, k)
+        if logical in oracle_logical and oracle_logical[logical] != k:
+            continue
+        oracle_logical[logical] = k
 
-    compared = sorted((oracle_qualified & ours_by_key.keys()) - accepted)
-    oracle_only = (oracle_qualified - ours_by_key.keys()) - accepted
-    ours_only = (ours_by_key.keys() - oracle_qualified) - accepted
-    qualifying_oracle = len(oracle_qualified - accepted)
+    compared = sorted((oracle_logical.keys() & ours_by_key.keys()) - accepted)
+    oracle_only = (oracle_logical.keys() - ours_by_key.keys()) - accepted
+    ours_only = (ours_by_key.keys() - oracle_logical.keys()) - accepted
+    qualifying_oracle = len(oracle_logical.keys() - accepted)
 
     matched = changed = 0
     member_pairs_total = function_pairs_total = param_pairs_total = skipped_total = renamed_total = 0
     samples = []
     for key in compared:
         rec = ours_by_key[key]
-        body = oracle.types[key][0]
+        oracle_key = oracle_logical[key]
+        body = oracle.types[oracle_key][0]
         inherit_diff = _ds_inherit_chain(rec, by_path) != body[0]['__InheritInfo']
         size_diff = not _ds_size_ok(body[1]['__MDKClassSize'], rec)
         members_diff, pairs_n, mem_renamed, mem_skipped = _ds_compare_members(
             rec, [_ds_one_key(m, where=f'{key} member') for m in body[2:]], by_path, name_counts)
-        fn_bodies = oracle.functions.get(key) if isinstance(rec, ClassRecord) else None
+        fn_bodies = oracle.functions.get(oracle_key) if isinstance(rec, ClassRecord) else None
         fn_diff, fn_n, param_n, fn_skipped = _ds_compare_functions(rec, fn_bodies, by_path, name_counts) if isinstance(rec, ClassRecord) else (False, 0, 0, 0)
         member_pairs_total += pairs_n
         renamed_total += mem_renamed

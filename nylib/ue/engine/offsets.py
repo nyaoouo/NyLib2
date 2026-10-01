@@ -213,7 +213,7 @@ def off_init(e: 'Engine', *, pins: Mapping[str, int] | None = None) -> None:
         if ok:
             if _field_class_cast_flags_found(e, value):
                 _assign(e, 'Off.FFieldClass.CastFlags', value, 'auto: OffsetFinder::FindFieldClassCastFlagsOffset (dd8fe34)', pins)
-            else:  # B3 (review M8): keep ea0dab3's effective value on a miss, not dd8fe34's 0x10 fallback
+            else:  # keep ea0dab3's effective value on a miss, not dd8fe34's 0x10 fallback
                 _assign(e, 'Off.FFieldClass.CastFlags', before, f'default: {_hexs(before)} (dd8fe34 finder missed)', pins)
         e.cerr(f'Off::FFieldClass::CastFlags: 0x{off.FFieldClass.CastFlags:X}\n\n')
 

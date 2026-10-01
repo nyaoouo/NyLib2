@@ -143,7 +143,9 @@ class PortRegressionTests(unittest.TestCase):
             e.off.UStruct.ChildProperties = 0x08
             e.off.FField.Class, e.off.FField.Next = 0x08, 0x20
             e.off.FFieldClass.CastFlags = 0x10
-            self.assertIsInstance(self._run_joined(UEStruct(e, base).get_properties), MemoryReadError)
+            err = self._run_joined(UEStruct(e, base).get_properties)
+            self.assertIsInstance(err, MemoryReadError)
+            self.assertIn('exceeds 65536 links', err.reason)
         finally:
             e.mem.close()
 
@@ -159,9 +161,40 @@ class PortRegressionTests(unittest.TestCase):
         try:
             e.off.UObject.Class, e.off.UObject.Outer = 0x10, 0x20
             with mock.patch.object(UEObject, 'get_name', lambda self: 'Obj'):
-                self.assertIsInstance(self._run_joined(UEObject(e, base).get_full_name), MemoryReadError)
+                err = self._run_joined(UEObject(e, base).get_full_name)
+            self.assertIsInstance(err, MemoryReadError)
+            self.assertIn('exceeds 256 links', err.reason)
         finally:
             e.mem.close()
+
+    @staticmethod
+    def _outer_chain(base: int, count: int) -> bytes:
+        """`count` outer hops from `base` (self); each node's Outer field holds the next node's address, the last holds 0."""
+        import struct
+        data = bytearray(0x20 * (count + 2))
+        for j in range(1, count + 1):
+            struct.pack_into('<Q', data, 0x20 * j, base + 0x20 * j)  # node (j-1)'s Outer == node j's address
+        struct.pack_into('<Q', data, 0x20 * (count + 1), 0)  # node count's Outer: terminate
+        return bytes(data)
+
+    def test_outer_chain_bound(self):
+        from ..engine.unreal import UEObject
+        from ..errors import MemoryReadError
+        base = 0x100000
+        for count, raises in ((256, False), (257, True)):
+            with self.subTest(count=count):
+                e = self._engine_with_segment(base, self._outer_chain(base, count))
+                try:
+                    e.off.UObject.Class, e.off.UObject.Outer = 0x10, 0x20
+                    if raises:
+                        with self.assertRaises(MemoryReadError) as cm:
+                            UEObject(e, base).get_outermost()
+                        self.assertIn('exceeds 256 links', cm.exception.reason)
+                    else:
+                        outermost = UEObject(e, base).get_outermost()
+                        self.assertEqual(outermost.address, base + 0x20 * count)
+                finally:
+                    e.mem.close()
 
     def test_a6_skips_unreadable_object(self):
         from unittest import mock
@@ -186,6 +219,8 @@ class PortRegressionTests(unittest.TestCase):
                     mock.patch.object(UEObject, 'get_full_name', name_of(True)):
                 self.assertEqual(e.objects.find_object_fast('Actor'), actor)
                 self.assertEqual(e.objects.find_object('Class /Script/Engine.Actor'), actor)
+            self.assertIn('A6: 1 unreadable objects left out of the name index\n', e.messages)
+            self.assertIn('A6: 1 unreadable objects left out of the full index\n', e.messages)
         finally:
             image.close()
 
@@ -244,7 +279,47 @@ class PortRegressionTests(unittest.TestCase):
         finally:
             image.close()
 
+    def test_stem_skips_bad_candidate_only(self):
+        import struct
+        from ..capture import ImageSource
+        from ..engine.core import Engine
+        from ..engine.stem import detect_stem
+        from .pe_file import map_pe_file
+
+        def candidate(x, y, patch, changelist, data_ptr, num_elements, max_elements):
+            buf = bytearray(0x20)
+            struct.pack_into('<HH', buf, 0x0, x, y)
+            struct.pack_into('<H', buf, 0x4, patch)
+            struct.pack_into('<I', buf, 0x8, changelist)
+            struct.pack_into('<Q', buf, 0x10, data_ptr)
+            struct.pack_into('<i', buf, 0x18, num_elements)
+            struct.pack_into('<i', buf, 0x1C, max_elements)
+            return bytes(buf)
+
+        src = map_pe_file(sys._base_executable)
+        try:
+            image = ImageSource([(r.base, src.read(r.base, r.size)) for r in src.regions()], list(src.modules()), writable=True)
+        finally:
+            src.close()
+        try:
+            e = Engine(image)
+            section = max((s for s in e.platform.image.sections if s.writable and s.characteristics & 0x40000000), key=lambda s: s.size)
+            branch = '++UE5+Release-5.4'
+            branch_addr = section.address + 0x100
+            image.write(branch_addr, branch.encode('utf-16-le') + b'\x00\x00')
+            bad_addr = section.address + 0x40
+            image.write(bad_addr, candidate(5, 4, 4, 35576357, image.main_module.base + 0x7FFF0000, 1, 1))  # Data unmapped
+
+            detect_stem(e)
+            stem_messages = [m for m in e.messages if 'FEngineVersion::Current (memory)' in m]
+            self.assertEqual(len(stem_messages), 1, stem_messages)
+            self.assertIn('0 candidates', stem_messages[0])
+            self.assertIn('1 skipped', stem_messages[0])
+        finally:
+            image.close()
+
     def test_from_snapshot_rejects_decrypted(self):
+        import copy
         from ..engine.context import EngineContext
         from ..engine.core import Engine
         from ..engine.stem import Stem
@@ -269,6 +344,18 @@ class PortRegressionTests(unittest.TestCase):
                 EngineContext.from_snapshot(meta, offsets, image)
             self.assertEqual(cm.exception.step, 'EngineContext.from_snapshot')
             self.assertIn('decrypt', cm.exception.detail)
+
+            for mutate in (
+                lambda m: m.__setitem__('globals', None),
+                lambda m: m['globals'].__setitem__('GObjects', None),
+                lambda m: m['globals']['GObjects'].__setitem__('decrypted', None),
+            ):
+                with self.subTest(mutate=mutate):
+                    bad_meta = copy.deepcopy(meta)
+                    mutate(bad_meta)
+                    with self.assertRaises(ValueError) as cm:
+                        EngineContext.from_snapshot(bad_meta, offsets, image)
+                    self.assertIn('globals.GObjects.decrypted', str(cm.exception))
         finally:
             image.close()
 

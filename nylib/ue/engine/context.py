@@ -171,20 +171,20 @@ def _decode(kind: str, key: str, value):
 
 
 def _gobjects_decrypted(meta: Mapping) -> bool:
-    """meta.json globals.GObjects.decrypted (M9); absent at any level means False (pre-6-G.4 snapshots)."""
-    globals_ = meta.get('globals') if isinstance(meta, Mapping) else None
-    if globals_ is None:
+    """meta.json globals.GObjects.decrypted; absent at any level means False."""
+    if not isinstance(meta, Mapping) or 'globals' not in meta:
         return False
+    globals_ = meta['globals']
     if not isinstance(globals_, Mapping):
         raise ValueError(f'meta.json: globals.GObjects.decrypted: expected an object, got {type(globals_).__name__}')
-    gobjects = globals_.get('GObjects')
-    if gobjects is None:
+    if 'GObjects' not in globals_:
         return False
+    gobjects = globals_['GObjects']
     if not isinstance(gobjects, Mapping):
         raise ValueError(f'meta.json: globals.GObjects.decrypted: expected an object, got {type(gobjects).__name__}')
-    decrypted = gobjects.get('decrypted')
-    if decrypted is None:
+    if 'decrypted' not in gobjects:
         return False
+    decrypted = gobjects['decrypted']
     if not isinstance(decrypted, bool):
         raise ValueError(f'meta.json: globals.GObjects.decrypted: expected a boolean, got {type(decrypted).__name__}')
     return decrypted
@@ -279,7 +279,7 @@ class EngineContext:
             if not isinstance(target[key], str) and not (key == 'branch' and target[key] is None):
                 raise ValueError(f'meta.json: target.{key}: expected a string, got {type(target[key]).__name__}')
 
-        if _gobjects_decrypted(meta):  # M9: refused before any GObjects read
+        if _gobjects_decrypted(meta):  # refused before any GObjects read
             raise DetectionError('EngineContext.from_snapshot', 'a snapshot taken with GObjects decryption cannot be re-attached')
 
         if not values['Off.FUObjectArray.bIsChunked']:

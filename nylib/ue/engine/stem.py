@@ -131,18 +131,18 @@ def _engine_version_from_memory(e, branch: str, x: int, y: int) -> str | None:
                     fs = view(FString, p + 0x10, e.acc)
                     try:
                         matched = fs.is_valid() and fs.to_wstring() == branch
-                    except MemoryReadError:  # a bad candidate (M7): skip it, don't let it end the scan
+                    except MemoryReadError:  # a bad candidate: skip it, don't let it end the scan
                         skipped += 1
                         matched = False
                     if matched:
                         found.append(p)
                 i = data.find(key, i + 1)
-    if skipped:
-        e.cerr(f'FEngineVersion::Current (memory): {skipped} candidate(s) skipped (unreadable)\n')
     if len(found) == 1 or (len(found) == 2 and found[1] - found[0] == 0x20):
+        if skipped:
+            e.cerr(f'FEngineVersion::Current (memory): {skipped} candidate(s) skipped (unreadable)\n')
         p = found[0]
         return f'{x}.{y}.{e.mem.u16(p + 4)}-{e.mem.u32(p + 8) & 0x7FFFFFFF}+{branch}'
-    _failed(e, 'FEngineVersion::Current (memory)', f'{len(found)} candidates')
+    _failed(e, 'FEngineVersion::Current (memory)', f'{len(found)} candidates, {skipped} skipped (unreadable)')
     return None
 
 
