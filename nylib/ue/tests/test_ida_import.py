@@ -11,9 +11,10 @@ import unittest
 
 from nylib.ue import model, names
 from nylib.ue.exports import idmap
+from nylib.ue.flags import EObjectFlags
 from nylib.ue.snapshot import Snapshot, write_snapshot
 from nylib.ue.tests import oracle, real
-from nylib.ue.tests.test_exports import _Golden
+from nylib.ue.tests.test_exports import PKG, _Golden, _cls, _obj
 
 _REPO = pathlib.Path(__file__).resolve().parents[3]
 _SCRIPT = _REPO / 'scripts' / 'ida' / 'ue_dumper_import.py'
@@ -151,6 +152,43 @@ class NameRuleGuardTests(unittest.TestCase):
         self.assertEqual(uei.mangle_exec('UテストA', 'F名'), names.mangle_exec('UテストA', 'F名'))
         with self.assertRaises(TypeError):
             uei.mangle_exec('AActor', b'x')
+
+
+class CommentLengthGuardTests(unittest.TestCase):
+    """R2's 'also:' comment must stay inside IDA's single-comment byte cap (8-G.2: on the TS image, two
+    RVAs with 40+ dup _VFT names were silently truncated by IDA past 1024 bytes, breaking re-run idempotency).
+    """
+
+    def test_also_line_untruncated_when_it_fits(self):
+        self.assertEqual(uei._also_line(['A_VFT', 'B_VFT'], 0), 'also: A_VFT, B_VFT')
+
+    def test_also_line_truncates_whole_names_with_a_count(self):
+        names_ = [f'UMaterialExpressionSomethingVeryLongName{i:03d}_VFT' for i in range(80)]
+        line = uei._also_line(names_, 0)
+        self.assertLessEqual(len(line.encode('utf-8')), uei._COMMENT_BYTE_LIMIT)
+        self.assertRegex(line, r'\(\+\d+ more\)$')
+        self.assertEqual(uei._also_line(names_, 0), line)  # deterministic
+
+    def test_many_duplicate_vtable_names_stay_under_the_ida_cap(self):
+        n = 80
+        objects = [_obj(0, 0x1000, outer_index=-1, name=PKG)]
+        classes = []
+        for i in range(n):
+            ci = 2 * i + 1
+            letter = f'SomeVeryLongReflectedClassName{i:03d}'
+            objects.append(_obj(ci, 0x2000 + i, name=letter))
+            objects.append(_obj(ci + 1, 0x3000 + i, flags=EObjectFlags.ClassDefaultObject,
+                                 class_index=ci, vtable_rva=0x4000, name=f'Default__{letter}'))
+            classes.append(_cls(letter))
+        table = model.ObjectTable(objects)
+        with tempfile.TemporaryDirectory() as root:
+            partial = write_snapshot(os.path.join(root, 'snap'), {}, {}, list(table), classes, [])['partial']
+            folder = partial[:-len('.partial')]
+            os.rename(partial, folder)
+            with uei.load_snapshot(folder) as view:
+                p = uei.plan(view)
+        _rva, text, _is_exec = next(c for c in p['comments'] if c[0] == 0x4000)
+        self.assertLessEqual(len(text.encode('utf-8')), uei._COMMENT_BYTE_LIMIT)
 
 
 def _newest_snapshot(ours: str) -> str | None:

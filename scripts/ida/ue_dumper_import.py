@@ -27,6 +27,7 @@ _NETNODE = '$ nylib.ue.import'
 _TYPE_MARK = 'nylib.ue: '
 _COMMENT_MARK = 'UFunction '
 _ALSO_MARK = 'also: '
+_COMMENT_BYTE_LIMIT = 1020  # IDA 9.3 silently truncates a repeatable comment past ~1024 bytes
 _TAG = '[ue_dumper_import]'
 _GLOBALS = ('GObjects', 'GNames', 'GWorld', 'ProcessEvent', 'AppendString')
 _GLOBAL_IDA_NAMES = {'GObjects': 'GObjects', 'GNames': 'GNames', 'GWorld': 'GWorld',
@@ -1608,6 +1609,26 @@ def _comment_lines(planner: _TypePlanner, fn: dict) -> list:
             f"({', '.join(params)}) -> {ret}"]
 
 
+def _also_line(names: list, used: int) -> str:
+    """'also: n1, n2, ...', whole names only, dropped from the end with a '(+N more)' marker so the line
+    plus `used` other bytes of the same comment stays inside IDA's cap (R2; never splits a name mid-character).
+    """
+    budget = max(0, _COMMENT_BYTE_LIMIT - used)
+    full = _ALSO_MARK + ', '.join(names)
+    if len(full.encode('utf-8')) <= budget:
+        return full
+    lo, hi, best = 0, len(names), ''
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        omitted = len(names) - mid
+        line = _ALSO_MARK + ', '.join(names[:mid]) + (f' (+{omitted} more)' if omitted else '')
+        if len(line.encode('utf-8')) <= budget:
+            best, lo = line, mid + 1
+        else:
+            hi = mid - 1
+    return best
+
+
 def _check_options(types, roots):
     if types not in ('all', 'referenced', 'none'):
         raise ValueError(f"types must be 'all', 'referenced' or 'none', got {types!r}")
@@ -1649,11 +1670,14 @@ def plan(view: SnapshotView, *, types='all', roots=(), exec_names=True, vtables=
     for rva, ns in by_rva.items():
         also = ns[1:] + [n for n, _f, _c in dups.get(rva, ())]
         if also:
-            notes[rva] = [_ALSO_MARK + ', '.join(also)]
+            notes[rva] = [_also_line(also, 0)]
     if comments:
         for rva, fn in exec_fn.items():
             also = [n for n in by_rva.get(rva, [])[1:]] + [n for n, _f, _c in dups.get(rva, ())]
-            notes[rva] = _comment_lines(planner, fn) + ([_ALSO_MARK + ', '.join(also)] if also else [])
+            lines = _comment_lines(planner, fn)
+            if also:
+                lines = lines + [_also_line(also, len('\n'.join(lines).encode('utf-8')) + 1)]
+            notes[rva] = lines
     comment_plan = [(rva, _text('\n'.join(lines)), rva in exec_fn and comments) for rva, lines in notes.items()]
     globals_plan, skipped = [], []
     if global_names:
