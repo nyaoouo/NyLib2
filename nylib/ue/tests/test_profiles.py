@@ -411,12 +411,21 @@ class LoadHookTests(unittest.TestCase):
 class TomlDumpsTests(unittest.TestCase):
     def test_round_trip_various_values(self):
         t = {
-            'a': {'b': True, 'c': False, 'd': 0, 'e': 0x1F, 'f': -5, 'g': 'hi "there"\nnewline\\back', 'h': {}, 'i': {'x': 1}},
+            'a': {
+                'b': True, 'c': False, 'd': 0, 'e': 0x1F, 'f': -5,
+                'g': 'hi "there"\nnewline\\back\t\b\f\r\x00\x1f\x7fé中\U0001F600',
+                'h': {}, 'i': {'x': 1, 'y': {'z': 2}}, 'k.dotted': 2,
+            },
             'j': {},
         }
         dumped = toml_dumps(t, header=('line one', 'line two'), comments={'a': ('note one', 'note two')})
         self.assertTrue(dumped.endswith('\n'))
         self.assertNotIn('\r', dumped)
+        self.assertEqual(tomllib.loads(dumped), t)
+
+    def test_round_trip_quoted_table_names(self):  # M5: table names were never quoted
+        t = {'b.c': {'k': 1}, 'has space': {'x': 2}}
+        dumped = toml_dumps(t)
         self.assertEqual(tomllib.loads(dumped), t)
 
     def test_bare_vs_quoted_keys(self):
@@ -470,12 +479,23 @@ class TomlDumpsTests(unittest.TestCase):
 
 class RenderProfileTests(unittest.TestCase):
     def test_round_trip_both_pins(self):
-        pins = [Pin('gobjects', rva=0x1000, build=0x2000), Pin('gnames', rva=0x3000, build=0x2000)]
+        pins = [
+            Pin('gobjects', rva=0x1000, build=0x2000, image_size=0x5000, elements_per_chunk=0x100,
+                layout=(0, 4, 8, 12, 16)),
+            Pin('gnames', rva=0x3000, build=0x2000, image_size=0x5000),
+            Pin('process_event', index=5),
+        ]
         when = datetime.datetime(2026, 9, 30, 14, 2)
         text = render_profile('Lyra-Win64-Shipping.exe', 'LyraStarterGame', pins, when=when)
         p = parse_profile(text)
         self.assertEqual(p.exe, 'Lyra-Win64-Shipping.exe')
         self.assertEqual(p.pins, {pin.name: pin for pin in pins})
+
+    def test_game_name_newline_cannot_add_pins(self):  # M4
+        game_name = 'X\n[globals.gnames]\nrva = 0x1234\nbuild = 0x1\n#'
+        text = render_profile('A.exe', game_name, [], when=datetime.datetime(2026, 1, 1))
+        p = parse_profile(text)
+        self.assertEqual(p.pins, {})
 
     def test_round_trip_sig_pin_and_no_pins(self):
         pins = [Pin('gnames', sig='48 8D 0D * * * *', note='ctor')]

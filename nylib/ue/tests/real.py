@@ -427,8 +427,13 @@ def capture_target(session: Session):
     pid = next(p['pid'] for p in session.data['processes'] if p['role'] == 'shipping')
 
     def factory(target, *, write, remote_calls, cache_bytes) -> pipeline.OpenedTarget:
+        assert not write and not remote_calls  # the pipeline must stay read-only
         image = ImageSource.load(os.path.join(session.dir, 'capture.zip'),
                                   max_resident_bytes=cache_bytes or CAPTURE_RESIDENT_BYTES)
-        info = pipeline.target_info(image, mode='capture', pid=pid)
+        try:
+            info = pipeline.target_info(image, mode='capture', pid=pid)
+        except Exception:
+            image.close()
+            raise
         return pipeline.OpenedTarget(image, info, None, None, image.close)
     return factory

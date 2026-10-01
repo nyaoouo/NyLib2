@@ -311,8 +311,10 @@ def open_target(target=None, *, write: bool = False, remote_calls: bool = False,
 def _rva_pin(prof, name: str, pin, info: TargetInfo, warnings: list):
     if pin.build != info.pe_timestamp or (pin.image_size is not None and pin.image_size != info.size_of_image):
         built = f'{pin.build:#x}' + (f' / {pin.image_size:#x}' if pin.image_size is not None else '')
-        warnings.append(f'profile {prof.path}: [globals] {name} is pinned for build {built}; '
-                         f'the target is {info.pe_timestamp:#x} / {info.size_of_image:#x}; ignored')
+        msg = (f'profile {prof.path}: [globals] {name} is pinned for build {built}; '
+               f'the target is {info.pe_timestamp:#x} / {info.size_of_image:#x}; ignored')
+        warnings.append(msg)
+        logger.warning(msg)
         return None
     if pin.rva >= info.size_of_image:
         raise errors.ProfileError(prof.path, f'[globals] {name} rva {pin.rva:#x} lies outside the image '
@@ -465,7 +467,9 @@ def probe_opened(opened: OpenedTarget, *, profile=None, out_root=None) -> ProbeR
     if prof is not None:
         note = 'explicit'
         if prof.exe is not None and prof.exe.casefold() != info.exe.casefold():
-            warnings.append(f'profile {prof.path} is for {prof.exe}; the target is {info.exe}')
+            msg = f'profile {prof.path} is for {prof.exe}; the target is {info.exe}'
+            warnings.append(msg)
+            logger.warning(msg)
     elif out_root is not None:
         matches = profiles.find_profiles(out_root, info.exe)
         if not matches:
@@ -480,15 +484,17 @@ def probe_opened(opened: OpenedTarget, *, profile=None, out_root=None) -> ProbeR
         note = ('profiles not searched (no output root inside the game)' if info.mode == 'internal'
                 else 'profiles not searched')
 
-    pins = _resolve_pins(prof, info, opened, warnings) if prof is not None else None
-
-    from .engine.core import Engine
-    e = Engine(opened.source)
+    e = None
     steps, context, error = [], None, None
     try:
+        pins = _resolve_pins(prof, info, opened, warnings) if prof is not None else None
+        from .engine.core import Engine
+        e = Engine(opened.source)
         context = _run_bootstrap(e, prof, pins, steps)
     except errors.DetectionError as err:
         error = err
+    except errors.ProfileError:
+        raise
     except KeyboardInterrupt:
         raise
     except Exception as err:
@@ -530,7 +536,7 @@ def probe(target=None, *, profile=None, out=None, cache_bytes=None, _open_target
         root = store.resolve_out_root(out, internal=target is None)
     except errors.OutputRootError:
         root = None  # P20: an internal probe without a root still runs
-    prof = _check_profile(profile)  # loaded before the target is opened (G7.3-adjacent ordering)
+    prof = _check_profile(profile)  # loaded before the target is opened
     opened = (_open_target or open_target)(target, write=False, remote_calls=False, cache_bytes=cache_bytes)
     try:
         return probe_opened(opened, profile=prof, out_root=root)
@@ -554,7 +560,7 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_EXPORTS, log_fi
             raise ValueError(f'unknown export format {fmt!r}')
         if fmt not in fmts:
             fmts.append(fmt)
-    if 'usmap' in fmts:  # before anything else: walking for minutes and then failing serves no one
+    if 'usmap' in fmts:  # reject before opening the target
         raise NotImplementedError('the usmap writer is not implemented yet')
     if log_file is not None and not isinstance(log_file, (str, os.PathLike)):
         raise TypeError(f'log_file must be str, os.PathLike or None, got {type(log_file).__name__}')
@@ -629,7 +635,9 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_EXPORTS, log_fi
                 raise errors.UeError(f'{wr.unreadable:,} of {wr.walked:,} objects ({share:.1%}) could not be read; '
                                      f'the snapshot was left in {folder}.partial')
             if share > UNREADABLE_WARN:
-                warning_list.append(f'{wr.unreadable:,} of {wr.walked:,} objects ({share:.1%}) could not be read')
+                msg = f'{wr.unreadable:,} of {wr.walked:,} objects ({share:.1%}) could not be read'
+                warning_list.append(msg)
+                logger.warning(msg)
 
             paths = store.publish(folder, fmts)
             if progress is not None:

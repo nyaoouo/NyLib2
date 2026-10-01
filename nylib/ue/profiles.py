@@ -300,6 +300,11 @@ def _dump_basic_string(s: str) -> str:
     return '"' + ''.join(out) + '"'
 
 
+def _sanitize_comment_text(s: str) -> str:
+    """Replace control characters so a value cannot inject extra lines into a raw `#` comment."""
+    return ''.join(' ' if ord(ch) < 0x20 or ch == '\x7f' else ch for ch in s)
+
+
 def _dump_key(k) -> str:
     if not isinstance(k, str):
         raise TypeError(f'key must be str, got {type(k).__name__}')
@@ -335,7 +340,7 @@ def toml_dumps(tables: dict, *, header=(), comments=None) -> str:
         body = tables[name]
         if not isinstance(body, dict):
             raise TypeError(f'[{name}] must be a mapping, got {type(body).__name__}')
-        lines.append(f'[{name}]')
+        lines.append(f'[{_dump_key(name)}]')
         for line in comments.get(name, ()):
             if '\n' in line or '\r' in line:
                 raise ValueError(f'comment line for [{name}] must not contain a newline')
@@ -378,7 +383,7 @@ def render_profile(exe: str, game_name: str, pins, *, when: datetime.datetime) -
         by_name[pin.name] = pin
 
     lines = [
-        f'# nylib.ue profile for {game_name}',
+        f'# nylib.ue profile for {_sanitize_comment_text(game_name)}',
         '# Written by "nylib.ue probe --write-profile" on ' + when.strftime('%Y-%m-%d %H:%M') + '; edit freely.',
         '# Values here replace automatic detection. A profile can never enable remote calls.',
         '',
@@ -403,7 +408,7 @@ def render_profile(exe: str, game_name: str, pins, *, when: datetime.datetime) -
         '# "UStruct.MinAlignment" = 0x5C',
         '',
         '[hooks]',
-        '# FILE:FUNC relative to this file; runs locally (in the dumper, or in the game with --inject)',
+        '# FILE beside the profile; the hook runs in the process that runs the dump, which is inside the game in internal mode',
         '# decrypt_objects = "hooks.py:decrypt_objects"',
     ]
     return '\n'.join(lines) + '\n'
@@ -415,11 +420,12 @@ def write_profile_file(path, text: str) -> str:
     if not isinstance(text, str):
         raise TypeError(f'text must be str, got {type(text).__name__}')
     path = os.fspath(path)
-    if os.path.exists(path):
-        raise FileExistsError(path)
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    with open(path, 'w', encoding='utf-8', newline='\n') as f:
-        f.write(text)
+    try:
+        with open(path, 'x', encoding='utf-8', newline='\n') as f:
+            f.write(text)
+    except FileExistsError:
+        raise FileExistsError(path) from None
     return path

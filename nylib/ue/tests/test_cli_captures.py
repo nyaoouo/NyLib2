@@ -122,12 +122,13 @@ class CaptureCliTests(unittest.TestCase):
                 print(f'[{session.target}] stem check skipped: fallback used '
                       f'(game_name_from={game_name_from!r}, engine_version_from={engine_version_from!r})')
 
-            code, stdout, _ = _run_cli(['info', snapshot_path, '--json'])
+            code, stdout, _ = _run_cli(['info', snapshot_path, '--json', '--log-file', os.path.join(out2, 'info.log')])
             self.assertEqual(code, 0, stdout)
             self.assertTrue(_one_json_doc(stdout)['ok'])
 
             export_out = os.path.join(out2, 'x.idmap')
-            code, stdout, _ = _run_cli(['export', snapshot_path, '--format', 'idmap', '--out', export_out])
+            code, stdout, _ = _run_cli(['export', snapshot_path, '--format', 'idmap', '--out', export_out,
+                                        '--log-file', os.path.join(out2, 'export.log')])
             self.assertEqual(code, 0, stdout)
             with open(export_out, 'rb') as f:
                 exported_bytes = f.read()

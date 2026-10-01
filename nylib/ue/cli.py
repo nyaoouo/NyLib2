@@ -1,9 +1,4 @@
-"""`nylib.ue` command-line shell (I4): argument parsing, logging scope, exit codes.
-
-`info` and `export` are fully implemented here (7-a2). `list`, `probe` and `dump` do their
-usage-level checks (so a bad invocation fails the same way before and after 7-b lands) and then
-lazily import `.pipeline`, which 7-b adds; their result rendering is completed there too.
-"""
+"""`nylib.ue` command-line shell (I4): argument parsing, logging scope, exit codes."""
 import argparse
 import dataclasses
 import importlib.metadata
@@ -54,6 +49,12 @@ def _target_arg(raw: str):
     return int(raw) if _PID_RE.fullmatch(raw) else raw
 
 
+def _nonempty(raw: str) -> str:
+    if raw == '':
+        raise argparse.ArgumentTypeError('must not be empty')
+    return raw
+
+
 def _split_list(raw: str) -> list:
     return [x for x in (p.strip() for p in raw.split(',')) if x]
 
@@ -89,18 +90,21 @@ def _build_parser() -> argparse.ArgumentParser:
         g = sp.add_mutually_exclusive_group()
         g.add_argument('-v', action='store_true', dest='verbose', help='debug output on stderr')
         g.add_argument('-q', action='store_true', dest='quiet', help='warnings only on stderr')
-        sp.add_argument('--log-file', dest='log_file', default=None, help='default: <out>/_logs/<command>.log')
+        sp.add_argument('--log-file', dest='log_file', default=None, type=_nonempty,
+                        help='default: <out>/_logs/<command>.log')
 
     pl = sub.add_parser('list', help='list running processes that look like Unreal Engine games')
-    pl.add_argument('--out', dest='out', default=None, help='output root (default: .\\ue_dumps or env NYLIB_UE_OUT)')
+    pl.add_argument('--out', dest='out', default=None, type=_nonempty,
+                    help='output root (default: .\\ue_dumps or env NYLIB_UE_OUT)')
     pl.add_argument('--json', action='store_true')
     common(pl)
     pl.set_defaults(func=_cmd_list)
 
     pp = sub.add_parser('probe', help='detect globals, layouts and offsets only; --write-profile saves them')
-    pp.add_argument('target')
+    pp.add_argument('target', type=_nonempty)
     pp.add_argument('--profile', dest='profile', default=None, help='game profile (TOML) with pinned values')
-    pp.add_argument('--out', dest='out', default=None, help='output root (default: .\\ue_dumps or env NYLIB_UE_OUT)')
+    pp.add_argument('--out', dest='out', default=None, type=_nonempty,
+                    help='output root (default: .\\ue_dumps or env NYLIB_UE_OUT)')
     pp.add_argument('--explain', action='store_true', help="Dumper-7's own console messages")
     pp.add_argument('--write-profile', dest='write_profile', action='store_true')
     pp.add_argument('--json', action='store_true')
@@ -108,9 +112,10 @@ def _build_parser() -> argparse.ArgumentParser:
     pp.set_defaults(func=_cmd_probe)
 
     pd = sub.add_parser('dump', help='probe, walk reflection, write a snapshot and the default exports')
-    pd.add_argument('target')
+    pd.add_argument('target', type=_nonempty)
     pd.add_argument('--profile', dest='profile', default=None)
-    pd.add_argument('--out', dest='out', default=None, help='output root (default: .\\ue_dumps or env NYLIB_UE_OUT)')
+    pd.add_argument('--out', dest='out', default=None, type=_nonempty,
+                    help='output root (default: .\\ue_dumps or env NYLIB_UE_OUT)')
     pd.add_argument('--exports', dest='exports', default=None,
                      help='formats written after the snapshot: idmap, gobjects, gobjects-props, usmap '
                           '(default: idmap,gobjects,gobjects-props; "none" writes the snapshot only)')
@@ -124,7 +129,8 @@ def _build_parser() -> argparse.ArgumentParser:
     pe.add_argument('snapshot')
     pe.add_argument('--format', dest='format', required=True, choices=sorted(_EXPORT_NAMES),
                      help='idmap, gobjects, gobjects-props, usmap (not implemented yet)')
-    pe.add_argument('--out', dest='out', default=None, help='output file (default: the format\'s place in the snapshot)')
+    pe.add_argument('--out', dest='out', default=None, type=_nonempty,
+                    help='output file (default: the format\'s place in the snapshot)')
     common(pe)
     pe.set_defaults(func=_cmd_export)
 
@@ -147,8 +153,10 @@ class _StderrFormatter(logging.Formatter):
         return msg
 
 
-def _with_logging(log_file: str, verbose: bool, quiet: bool, body):
-    """Attach `nylib.ue`'s file+stderr handlers for one call, run `body(logger)`, restore state after."""
+def _with_logging(log_file: str, verbose: bool, quiet: bool, body, *, json_mode: bool, target):
+    """Attach `nylib.ue`'s file+stderr handlers for one call, run `body(logger)`, restore state after.
+    `body` is the outermost boundary (rules §4c): KeyboardInterrupt and any other exception it raises
+    are handled here, while the handlers are still attached."""
     logger = logging.getLogger('nylib.ue')
     prev_level, prev_propagate, prev_handlers = logger.level, logger.propagate, list(logger.handlers)
     try:
@@ -170,7 +178,17 @@ def _with_logging(log_file: str, verbose: bool, quiet: bool, body):
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
     try:
-        return body(logger)
+        try:
+            return body(logger)
+        except KeyboardInterrupt as e:
+            logger.debug('KeyboardInterrupt', exc_info=True)
+            if json_mode:
+                _print_json({'ok': False, 'error': {'type': 'KeyboardInterrupt', 'message': str(e), 'exit': 130}})
+            else:
+                print('interrupted', file=sys.stderr)
+            return 130
+        except Exception as e:
+            return _finish_error(e, json_mode, target=target, log_file=log_file, logger=logger)
     finally:
         logger.removeHandler(file_handler)
         logger.removeHandler(stream_handler)
@@ -330,6 +348,48 @@ def _finish_error(e: Exception, json_mode: bool, *, target, log_file: str, logge
     return exit_code
 
 
+def _print_early_error(message: str, json_mode: bool, exit_code: int, *, err_type='NotImplementedError') -> int:
+    """A usage-level failure before logging is set up (M2): still one JSON document under --json."""
+    if json_mode:
+        _print_json({'ok': False, 'error': {'type': err_type, 'message': message, 'exit': exit_code}})
+    else:
+        print(f'error: {message}', file=sys.stderr)
+    return exit_code
+
+
+def _make_dump_progress(version: str):
+    """I4 dump progress: header/profile/[n/3] INFO lines on `nylib.ue.cli`, each with its own elapsed seconds."""
+    cli_logger = logging.getLogger('nylib.ue.cli')
+    t0 = time.perf_counter()
+
+    def progress(event, payload):
+        nonlocal t0
+        if event == 'walk':  # per-object ticks inside step 2 must not restart its clock
+            return
+        now = time.perf_counter()
+        elapsed, t0 = now - t0, now
+        if event == 'open':
+            cli_logger.info('%s %s · dump · %s (pid %s) · %s · read-only', PROG, version, payload.exe, payload.pid, payload.mode)
+        elif event == 'probe':
+            report = payload
+            if report.profile:
+                cli_logger.info('profile  %s (%s)', report.profile, report.profile_note)
+            else:
+                cli_logger.info('profile  %s', report.profile_note)
+            names = ', '.join(report.unverified) if report.unverified else '-'
+            cli_logger.info('[1/3] probe ok %d values (%d unverified: %s) (%.1fs)',
+                            len(report.values), len(report.unverified), names, elapsed)
+        elif event == 'snapshot':
+            c = payload
+            cli_logger.info('[2/3] snapshot ok %s · %s · %s · %s · %s · %s (%.1fs)',
+                            c.get('classes'), c.get('structs'), c.get('enums'), c.get('functions'),
+                            c.get('packages'), c.get('objects'), elapsed)
+        elif event == 'exports':
+            cli_logger.info('[3/3] exports ok %s (%.1fs)', ','.join(payload), elapsed)
+
+    return progress
+
+
 # --------------------------------------------------------------------------------------------
 # info (full)
 # --------------------------------------------------------------------------------------------
@@ -388,7 +448,7 @@ def _cmd_info(args, _open_target=None) -> int:
                 print(line)
         return 0
 
-    return _with_logging(log_file, args.verbose, args.quiet, body)
+    return _with_logging(log_file, args.verbose, args.quiet, body, json_mode=args.json, target=args.snapshot)
 
 
 # --------------------------------------------------------------------------------------------
@@ -428,24 +488,23 @@ def _cmd_export(args, _open_target=None) -> int:
         print(f'{args.format} · {size:,} bytes · {seconds:.1f}s')
         return 0
 
-    return _with_logging(log_file, args.verbose, args.quiet, body)
+    return _with_logging(log_file, args.verbose, args.quiet, body, json_mode=False, target=args.snapshot)
 
 
 # --------------------------------------------------------------------------------------------
-# list / probe / dump: usage-level checks are real; result rendering lands with 7-b's pipeline.py
+# list / probe / dump
 # --------------------------------------------------------------------------------------------
 
 def _cmd_list(args, _open_target=None) -> int:
     try:
         root = store_mod.resolve_out_root(args.out)
     except errors.UeError as e:
-        print(f'error: {e}', file=sys.stderr)
-        return 1
+        return _finish_error(e, args.json, target=args.out, log_file=args.log_file, logger=None)
     log_file = args.log_file or os.path.join(root, store_mod.LOGS_DIR, 'list.log')
 
     def body(logger):
         try:
-            from . import pipeline  # lazy: lands with 7-b (fan-out rule)
+            from . import pipeline  # lazy import: cli avoids pipeline at module load
             rows = pipeline.list_targets(out=args.out)
         except Exception as e:
             return _finish_error(e, args.json, target=None, log_file=log_file, logger=logger)
@@ -454,49 +513,50 @@ def _cmd_list(args, _open_target=None) -> int:
         else:
             print(f'{"pid":<6} {"process":<34} {"engine hint":<20} profile')
             for r in rows:
-                prof = f'{r.profile} ({r.profile_status})' if r.profile else '-'
+                if r.profile:
+                    prof = f'{r.profile} ({r.profile_status})'
+                elif r.profile_status != '-':
+                    prof = r.profile_status
+                else:
+                    prof = '-'
                 print(f'{r.pid:<6} {r.exe:<34} {r.engine_hint or "-":<20} {prof}')
         return 0
 
-    return _with_logging(log_file, args.verbose, args.quiet, body)
+    return _with_logging(log_file, args.verbose, args.quiet, body, json_mode=args.json, target=None)
 
 
 def _cmd_probe(args, _open_target=None) -> int:
     try:
         root = store_mod.resolve_out_root(args.out)
     except errors.UeError as e:
-        print(f'error: {e}', file=sys.stderr)
-        return 1
+        return _finish_error(e, args.json, target=args.out, log_file=args.log_file, logger=None)
     log_file = args.log_file or os.path.join(root, store_mod.LOGS_DIR, 'probe.log')
 
     def body(logger):
+        cli_logger = logging.getLogger('nylib.ue.cli')
         try:
-            from . import pipeline  # lazy: lands with 7-b (fan-out rule)
+            from . import pipeline  # lazy import: cli avoids pipeline at module load
             report = pipeline.probe(_target_arg(args.target), profile=args.profile, out=args.out,
                                      _open_target=_open_target)
         except Exception as e:
             return _finish_error(e, args.json, target=args.target, log_file=log_file, logger=logger)
-
-        written, pin_names = None, ()
-        if args.write_profile:
-            try:
-                written, pin_names = pipeline.write_profile(report, out=args.out)
-            except FileExistsError as e:  # F7.1 = A
-                logger.debug('%s: %s', type(e).__name__, e, exc_info=True)
-                path = e.args[0] if e.args else str(e)
-                message = f'{path} exists; merge the lines above by hand, or move it away and run again'
-                if args.json:
-                    _print_json({'ok': False, 'error': {'type': 'FileExistsError', 'message': message, 'exit': 1}})
-                else:
-                    text = getattr(e, 'profile_text', None)
-                    if text is not None:
-                        print(text, end='' if text.endswith('\n') else '\n')
-                    print(f'error: {message}', file=sys.stderr)
-                return 1
-            except Exception as e:
-                return _finish_error(e, args.json, target=args.target, log_file=log_file, logger=logger)
+        for w in report.warnings:
+            cli_logger.warning(w)
+        cli_logger.info('done in %.1fs', report.seconds)
 
         if args.json:
+            written, pin_names = None, ()
+            if args.write_profile:
+                try:
+                    written, pin_names = pipeline.write_profile(report, out=args.out)
+                except FileExistsError as e:  # F7.1 = A
+                    logger.debug('%s: %s', type(e).__name__, e, exc_info=True)
+                    path = e.args[0] if e.args else str(e)
+                    message = f'{path} exists; merge the lines above by hand, or move it away and run again'
+                    _print_json({'ok': False, 'error': {'type': 'FileExistsError', 'message': message, 'exit': 1}})
+                    return 1
+                except Exception as e:
+                    return _finish_error(e, args.json, target=args.target, log_file=log_file, logger=logger)
             _print_json(_probe_json_doc(report, written))
             return 0 if report.ok else 3
 
@@ -522,12 +582,27 @@ def _cmd_probe(args, _open_target=None) -> int:
             print(f'error: {report.error}', file=sys.stderr)
             for line in _detection_fix_lines(report.error, args.target):
                 print(line, file=sys.stderr)
-        if written:
+
+        if args.write_profile:  # F7.1 = A: the report above is printed either way
+            try:
+                written, pin_names = pipeline.write_profile(report, out=args.out)
+            except FileExistsError as e:
+                logger.debug('%s: %s', type(e).__name__, e, exc_info=True)
+                path = e.args[0] if e.args else str(e)
+                message = f'{path} exists; merge the lines above by hand, or move it away and run again'
+                text = getattr(e, 'profile_text', None)
+                if text is not None:
+                    print(text, end='' if text.endswith('\n') else '\n')
+                print(f'error: {message}', file=sys.stderr)
+                return 1
+            except Exception as e:
+                return _finish_error(e, args.json, target=args.target, log_file=log_file, logger=logger)
             print(f'wrote {written} ({len(pin_names)} globals pinned for build {_hex(report.target.pe_timestamp)}; '
                   'offsets stay automatic)')
+
         return 0 if report.ok else 3
 
-    return _with_logging(log_file, args.verbose, args.quiet, body)
+    return _with_logging(log_file, args.verbose, args.quiet, body, json_mode=args.json, target=args.target)
 
 
 def _cmd_dump(args, _open_target=None) -> int:
@@ -538,32 +613,33 @@ def _cmd_dump(args, _open_target=None) -> int:
         except ValueError as e:
             print(f'{PROG} dump: error: {e}', file=sys.stderr)
             return 2
-    if 'usmap' in exports:  # before importing or calling the pipeline (walking takes minutes)
-        print('error: the usmap writer is not implemented yet', file=sys.stderr)
-        return 1
+    if 'usmap' in exports:  # reject before opening the target
+        return _print_early_error('the usmap writer is not implemented yet', args.json, 1)
     if args.allow_calls is not None:
         try:
             _parse_allow_calls(args.allow_calls)
         except ValueError as e:
             print(f'{PROG} dump: error: {e}', file=sys.stderr)
             return 2
-        print('error: --allow-calls is not implemented yet', file=sys.stderr)
-        return 1
+        return _print_early_error('--allow-calls is not implemented yet', args.json, 1)
 
     try:
         root = store_mod.resolve_out_root(args.out)
     except errors.UeError as e:
-        print(f'error: {e}', file=sys.stderr)
-        return 1
+        return _finish_error(e, args.json, target=args.out, log_file=args.log_file, logger=None)
     log_file = args.log_file or os.path.join(root, store_mod.LOGS_DIR, 'dump.log')
 
     def body(logger):
+        cli_logger = logging.getLogger('nylib.ue.cli')
         try:
-            from . import pipeline  # lazy: lands with 7-b (fan-out rule)
+            from . import pipeline  # lazy import: cli avoids pipeline at module load
             result = pipeline.dump(_target_arg(args.target), profile=args.profile, out=args.out, exports=exports,
-                                    log_file=log_file, _open_target=_open_target)
+                                    progress=_make_dump_progress(_package_version()), _open_target=_open_target)
         except Exception as e:
             return _finish_error(e, args.json, target=args.target, log_file=log_file, logger=logger)
+        for w in result.warnings:
+            cli_logger.warning(w)
+        cli_logger.info('done in %.1fs', result.seconds)
         if args.json:
             _print_json({'ok': True, 'snapshot': result.path, 'mode': result.target.mode,
                          'seconds': round(result.seconds, 1), 'counts': result.counts,
@@ -573,7 +649,7 @@ def _cmd_dump(args, _open_target=None) -> int:
             print(result.path)
         return 0
 
-    return _with_logging(log_file, args.verbose, args.quiet, body)
+    return _with_logging(log_file, args.verbose, args.quiet, body, json_mode=args.json, target=args.target)
 
 
 def main(argv=None, *, _open_target=None) -> int:
