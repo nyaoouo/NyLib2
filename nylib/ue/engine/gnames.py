@@ -67,6 +67,7 @@ class NameArray:
         self._GetStr = None
         self._memo: dict[int, str] = {}
         self._memo_state = None
+        self._name_pool_sig_occurrence = 0
 
     def _rec(self, key: str, label: str) -> None:
         self.e.provenance[key] = label
@@ -328,8 +329,8 @@ class NameArray:
 
         return False  # DV3: ea0dab3 calls FName::GetNames() here
 
-    def try_find_name_pool_windows(self) -> bool:
-        """NameArray::TryFindNamePool_Windows @ ea0dab3."""
+    def try_find_name_pool_windows(self, start_after: int = 0x0) -> bool:
+        """NameArray::TryFindNamePool_Windows @ ea0dab3; start_after resumes the scan after a rejected candidate (K14)."""
         e, mem, p = self.e, self.e.mem, self.e.platform
         init_srw_lock_search_range = 0x50
         byte_property_search_range = 0x2A0
@@ -339,7 +340,7 @@ class NameArray:
         rtl_init_srw_lock_address = p.get_address_of_imported_function_from_any_module('ntdll.dll', 'RtlInitializeSRWLock')
 
         name_pool_intance = 0
-        sig_occurrence = 0x0
+        sig_occurrence = start_after
         while not name_pool_intance:
             if sig_occurrence > 0x0:
                 sig_occurrence += 0x1
@@ -374,6 +375,7 @@ class NameArray:
                     break
 
         if name_pool_intance:
+            self._name_pool_sig_occurrence = sig_occurrence
             e.off.InSDK.NameArray.GNames = _i32(p.get_offset(name_pool_intance))
             self._rec('Off.InSDK.NameArray.GNames', 'auto: NameArray::TryFindNamePool_Windows')
             return True
@@ -425,6 +427,15 @@ class NameArray:
 
         if self._commit(gnames_address, found_name_array, found_name_pool, label):
             return True
+
+        if found_name_pool:  # K14: retry the next candidate; keep the first one recorded if none is usable
+            first_gnames = e.off.InSDK.NameArray.GNames
+            while self.try_find_name_pool_windows(self._name_pool_sig_occurrence):
+                e.cerr(f"Found 'FNamePool GNames' at offset 0x{e.off.InSDK.NameArray.GNames:X}\n\n")
+                if self._commit(image_base + e.off.InSDK.NameArray.GNames, False, True, label):
+                    return True
+            e.off.InSDK.NameArray.GNames = first_gnames
+            self._rec('Off.InSDK.NameArray.GNames', 'auto: NameArray::TryFindNamePool_Windows')
 
         e.cerr("The address that was found couldn't be used by the generator, this might be due to GNames-encryption.\n\n")
         return False
