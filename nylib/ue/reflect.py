@@ -192,7 +192,7 @@ class Reflection:
 
     def _prop_type(self, prop: UEProperty, depth: int) -> PropType:
         if depth > _MAX_NESTING:
-            raise ValueError(f'property type nesting deeper than {_MAX_NESTING} at {prop.address:#x}')
+            raise MemoryReadError(prop.address, 0, f'property type nesting at {prop.address:#x} exceeds {_MAX_NESTING} levels')
         kind = kind_of(prop.get_cast_flags(), self.e.settings.Internal.bIsObjPtrInsteadOfFieldPathProperty)
         t = PropType(prop=prop.get_prop_class_name(), kind=kind)
         if kind in _CLASS_KINDS:

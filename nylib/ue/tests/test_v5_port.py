@@ -241,6 +241,49 @@ class PortRegressionTests(unittest.TestCase):
         finally:
             image.close()
 
+    def test_deep_property_nesting_is_unreadable(self):
+        from unittest import mock
+        from ..engine.core import Engine
+        from ..engine.unreal import UEArrayProperty, UEProperty
+        from ..errors import MemoryReadError
+        from ..flags import EClassCastFlags
+        from ..reflect import Reflection
+        from .pe_file import map_pe_file
+        image = map_pe_file(sys._base_executable)
+        try:
+            e = Engine(image)
+            prop = UEProperty(e, 0x1000)
+            with mock.patch.object(UEProperty, 'get_cast_flags', lambda self: EClassCastFlags.ArrayProperty), \
+                    mock.patch.object(UEProperty, 'get_prop_class_name', lambda self: 'ArrayProperty'), \
+                    mock.patch.object(UEArrayProperty, 'get_inner_property', lambda self: UEProperty(self.e, self.address)):
+                with self.assertRaises(MemoryReadError) as cm:
+                    Reflection(e, None).prop_type(prop)
+            self.assertEqual(cm.exception.address, prop.address)
+            self.assertIn('exceeds 8 levels', cm.exception.reason)
+        finally:
+            image.close()
+
+    def test_invalid_ansi_name_bytes_are_unreadable(self):
+        import struct
+        from ..engine.gnames import FNameEntry
+        from ..errors import MemoryReadError
+        base = 0x100000
+        data = bytearray(0x10)
+        struct.pack_into('<H', data, 0x0, 1 << 6)  # header: ANSI, length 1 at shift 6
+        data[0x2] = 0xA9
+        e = self._engine_with_segment(base, bytes(data))
+        try:
+            e.settings.Internal.bUseNamePool = True
+            e.off.FNameEntry.NamePool.HeaderOffset, e.off.FNameEntry.NamePool.StringOffset = 0x0, 0x2
+            e.names.FNameEntryLengthShiftCount = 6
+            e.names._GetStr = e.names._get_str_name_pool
+            with self.assertRaises(MemoryReadError) as cm:
+                FNameEntry(e, base).get_wstring()
+            self.assertEqual(cm.exception.address, base)
+            self.assertIn('not valid UTF-8', cm.exception.reason)
+        finally:
+            e.mem.close()
+
     def test_stem_skips_bad_candidate(self):
         import struct
         from ..capture import ImageSource

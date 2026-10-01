@@ -32,6 +32,13 @@ def _read_until_nul(mem, address: int, unit: int) -> bytes:
         pos = len(data) // unit * unit
 
 
+def _ansi_to_wstring(name_entry: int, data: bytes) -> str:
+    try:
+        return string_to_wstring(data)
+    except ValueError as err:  # DV19: DV12's invalid lead byte
+        raise MemoryReadError(name_entry, len(data), f'name entry bytes are not valid UTF-8: {err}') from err
+
+
 class FNameEntry:
     __slots__ = ('e', 'address')
 
@@ -165,7 +172,7 @@ class NameArray:
 
         if header_without_number & _NAME_WIDE_MASK:
             return mem.read(name_entry + pool.StringOffset, name_len * 2).decode('utf-16-le', 'surrogatepass')
-        return string_to_wstring(mem.read(name_entry + pool.StringOffset, name_len))
+        return _ansi_to_wstring(name_entry, mem.read(name_entry + pool.StringOffset, name_len))
 
     def _get_str_name_array(self, name_entry: int) -> str:
         mem, arr = self.e.mem, self.e.off.FNameEntry.NameArray
@@ -173,7 +180,7 @@ class NameArray:
         name_string = name_entry + arr.StringOffset
         if name_idx & _NAME_WIDE_MASK:
             return _read_until_nul(mem, name_string, 2).decode('utf-16-le', 'surrogatepass')
-        return string_to_wstring(_read_until_nul(mem, name_string, 1))
+        return _ansi_to_wstring(name_entry, _read_until_nul(mem, name_string, 1))
 
     # ByIndex variants
 
