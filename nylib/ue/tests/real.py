@@ -11,11 +11,13 @@ import os
 import pathlib
 import re
 
+from .. import pipeline
 from ..capture import ImageSource
 from ..pe import PeImage
 from .oracle import GObjectsDump, parse_gobjects_dump
 
 KNOWN_TARGETS = ('pal', 'ts', 'fb')
+CAPTURE_RESIDENT_BYTES = 1 << 30  # ImageSource.load's LRU cap for a capture-mode target (matches tests/port.py)
 TARGET_APPIDS = {'pal': 2394010, 'ts': 1850510, 'fb': 3649580}  # Steam appid bound to each known target
 REQUIRED_ORACLE_FILES = (
     'GObjects-Dump.txt', 'GObjects-Dump-WithProperties.txt',
@@ -415,3 +417,18 @@ def check_session(session: Session) -> None:
     for root, info in data['dumper7_folders'].items():
         if not info['unchanged']:
             raise AssertionError(f'dumper7_folders[{root!r}] changed during the session')
+
+
+def capture_target(session: Session):
+    """A `pipeline._open_target` factory (P17) over `session`'s capture.zip, shared by the 7-G
+    committed test and its scratch scripts. The returned factory ignores `target`."""
+    if not isinstance(session, Session):
+        raise TypeError(f'session must be a Session, got {type(session).__name__}')
+    pid = next(p['pid'] for p in session.data['processes'] if p['role'] == 'shipping')
+
+    def factory(target, *, write, remote_calls, cache_bytes) -> pipeline.OpenedTarget:
+        image = ImageSource.load(os.path.join(session.dir, 'capture.zip'),
+                                  max_resident_bytes=cache_bytes or CAPTURE_RESIDENT_BYTES)
+        info = pipeline.target_info(image, mode='capture', pid=pid)
+        return pipeline.OpenedTarget(image, info, None, None, image.close)
+    return factory
