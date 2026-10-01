@@ -2,6 +2,7 @@
 check, stdlib-only and copied-naming guards, and env-gated comparisons on real snapshots.
 """
 import ast
+import collections
 import importlib.util
 import os
 import pathlib
@@ -28,6 +29,11 @@ _R6_TYPES = frozenset((
 ))
 _ORACLE_GLOBALS = {'GObjects': 'OFFSET_GOBJECTS', 'GNames': 'OFFSET_GNAMES', 'GWorld': 'OFFSET_GWORLD',
                    'ProcessEvent': 'OFFSET_PROCESSEVENT', 'AppendString': 'OFFSET_APPENDSTRING'}
+
+
+def _ascii_ident(kind: str, name: str) -> str:
+    """Stand-in for IDA 9.3's `validate_name`: every non-ASCII code point becomes `_` (review-8 `fb.log`)."""
+    return re.sub(r'[^\x00-\x7f]', '_', name)
 
 
 def _load_importer():
@@ -285,6 +291,56 @@ class RealSnapshotTests(unittest.TestCase):
             with self.subTest(target=s.target, session=os.path.basename(s.dir)):
                 self._check(s, snap, port.ACCEPTED)
 
+    def _check_plan_audit(self, view, snapshot):
+        """The plan vs. the snapshot `Snapshot.load` reads, independent of the importer's own reader (review-8 I3)."""
+        full = uei.plan(view, ident=_ascii_ident)
+        tp = full['types']
+        self.assertEqual(tp['members_dropped'], 0)
+        udts_by_path = collections.defaultdict(list)
+        for u in tp['udts']:
+            if u['path'] is not None:
+                udts_by_path[u['path']].append(u)
+        enums_by_path = collections.defaultdict(list)
+        for e in tp['enums']:
+            if e['path'] is not None:
+                enums_by_path[e['path']].append(e)
+        class_struct = [r for r in snapshot.types() if isinstance(r, model.StructRecord)]
+        enum_recs = [r for r in snapshot.types() if isinstance(r, model.EnumRecord)]
+        for r in class_struct:
+            self.assertEqual(len(udts_by_path.get(r.path, ())), 1, f'{r.path}: planned UDTs')
+        self.assertEqual(tp['records'], len(class_struct))
+        for r in enum_recs:
+            self.assertEqual(len(enums_by_path.get(r.path, ())), 1, f'{r.path}: planned enums')
+        for r in class_struct:
+            us = udts_by_path.get(r.path)
+            if not us:
+                continue
+            by_lo = collections.defaultdict(set)
+            for _n, lo, nbits, _s in us[0]['members']:
+                by_lo[lo].add(nbits)
+            for p in r.properties:
+                bit = p.type.bit
+                if bit is not None and p.array_dim == 1:
+                    ok = 1 in by_lo.get(p.offset * 8 + bit, ())
+                else:
+                    ok = any(nb <= p.size * p.array_dim * 8 for nb in by_lo.get(p.offset * 8, ()))
+                # root Q49 (not yet answered) decides the stricter short-member / struct-alignment condition; left out here
+                self.assertTrue(ok, f'{r.path}: {p.name} @0x{p.offset:x} size 0x{p.size:x} not placed in the plan')
+        rec_by_cpp = collections.defaultdict(list)
+        for r in class_struct:
+            rec_by_cpp[r.cpp_name].append(r)
+        by_name = {u['name']: u for u in tp['udts']}
+        for (t, m), (off, sz) in uei.core_members(view).items():
+            u = by_name.get(t)
+            self.assertIsNotNone(u, f'{t}.{m}: core member with no planned type')
+            hit = any(mn == m and ml == off * 8 and mb == sz * 8 for mn, ml, mb, _s in u['members'])
+            if not hit:
+                rr = [r for r in rec_by_cpp.get(t, ()) if r.package == '/Script/CoreUObject']
+                self.assertTrue(rr and any(pp.offset == off for pp in rr[0].properties),
+                                f'{t}.{m} @0x{off:x}: not a planned member and no reflected property overrides it')
+        for _rva, ctext, _is_exec in full['comments']:
+            self.assertLessEqual(len(ctext.encode('utf-8')), uei._COMMENT_BYTE_LIMIT)
+
     def _check(self, s, snap: str, accepted: dict):
         oracle_dir = pathlib.Path(s.dir, 'oracle', s.data['oracle']['folder'])
         skip = {item for (target, check, item) in accepted if target == s.target and check == 'offsets'}
@@ -294,7 +350,7 @@ class RealSnapshotTests(unittest.TestCase):
             theirs = [rel for rel in s.data['oracle']['files'] if rel.startswith('IDAMappings/') and rel.endswith('.idmap')]
             drift = oracle.compare_idmap(records, oracle.parse_idmap(oracle_dir / theirs[0]))
             self.assertTrue(drift.ok, f'{drift.reason}: {drift.samples}')
-            self.assertEqual(uei.plan(view, ident=uei._plain_ident)['types']['members_dropped'], 0)
+            self._check_plan_audit(view, snapshot)
             text = lambda rel: (oracle_dir / rel).read_text(encoding='utf-8')
             want = {**oracle.parse_predefined_members(text('CppSDK/SDK/Basic.hpp')),
                     **oracle.parse_predefined_members(text('CppSDK/SDK/CoreUObject_classes.hpp'))}
