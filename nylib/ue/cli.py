@@ -185,6 +185,98 @@ def _print_json(doc: dict) -> None:
     print(json.dumps(doc, ensure_ascii=True, separators=(',', ':')))
 
 
+def _hex(value: int) -> str:
+    return f'-0x{-value:X}' if value < 0 else f'0x{value:X}'
+
+
+def _json_value(v):
+    """root §6: ints as hex strings, tuples as lists of hex strings; bool/str/None pass through."""
+    if isinstance(v, bool) or v is None or isinstance(v, str):
+        return v
+    if isinstance(v, int):
+        return _hex(v)
+    if isinstance(v, tuple):
+        return [_json_value(x) for x in v]
+    return v
+
+
+def _target_json(target) -> dict:
+    return {'mode': target.mode, 'pid': target.pid, 'exe': target.exe, 'exe_path': target.exe_path,
+            'exe_sha256': target.exe_sha256, 'module_base': _hex(target.module_base),
+            'size_of_image': _hex(target.size_of_image), 'pe_timestamp': _hex(target.pe_timestamp),
+            'file_version': target.file_version}
+
+
+def _probe_json_doc(report, written) -> dict:
+    return {
+        'ok': report.ok, 'target': _target_json(report.target), 'profile': report.profile,
+        'profile_note': report.profile_note,
+        'values': [{'name': v.name, 'key': v.key, 'value': _json_value(v.value), 'how': v.how, 'check': v.check,
+                    'unverified': v.unverified} for v in report.values],
+        'unverified': list(report.unverified), 'steps': list(report.steps), 'stem': report.stem,
+        'game_name': report.game_name, 'game_name_from': report.game_name_from,
+        'engine_version': report.engine_version, 'engine_version_from': report.engine_version_from,
+        'warnings': list(report.warnings), 'seconds': round(report.seconds, 1),
+        'error': None if report.error is None else
+        {'type': type(report.error).__name__, 'message': str(report.error), 'exit': 3},
+        'profile_written': written,
+    }
+
+
+_PROBE_GLOBAL_ROW_NAMES = ('GObjects', 'GNames', 'AppendString', 'ProcessEvent.Index', 'ProcessEvent', 'GWorld')
+
+_GNAMES_IDA_HINT = (
+    'the FNamePool constructor initialises an SRWLOCK and then references L"ByteProperty"; '
+    'the `lea rcx` before the call points at GNames; NySigWorker2 can turn that site into a signature.'
+)
+
+
+def _render_probe_value(v) -> str:
+    val = v.value
+    if val is None:
+        return '-'
+    if isinstance(val, bool):
+        return str(val)
+    if isinstance(val, int):
+        return _hex(val)
+    if isinstance(val, tuple):
+        return ', '.join(_hex(x) if isinstance(x, int) else str(x) for x in val)
+    return str(val)
+
+
+def _probe_header_lines(report, version: str) -> list:
+    t = report.target
+    lines = [
+        f'{PROG} {version} · probe · {t.exe} (pid {t.pid}) · {t.mode} · read-only',
+        f'build    pe {_hex(t.pe_timestamp)} / size {_hex(t.size_of_image)} · file {t.file_version or "-"}',
+        f'game     {report.game_name or "-"} ({report.game_name_from or "-"}) · '
+        f'engine {report.engine_version or "-"} ({report.engine_version_from or "-"})',
+    ]
+    if report.profile:
+        lines.append(f'profile  {report.profile} ({report.profile_note})')
+    else:
+        lines.append(f'profile  {report.profile_note}')
+    return lines
+
+
+def _probe_table_lines(report, verbose: bool) -> list:
+    """I4's `value | result | how | check` table: by default the six global rows, every unverified
+    row and every `profile:` row (original order, with the rest collapsed into `... N more`);
+    `-v` lists every row."""
+    if verbose:
+        shown, hidden = report.values, 0
+    else:
+        shown = [v for v in report.values
+                 if v.name in _PROBE_GLOBAL_ROW_NAMES or v.unverified or v.how.startswith('profile:')]
+        hidden = len(report.values) - len(shown)
+    lines = [f'{"value":<25} {"result":<17} {"how":<42} check']
+    for v in shown:
+        lines.append(f'{v.name:<25} {_render_probe_value(v):<17} {v.how:<42} {v.check}')
+    if hidden:
+        lines.append(f'... {hidden} more (-v lists every value)')
+    return lines
+
+
 def _pin_for_step(step: str):
     if step.startswith('ObjectArray::'):
         return 'gobjects'
@@ -382,23 +474,57 @@ def _cmd_probe(args, _open_target=None) -> int:
             from . import pipeline  # lazy: lands with 7-b (fan-out rule)
             report = pipeline.probe(_target_arg(args.target), profile=args.profile, out=args.out,
                                      _open_target=_open_target)
-            written = pipeline.write_profile(report, out=args.out)[0] if args.write_profile else None
         except Exception as e:
             return _finish_error(e, args.json, target=args.target, log_file=log_file, logger=logger)
+
+        written, pin_names = None, ()
+        if args.write_profile:
+            try:
+                written, pin_names = pipeline.write_profile(report, out=args.out)
+            except FileExistsError as e:  # F7.1 = A
+                logger.debug('%s: %s', type(e).__name__, e, exc_info=True)
+                path = e.args[0] if e.args else str(e)
+                message = f'{path} exists; merge the lines above by hand, or move it away and run again'
+                if args.json:
+                    _print_json({'ok': False, 'error': {'type': 'FileExistsError', 'message': message, 'exit': 1}})
+                else:
+                    text = getattr(e, 'profile_text', None)
+                    if text is not None:
+                        print(text, end='' if text.endswith('\n') else '\n')
+                    print(f'error: {message}', file=sys.stderr)
+                return 1
+            except Exception as e:
+                return _finish_error(e, args.json, target=args.target, log_file=log_file, logger=logger)
+
         if args.json:
-            _print_json({
-                'ok': report.ok, 'steps': list(report.steps), 'seconds': round(report.seconds, 1),
-                'profile_written': written,
-                'error': None if report.error is None else
-                {'type': type(report.error).__name__, 'message': str(report.error), 'exit': 3},
-            })
+            _print_json(_probe_json_doc(report, written))
+            return 0 if report.ok else 3
+
+        for line in _probe_header_lines(report, _package_version()):
+            print(line)
+        print()
+        for line in _probe_table_lines(report, args.verbose):
+            print(line)
+        if args.explain:
+            print()
+            for line in report.explanations:
+                print(line)
+            if report.error is not None and _pin_for_step(report.error.step) == 'gnames':
+                print(_GNAMES_IDA_HINT)
+        print()
+        if report.ok:
+            print(f'{len(report.values)} values found, {len(report.unverified)} unverified. No snapshot was written.')
+            print('Next:')
+            print(f'  {PROG} dump {args.target}')
+            print(f'  {PROG} probe {args.target} --write-profile    (pin these values for this game)')
         else:
-            if report.ok:
-                print(f'{len(report.values)} values found, {len(report.unverified)} unverified.')
-            else:
-                print(f'detection stopped at {report.error.step}; later steps did not run')
-            if written:
-                print(f'wrote {written}')
+            print(f'detection stopped at {report.error.step}; later steps did not run')
+            print(f'error: {report.error}', file=sys.stderr)
+            for line in _detection_fix_lines(report.error, args.target):
+                print(line, file=sys.stderr)
+        if written:
+            print(f'wrote {written} ({len(pin_names)} globals pinned for build {_hex(report.target.pe_timestamp)}; '
+                  'offsets stay automatic)')
         return 0 if report.ok else 3
 
     return _with_logging(log_file, args.verbose, args.quiet, body)
