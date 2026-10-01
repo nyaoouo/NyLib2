@@ -12,6 +12,7 @@ __pycache__/
 *$py.class
 *.dmp
 *.pdb
+*.pfx
 /nylib/pyimgui/
 /nylib/pyimgui*.pyd
 /nylib/winutils/python_loader/python_loader.dll
@@ -175,3 +176,4 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+.trash*/
