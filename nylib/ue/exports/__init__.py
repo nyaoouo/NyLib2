@@ -31,7 +31,7 @@ EXPORT_SPECS: dict[str, ExportSpec] = {
     'idmap': ExportSpec('idmap', lambda snap: f'IDAMappings/{_stem(snap)}.idmap', idmap.write),
     'usmap': ExportSpec('usmap', lambda snap: f'Mappings/{_stem(snap)}.usmap', usmap.write),
 }
-DEFAULT_EXPORTS = ('idmap', 'gobjects', 'gobjects-props')  # dump --exports default (P13)
+DEFAULT_EXPORTS = ('idmap', 'gobjects', 'gobjects-props')  # the snapshot exports of dump's default (P13); pipeline.DEFAULT_DUMP_EXPORTS adds 'image'
 
 
 def _spec(fmt: str) -> ExportSpec:

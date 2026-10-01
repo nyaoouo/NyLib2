@@ -20,6 +20,7 @@ from . import store as store_mod
 PROG = 'nylib.ue'
 _PID_RE = re.compile(r'\d+')
 _EXPORT_NAMES = frozenset({'idmap', 'gobjects', 'gobjects-props', 'usmap'})
+_DUMP_EXPORT_NAMES = _EXPORT_NAMES | frozenset({'image'})  # (7-c) dump --exports also takes image
 _ALLOW_CALLS_NAMES = frozenset({'append-string', 'game-info', 'text'})
 _ALLOW_CALLS_DEFAULT = 'append-string,game-info,text'
 
@@ -66,7 +67,7 @@ def _parse_exports(raw: str) -> tuple:
             raise ValueError('--exports: "none" cannot be combined with a format')
         return ()
     for x in items:
-        if x not in _EXPORT_NAMES:
+        if x not in _DUMP_EXPORT_NAMES:
             raise ValueError(f'--exports: unknown format {x!r}')
     return tuple(items)
 
@@ -117,8 +118,9 @@ def _build_parser() -> argparse.ArgumentParser:
     pd.add_argument('--out', dest='out', default=None, type=_nonempty,
                     help='output root (default: .\\ue_dumps or env NYLIB_UE_OUT)')
     pd.add_argument('--exports', dest='exports', default=None,
-                     help='formats written after the snapshot: idmap, gobjects, gobjects-props, usmap '
-                          '(default: idmap,gobjects,gobjects-props; "none" writes the snapshot only)')
+                     help="formats written with the snapshot: idmap, gobjects, gobjects-props, image (the game's "
+                          'main module as a PE file), usmap (default: idmap,gobjects,gobjects-props,image; '
+                          '"none" writes the snapshot only)')
     pd.add_argument('--allow-calls', dest='allow_calls', nargs='?', const=_ALLOW_CALLS_DEFAULT, default=None,
                      help='append-string, game-info, text; no value means all three (not implemented yet)')
     pd.add_argument('--json', action='store_true')
@@ -358,16 +360,23 @@ def _print_early_error(message: str, json_mode: bool, exit_code: int, *, err_typ
 
 
 def _make_dump_progress(version: str):
-    """I4 dump progress: header/profile/[n/3] INFO lines on `nylib.ue.cli`, each with its own elapsed seconds."""
+    """I4 dump progress: header/profile/[n/3] INFO lines on `nylib.ue.cli`, each with its own elapsed seconds.
+    (7-c) `image` prints nothing: its elapsed time is folded into `[3/3]`, not `[2/3]` (G7.6)."""
     cli_logger = logging.getLogger('nylib.ue.cli')
     t0 = time.perf_counter()
+    image_seconds = 0.0
 
     def progress(event, payload):
-        nonlocal t0
+        nonlocal t0, image_seconds
         if event == 'walk':  # per-object ticks inside step 2 must not restart its clock
             return
         now = time.perf_counter()
         elapsed, t0 = now - t0, now
+        if event == 'image':
+            image_seconds = elapsed
+            return
+        if event == 'exports':
+            elapsed += image_seconds
         if event == 'open':
             cli_logger.info('%s %s · dump · %s (pid %s) · %s · read-only', PROG, version, payload.exe, payload.pid, payload.mode)
         elif event == 'probe':
@@ -394,12 +403,29 @@ def _make_dump_progress(version: str):
 # info (full)
 # --------------------------------------------------------------------------------------------
 
+def _image_export_rel(meta: dict, snap_path: str) -> str | None:
+    """(7-c) `meta.image.file` as an `exports` entry: exactly `image/<name>`, `<name>` neither `.` nor `..`,
+    naming an existing file."""
+    img = meta.get('image') if isinstance(meta, dict) else None
+    file = img.get('file') if isinstance(img, dict) else None
+    if not isinstance(file, str) or '\\' in file:
+        return None
+    parts = file.split('/')
+    if len(parts) != 2 or parts[0] != 'image' or parts[1] in ('', '.', '..'):
+        return None
+    if not os.path.isfile(os.path.join(snap_path, 'image', parts[1])):
+        return None
+    return file
+
+
 def _info_doc(path: str, snap) -> dict:
     present = []
     for fmt in sorted(_EXPORT_NAMES):
         rel = exports_mod.export_path(fmt, snap)
         if os.path.isfile(os.path.join(snap.path, rel)):
             present.append(rel.replace(os.sep, '/'))
+    if (img_rel := _image_export_rel(snap.meta, snap.path)) is not None:  # (7-c)
+        present.append(img_rel)
     return {'ok': True, 'snapshot': os.path.abspath(path), 'exports': present, 'meta': snap.meta}
 
 
@@ -606,15 +632,15 @@ def _cmd_probe(args, _open_target=None) -> int:
 
 
 def _cmd_dump(args, _open_target=None) -> int:
-    exports = exports_mod.DEFAULT_EXPORTS if args.exports is None else None
+    exports = None  # (7-c) None means pipeline.DEFAULT_DUMP_EXPORTS, read after the lazy import below
     if args.exports is not None:
         try:
             exports = _parse_exports(args.exports)
         except ValueError as e:
             print(f'{PROG} dump: error: {e}', file=sys.stderr)
             return 2
-    if 'usmap' in exports:  # reject before opening the target
-        return _print_early_error('the usmap writer is not implemented yet', args.json, 1)
+        if 'usmap' in exports:  # reject before opening the target
+            return _print_early_error('the usmap writer is not implemented yet', args.json, 1)
     if args.allow_calls is not None:
         try:
             _parse_allow_calls(args.allow_calls)
@@ -633,7 +659,8 @@ def _cmd_dump(args, _open_target=None) -> int:
         cli_logger = logging.getLogger('nylib.ue.cli')
         try:
             from . import pipeline  # lazy import: cli avoids pipeline at module load
-            result = pipeline.dump(_target_arg(args.target), profile=args.profile, out=args.out, exports=exports,
+            dump_exports = pipeline.DEFAULT_DUMP_EXPORTS if exports is None else exports
+            result = pipeline.dump(_target_arg(args.target), profile=args.profile, out=args.out, exports=dump_exports,
                                     progress=_make_dump_progress(_package_version()), _open_target=_open_target)
         except Exception as e:
             return _finish_error(e, args.json, target=args.target, log_file=log_file, logger=logger)

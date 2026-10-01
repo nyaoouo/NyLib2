@@ -10,6 +10,7 @@ import time
 from typing import Callable
 
 from . import errors
+from . import image
 from . import memory
 from . import pe
 from . import profiles
@@ -26,6 +27,8 @@ CACHE_CAP_INTERNAL = 128 << 20
 UNREADABLE_FAIL = 0.05  # share of walked objects that fails a dump
 UNREADABLE_WARN = 0.001
 UE_EXE_RE = re.compile(r'-(?:Win64|WinGDK)-(?:Shipping|Test|DebugGame)(?:-Cmd)?\.exe$', re.IGNORECASE)
+IMAGE_EXPORT = 'image'  # (7-c) the main-module image (I6); a dump-only format
+DEFAULT_DUMP_EXPORTS = DEFAULT_EXPORTS + (IMAGE_EXPORT,)  # (7-c) dump's default: idmap, gobjects, gobjects-props, image
 
 _ROOT_OBJS = {'Off': 'off', 'Settings': 'settings', 'PropertySizes': 'property_sizes', 'FNameEntry': 'names'}
 _ROW_NAMES = {
@@ -548,7 +551,7 @@ def probe(target=None, *, profile=None, out=None, cache_bytes=None, _open_target
 # dump
 # --------------------------------------------------------------------------------------------
 
-def dump(target=None, *, profile=None, out=None, exports=DEFAULT_EXPORTS, log_file=None, cache_bytes=None,
+def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, log_file=None, cache_bytes=None,
          progress=None, _open_target=None) -> DumpResult:
     if not isinstance(exports, (list, tuple)):
         raise TypeError(f'exports must be a list or tuple, got {type(exports).__name__}')
@@ -556,7 +559,7 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_EXPORTS, log_fi
     for fmt in exports:
         if not isinstance(fmt, str):
             raise TypeError(f'export format must be a str, got {type(fmt).__name__}')
-        if fmt not in EXPORT_SPECS:
+        if fmt not in EXPORT_SPECS and fmt != IMAGE_EXPORT:  # (7-c) image is a dump-only format
             raise ValueError(f'unknown export format {fmt!r}')
         if fmt not in fmts:
             fmts.append(fmt)
@@ -612,6 +615,18 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_EXPORTS, log_fi
                           'file_version': info.file_version},
                 'engine': m['engine'], 'globals': m['globals'],
             }
+
+            img = None
+            if IMAGE_EXPORT in fmts:  # (7-c) before the walk, so its facts reach meta.json through meta
+                img = image.write_image(opened.source, base=info.module_base, size_of_image=info.size_of_image,
+                                        exe=info.exe, folder=f'{folder}.partial',
+                                        disk_exe=info.exe_path if info.exe_sha256 is not None else None)
+                meta['image'] = img.to_meta()
+                for w in img.warnings:
+                    logger.warning(w)
+                if progress is not None:
+                    progress('image', img)
+
             offsets_doc = ctx.to_offsets()
 
             walk_progress = (lambda done, total: progress('walk', (done, total))) if progress is not None else None
@@ -629,7 +644,9 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_EXPORTS, log_fi
             if progress is not None:
                 progress('snapshot', wr.counts)
 
-            warning_list = list(report.warnings)
+            warning_list = list(report.warnings)  # order: the report's, the image's (7-c), the unreadable share's
+            if img is not None:
+                warning_list.extend(img.warnings)
             share = (wr.unreadable / wr.walked) if wr.walked else 0.0
             if share > UNREADABLE_FAIL:
                 raise errors.UeError(f'{wr.unreadable:,} of {wr.walked:,} objects ({share:.1%}) could not be read; '
@@ -639,12 +656,17 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_EXPORTS, log_fi
                 warning_list.append(msg)
                 logger.warning(msg)
 
-            paths = store.publish(folder, fmts)
+            image_written = img is not None and img.skipped is None
+            written_fmts = tuple(f for f in fmts if f != IMAGE_EXPORT or image_written)
+            paths = store.publish(folder, [f for f in fmts if f != IMAGE_EXPORT])  # (7-c) publish never sees image
+            paths_iter = iter(paths)
+            export_paths = tuple(os.path.join(folder, *img.rel_path.split('/')) if f == IMAGE_EXPORT else next(paths_iter)
+                                 for f in written_fmts)
             if progress is not None:
-                progress('exports', tuple(fmts))
+                progress('exports', written_fmts)
 
             return DumpResult(path=folder, target=opened.info, report=report, counts=dict(wr.counts),
-                              unverified=report.unverified, exports=tuple(fmts), export_paths=paths,
+                              unverified=report.unverified, exports=written_fmts, export_paths=export_paths,
                               warnings=tuple(warning_list), seconds=time.perf_counter() - t0)
         finally:
             opened.close()

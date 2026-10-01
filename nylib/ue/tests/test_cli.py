@@ -9,7 +9,7 @@ import tempfile
 import unittest
 import unittest.mock
 
-from nylib.ue import cli, errors, pipeline, profiles, store
+from nylib.ue import cli, errors, image, pipeline, profiles, store
 
 
 def _internal_report() -> pipeline.ProbeReport:
@@ -154,6 +154,70 @@ class DumpProgressTimingTests(unittest.TestCase):
         step2 = [m for m in logs.output if '[2/3]' in m]
         self.assertEqual(len(step2), 1)
         self.assertTrue(step2[0].endswith('(7.0s)'), step2[0])
+
+
+class DumpProgressImageTimingTests(unittest.TestCase):
+    """G7.6: the image step's seconds are excluded from [2/3] and folded into [3/3]; `image` prints nothing."""
+
+    def test_image_seconds_move_from_snapshot_to_exports(self):
+        clock = iter([0.0, 1.0, 2.0, 4.0, 9.0, 9.5])  # creation, open, probe, image, snapshot, exports
+        with unittest.mock.patch('nylib.ue.cli.time.perf_counter', side_effect=lambda: next(clock)):
+            progress = cli._make_dump_progress('v')
+        with unittest.mock.patch('nylib.ue.cli.time.perf_counter', side_effect=lambda: next(clock)), \
+             self.assertLogs('nylib.ue.cli', level='INFO') as logs:
+            info = pipeline.TargetInfo(mode='external', pid=1, exe='x.exe', exe_path='', exe_sha256=None,
+                                       module_base=0, size_of_image=0, pe_timestamp=0, file_version=None,
+                                       version_info=None)
+            progress('open', info)
+            progress('probe', _probe_report(target=info))
+            img = image.ImageResult(rel_path='image/x.exe', path='/d/image/x.exe', size=4, sha256='00' * 32,
+                                    image_base=0x140000000, original_image_base=0x140000000, unreadable_pages=0,
+                                    first_unreadable=None, skipped=None, seconds=0.0)
+            progress('image', img)
+            for done in (4096, 8192):
+                progress('walk', (done, 8192))
+            progress('snapshot', {'classes': 1, 'structs': 2, 'enums': 3, 'functions': 4, 'packages': 5, 'objects': 6})
+            progress('exports', ('idmap', 'image'))
+        self.assertEqual(len(logs.output), 5)  # profile + [1/3] + [2/3] + [3/3]; no line for 'image'
+        step2 = [m for m in logs.output if '[2/3]' in m]
+        step3 = [m for m in logs.output if '[3/3]' in m]
+        self.assertEqual(len(step2), 1)
+        self.assertEqual(len(step3), 1)
+        self.assertTrue(step2[0].endswith('(5.0s)'), step2[0])
+        self.assertTrue(step3[0].endswith('(2.5s)'), step3[0])
+        self.assertIn('idmap,image', step3[0])
+
+
+class DumpExportsDefaultTests(unittest.TestCase):
+    """(7-c) without --exports, dump passes pipeline.DEFAULT_DUMP_EXPORTS; --exports now also takes image."""
+
+    def test_default_exports_is_pipeline_default_dump_exports(self):
+        captured = {}
+
+        def fake_dump(target, *, profile=None, out=None, exports=(), cache_bytes=None, log_file=None,
+                      progress=None, _open_target=None):
+            captured['exports'] = exports
+            info = pipeline.TargetInfo(mode='external', pid=1, exe='x.exe', exe_path='', exe_sha256=None,
+                                       module_base=0, size_of_image=0, pe_timestamp=0, file_version=None,
+                                       version_info=None)
+            return pipeline.DumpResult(path=out or '.', target=info, report=_probe_report(target=info), counts={},
+                                       unverified=(), exports=exports, export_paths=(), warnings=(), seconds=0.0)
+
+        with tempfile.TemporaryDirectory() as d:
+            with unittest.mock.patch('nylib.ue.pipeline.dump', side_effect=fake_dump), \
+                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = cli.main(['dump', 'x', '--out', d])
+            self.assertEqual(code, 0)
+            self.assertEqual(captured['exports'], pipeline.DEFAULT_DUMP_EXPORTS)
+
+    def test_exports_image_is_accepted(self):
+        self.assertEqual(cli._parse_exports('image'), ('image',))
+
+    def test_exports_bogus_with_image_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = cli.main(['dump', 'x', '--exports', 'image,bogus', '--out', d])
+            self.assertEqual(code, 2)
 
 
 class IgnoredRvaPinWarningTests(unittest.TestCase):
@@ -307,7 +371,8 @@ class WalkDeathTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             with unittest.mock.patch('nylib.ue.pipeline.probe_opened', return_value=report), \
                  unittest.mock.patch('nylib.ue.reflect.walk', side_effect=errors.MemoryReadError(0, 0, 'dead')):
-                code = cli.main(['dump', 'x', '--out', d], _open_target=factory)
+                # (7-c) --exports idmap: this test's source=None predates the image step, which it does not cover
+                code = cli.main(['dump', 'x', '--exports', 'idmap', '--out', d], _open_target=factory)
             self.assertEqual(code, 4)
             partials = [p for base, dirs, _files in os.walk(d) for p in dirs if p.endswith('.partial')]
             self.assertTrue(partials)
