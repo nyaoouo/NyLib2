@@ -8,6 +8,7 @@ import json
 import os
 import re
 import tempfile
+from typing import Callable
 
 from .errors import SnapshotError, SchemaError  # re-exported
 from .model import (
@@ -164,11 +165,19 @@ def _write_types_files(partial, types) -> int:
             pass
 
 
-def write_snapshot(folder, meta: dict, offsets: dict, objects, types, fields, *, generator: dict | None = None) -> dict:
+def _meta_doc(meta: dict, generator: dict | None) -> dict:
+    return {**meta, 'schema': {'name': SCHEMA_NAME, 'version': SCHEMA_VERSION},
+            'generator': dict(generator) if generator is not None else dict(GENERATOR_DEFAULT)}
+
+
+def write_snapshot(folder, meta: dict | Callable[[], dict], offsets: dict, objects, types, fields, *,
+                    generator: dict | None = None) -> dict:
     """Stream a 2A snapshot into `<folder>.partial` and return counts; the caller renames it.
 
     Every argument is validated before any file is opened or deleted; an exception while streaming
-    leaves `partial` without `meta.json`, so an interrupted write never loads as complete.
+    leaves `partial` without `meta.json`, so an interrupted write never loads as complete. A callable
+    `meta` (R1) is called exactly once, after the `types` stream, so it can report counts and issues
+    the walk only knows by then; a `dict` `meta` serialises up front as before.
     """
     _check_path(folder, 'folder')
     folder_str = os.fspath(folder)
@@ -177,8 +186,12 @@ def write_snapshot(folder, meta: dict, offsets: dict, objects, types, fields, *,
     base = os.path.basename(os.path.normpath(folder_str))
     if base.lower().endswith('.partial'):
         raise ValueError(f'folder name must not end in .partial: {folder_str!r}')
-    if not isinstance(meta, dict):
-        raise TypeError(f'meta must be a dict, got {type(meta).__name__}')
+    if isinstance(meta, dict):
+        meta_is_callable = False
+    elif callable(meta):
+        meta_is_callable = True
+    else:
+        raise TypeError(f'meta must be a dict or callable, got {type(meta).__name__}')
     if not isinstance(offsets, dict):
         raise TypeError(f'offsets must be a dict, got {type(offsets).__name__}')
     if generator is not None and not isinstance(generator, dict):
@@ -186,16 +199,16 @@ def write_snapshot(folder, meta: dict, offsets: dict, objects, types, fields, *,
 
     offsets_doc = {'schema': {'name': OFFSETS_SCHEMA, 'version': SCHEMA_VERSION},
                    **{k: v for k, v in offsets.items() if k != 'schema'}}
-    meta_doc = {**meta, 'schema': {'name': SCHEMA_NAME, 'version': SCHEMA_VERSION},
-                'generator': dict(generator) if generator is not None else dict(GENERATOR_DEFAULT)}
     try:
         offsets_line = _dump(offsets_doc)
     except (TypeError, ValueError) as e:
         raise ValueError(f'offsets is not serialisable: {e}') from e
-    try:
-        meta_line = _dump(meta_doc)
-    except (TypeError, ValueError) as e:
-        raise ValueError(f'meta is not serialisable: {e}') from e
+    meta_line = None
+    if not meta_is_callable:
+        try:
+            meta_line = _dump(_meta_doc(meta, generator))
+        except (TypeError, ValueError) as e:
+            raise ValueError(f'meta is not serialisable: {e}') from e
 
     partial = os.path.abspath(folder_str) + '.partial'
     os.makedirs(partial, exist_ok=True)
@@ -208,6 +221,14 @@ def write_snapshot(folder, meta: dict, offsets: dict, objects, types, fields, *,
     objects_written = _write_objects_jsonl(os.path.join(partial, 'objects.jsonl'), objects)
     fields_written = _write_fields_jsonl(os.path.join(partial, 'fields.jsonl'), fields)
     types_written = _write_types_files(partial, types)
+    if meta_is_callable:
+        result = meta()
+        if not isinstance(result, dict):
+            raise TypeError(f'meta() must return a dict, got {type(result).__name__}')
+        try:
+            meta_line = _dump(_meta_doc(result, generator))
+        except (TypeError, ValueError) as e:
+            raise ValueError(f'meta is not serialisable: {e}') from e
     with open(meta_path, 'wb') as f:
         f.write(meta_line.encode('utf-8') + b'\n')
 
