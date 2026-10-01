@@ -85,6 +85,101 @@ class PortGateTests(unittest.TestCase):
 class PortRegressionTests(unittest.TestCase):
     """Regressions found by 6-G that need no capture; never skipped."""
 
+    def _run_joined(self, fn):
+        """Runs fn in a daemon thread joined for 10 s; returns its exception, or None."""
+        import threading
+        outcome = []
+
+        def target():
+            try:
+                fn()
+                outcome.append(None)
+            except BaseException as ex:
+                outcome.append(ex)
+        thread = threading.Thread(target=target, daemon=True)
+        thread.start()
+        thread.join(10)
+        self.assertFalse(thread.is_alive(), 'still running after 10 s')
+        return outcome[0]
+
+    @staticmethod
+    def _engine_with_segment(base: int, data: bytes):
+        """An Engine over the mapped sys._base_executable plus one segment at base."""
+        from ..capture import ImageSource
+        from ..engine.core import Engine
+        from .pe_file import map_pe_file
+        exe = map_pe_file(sys._base_executable)
+        try:
+            segments = [(r.base, exe.read(r.base, r.end - r.base)) for r in exe.regions()]
+            modules = [exe.main_module]
+        finally:
+            exe.close()
+        return Engine(ImageSource(segments + [(base, data)], modules))
+
+    def test_cyclic_field_chain_raises(self):
+        import struct
+        from ..engine.unreal import UEStruct
+        from ..errors import MemoryReadError
+        from ..flags import EClassCastFlags
+        base = 0x100000
+        data = bytearray(0x400)
+        struct.pack_into('<Q', data, 0x08, base + 0x100)                # UStruct::ChildProperties -> field A
+        for field, next_field in ((0x100, 0x200), (0x200, 0x100)):      # A -> B -> A
+            struct.pack_into('<Q', data, field + 0x08, base + 0x300)    # FField::Class
+            struct.pack_into('<Q', data, field + 0x20, base + next_field)  # FField::Next
+        struct.pack_into('<Q', data, 0x300 + 0x10, EClassCastFlags.Property)  # FFieldClass::CastFlags
+        e = self._engine_with_segment(base, bytes(data))
+        try:
+            e.settings.Internal.bUseFProperty = True
+            e.off.UStruct.ChildProperties = 0x08
+            e.off.FField.Class, e.off.FField.Next = 0x08, 0x20
+            e.off.FFieldClass.CastFlags = 0x10
+            self.assertIsInstance(self._run_joined(UEStruct(e, base).get_properties), MemoryReadError)
+        finally:
+            e.mem.close()
+
+    def test_cyclic_outer_chain_raises(self):
+        import struct
+        from unittest import mock
+        from ..engine.unreal import UEObject
+        from ..errors import MemoryReadError
+        base = 0x100000
+        data = bytearray(0x100)
+        struct.pack_into('<Q', data, 0x20, base)  # UObject::Outer -> itself
+        e = self._engine_with_segment(base, bytes(data))
+        try:
+            e.off.UObject.Class, e.off.UObject.Outer = 0x10, 0x20
+            with mock.patch.object(UEObject, 'get_name', lambda self: 'Obj'):
+                self.assertIsInstance(self._run_joined(UEObject(e, base).get_full_name), MemoryReadError)
+        finally:
+            e.mem.close()
+
+    def test_a6_skips_unreadable_object(self):
+        from unittest import mock
+        from ..engine.core import Engine
+        from ..engine.objects import ObjectArray
+        from ..engine.unreal import UEObject
+        from ..errors import MemoryReadError
+        from .pe_file import map_pe_file
+        image = map_pe_file(sys._base_executable)
+        try:
+            e = Engine(image)
+            bad, actor = UEObject(e, 0x1000), UEObject(e, 0x2000)
+
+            def name_of(full: bool):
+                def get(obj):
+                    if obj.address == bad.address:
+                        raise MemoryReadError(obj.address, 8, 'unreadable object')
+                    return 'Class /Script/Engine.Actor' if full else 'Actor'
+                return get
+            with mock.patch.object(ObjectArray, '__iter__', lambda self: iter([bad, actor])), \
+                    mock.patch.object(UEObject, 'get_name', name_of(False)), \
+                    mock.patch.object(UEObject, 'get_full_name', name_of(True)):
+                self.assertEqual(e.objects.find_object_fast('Actor'), actor)
+                self.assertEqual(e.objects.find_object('Class /Script/Engine.Actor'), actor)
+        finally:
+            image.close()
+
     def test_gnames_override_rejected(self):
         from ..engine.core import Engine
         from ..errors import DetectionError

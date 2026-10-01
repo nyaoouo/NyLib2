@@ -9,6 +9,7 @@ if typing.TYPE_CHECKING:
     from .core import Engine
 
 _NAME_WIDE_MASK = 0x1
+_NUMBERED_NAME_LINKS = 16  # DV18
 
 
 def _i32(value: int) -> int:
@@ -144,18 +145,23 @@ class NameArray:
     def _get_str_invalid_shift_count(name_entry: int) -> str:
         return 'Invalid FNameEntryLengthShiftCount!'
 
-    def _get_str_name_pool(self, name_entry: int) -> str:
+    def _get_str_name_pool(self, name_entry: int, start: int = 0, hops: int = 0) -> str:
         mem, pool = self.e.mem, self.e.off.FNameEntry.NamePool
         header_without_number = mem.u16(name_entry + pool.HeaderOffset)
         name_len = header_without_number >> self.FNameEntryLengthShiftCount
 
         if name_len == 0:
+            start = start or name_entry
+            if hops == _NUMBERED_NAME_LINKS:
+                raise MemoryReadError(start, 0, f'numbered name chain of {start:#x} exceeds {_NUMBERED_NAME_LINKS} links')
             entry_id_offset = pool.StringOffset + ((pool.StringOffset == 6) * 2)
             next_entry_index = mem.i32(name_entry + entry_id_offset)
             number = mem.i32(name_entry + entry_id_offset + 4)
+            next_entry = self.get_name_entry(next_entry_index).get_address()
+            next_wstring = self._get_str_name_pool(next_entry, start, hops + 1) if next_entry else ''
             if number > 0:
-                return self.get_name_entry(next_entry_index).get_wstring() + '_' + str(number - 1)
-            return self.get_name_entry(next_entry_index).get_wstring()
+                return next_wstring + '_' + str(number - 1)
+            return next_wstring
 
         if header_without_number & _NAME_WIDE_MASK:
             return mem.read(name_entry + pool.StringOffset, name_len * 2).decode('utf-16-le', 'surrogatepass')
@@ -659,6 +665,10 @@ class FNameStatics:
                 return names._get_name_entry_of(name).get_wstring() + '_' + str(number - 1)
         return names._get_name_entry_of(name).get_wstring()
 
+    def _cerr_found(self) -> None:
+        name = self.e.off.InSDK.Name
+        self.e.cerr(f'Found FName::{"AppendString" if name.bIsUsingAppendStringOverToString else "ToString"} at Offset 0x{name.AppendNameToString:X}\n\n')
+
     def init_windows(self) -> None:
         """FName::Init_Windows(bForceGNames = false) @ ea0dab3 (DV5)."""
         e, p = self.e, self.e.platform
@@ -700,6 +710,9 @@ class FNameStatics:
 
         e.off.InSDK.Name.AppendNameToString = _i32(p.get_offset(self.AppendString)) if self.AppendString and not force_gnames else 0x0
         self._rec('Off.InSDK.Name.AppendNameToString', label)
+        append_string_found = bool(self.AppendString)
+        if append_string_found:
+            self._cerr_found()
 
         # DV5: names always come from GNames (ea0dab3's bForceGNames branch); AppendString is never called
         if e.names.try_init():
@@ -707,6 +720,8 @@ class FNameStatics:
             return
         e.names.set_gnames_without_committing()
         self.init_fallback()
+        if not append_string_found:
+            self._cerr_found()
         raise DetectionError('FName::Init', 'GNames could not be initialised; AppendString cannot be called read-only', explanations=tuple(e.messages))
 
     def init_override(self, override_offset: int, override_type: str, is_name_pool: bool = False) -> None:

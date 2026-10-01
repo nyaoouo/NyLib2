@@ -1,7 +1,7 @@
 """UnrealObjects.h/.cpp of Dumper-7 @ ea0dab3: the UObject / FField wrappers over a MemorySource."""
 import typing
 
-from ..errors import DetectionError
+from ..errors import DetectionError, MemoryReadError
 from ..flags import EClassCastFlags, EPropertyFlags
 from .accessor import view
 from .containers import TArray
@@ -12,6 +12,23 @@ if typing.TYPE_CHECKING:
 
 _U32 = 0xFFFFFFFF
 _U64 = 0xFFFFFFFFFFFFFFFF
+_MEMBER_LINKS = 0x10000  # DV18
+_PARENT_LINKS = 256  # DV18
+
+
+class _Chain:
+    """DV18: counts the non-null links of one pointer-chain walk; past `bound` raises MemoryReadError."""
+    __slots__ = ('start', 'what', 'bound', 'links')
+
+    def __init__(self, start: int, what: str, bound: int):
+        self.start, self.what, self.bound, self.links = start, what, bound, 0
+
+    def follow(self, node):
+        if node:
+            self.links += 1
+            if self.links > self.bound:
+                raise MemoryReadError(self.start, 0, f'{self.what} chain of {self.start:#x} exceeds {self.bound} links')
+        return node
 
 
 class UEFFieldClass:
@@ -76,8 +93,9 @@ class UEFField:
 
     def get_owner_uobject(self) -> 'UEObject':
         field = UEFField(self.e, self.address)
+        chain = _Chain(self.address, 'owner', _PARENT_LINKS)
         while not field.is_owner_uobject() and field.get_owner_as_ffield():
-            field = field.get_owner_as_ffield()
+            field = chain.follow(field.get_owner_as_ffield())
         return field.get_owner_as_uobject()
 
     def get_class(self) -> UEFFieldClass: return UEFFieldClass(self.e, self.e.mem.ptr(self.address + self.e.off.FField.Class))
@@ -160,18 +178,20 @@ class UEObject:
         if not cls:
             return False
         clss = self.get_class()
+        chain = _Chain(self.address, 'super', _PARENT_LINKS)
         while clss:
             if clss == cls:
                 return True
-            clss = clss.get_super().cast(UEClass)
+            clss = chain.follow(clss.get_super().cast(UEClass))
         return False
 
     def get_outermost(self) -> 'UEObject':
         outermost = UEObject(self.e, self.address)
         outer = UEObject(self.e, self.address)
+        chain = _Chain(self.address, 'outer', _PARENT_LINKS)
         while outer:
             outermost = outer
-            outer = outer.get_outer()
+            outer = chain.follow(outer.get_outer())
         return outermost
 
     def get_name(self) -> str: return self.get_fname().to_string() if self.address else 'None'
@@ -205,10 +225,11 @@ class UEObject:
         """UEObject::GetFullName(int32&) @ ea0dab3; the length is 0 where the C++ leaves it unassigned."""
         if self:
             temp = ''
-            outer = self.get_outer()
+            chain = _Chain(self.address, 'outer', _PARENT_LINKS)
+            outer = chain.follow(self.get_outer())
             while outer:
                 temp = outer.get_name() + '.' + temp
-                outer = outer.get_outer()
+                outer = chain.follow(outer.get_outer())
             name = self.get_name()
             out_name_length = len(name.encode('utf-8')) + 1  # std::string::size() counts UTF-8 bytes
             name =self.get_class().get_name() + ' ' + temp + name
@@ -219,10 +240,11 @@ class UEObject:
         """UEObject::GetFullName() @ ea0dab3."""
         if self:
             temp = ''
-            outer = self.get_outer()
+            chain = _Chain(self.address, 'outer', _PARENT_LINKS)
+            outer = chain.follow(self.get_outer())
             while outer:
                 temp = outer.get_name() + '.' + temp
-                outer = outer.get_outer()
+                outer = chain.follow(outer.get_outer())
             name = self.get_class().get_name()
             name += ' '
             name += temp
@@ -234,10 +256,11 @@ class UEObject:
         """UEObject::GetPathName @ ea0dab3."""
         if self:
             temp = ''
-            outer = self.get_outer()
+            chain = _Chain(self.address, 'outer', _PARENT_LINKS)
+            outer = chain.follow(self.get_outer())
             while outer:
                 temp = outer.get_name_with_path() + '.' + temp
-                outer = outer.get_outer()
+                outer = chain.follow(outer.get_outer())
             name = self.get_class().get_name_with_path()
             name += ' '
             name += temp
@@ -348,36 +371,39 @@ class UEStruct(UEField):
         if type_.address == 0:
             return False
         s = UEStruct(self.e, self.address)
+        chain = _Chain(self.address, 'super', _PARENT_LINKS)
         while s:
             if s == type_:
                 return True
-            s = s.get_super()
+            s = chain.follow(s.get_super())
         return False
 
     def get_properties(self) -> list['UEProperty']:
         """UEStruct::GetProperties @ ea0dab3."""
         properties = []
+        chain = _Chain(self.address, 'field', _MEMBER_LINKS)
         if self.e.settings.Internal.bUseFProperty:
-            field = self.get_child_properties()
+            field = chain.follow(self.get_child_properties())
             while field:
                 if field.is_a(EClassCastFlags.Property):
                     properties.append(field.cast(UEProperty))
-                field = field.get_next()
+                field = chain.follow(field.get_next())
             return properties
-        field = self.get_child()
+        field = chain.follow(self.get_child())
         while field:
             if field.is_a(EClassCastFlags.Property):
                 properties.append(field.cast(UEProperty))
-            field = field.get_next()
+            field = chain.follow(field.get_next())
         return properties
 
     def get_functions(self) -> list['UEFunction']:
         functions = []
-        field = self.get_child()
+        chain = _Chain(self.address, 'field', _MEMBER_LINKS)
+        field = chain.follow(self.get_child())
         while field:
             if field.is_a(EClassCastFlags.Function):
                 functions.append(field.cast(UEFunction))
-            field = field.get_next()
+            field = chain.follow(field.get_next())
         return functions
 
     def find_member(self, member_name: str, type_flags: int = 0) -> 'UEProperty':
@@ -385,33 +411,36 @@ class UEStruct(UEField):
         if not self.address:
             return UEProperty(self.e, 0)
         if self.e.settings.Internal.bUseFProperty:
-            ffield = self.get_child_properties()
+            chain = _Chain(self.address, 'field', _MEMBER_LINKS)
+            ffield = chain.follow(self.get_child_properties())
             while ffield:
                 if ffield.is_a(type_flags) and ffield.get_name() == member_name:
                     return ffield.cast(UEProperty)
-                ffield = ffield.get_next()
-        field = self.get_child()
+                ffield = chain.follow(ffield.get_next())
+        chain = _Chain(self.address, 'field', _MEMBER_LINKS)
+        field = chain.follow(self.get_child())
         while field:
             if field.is_a(type_flags) and field.get_name() == member_name:
                 return field.cast(UEProperty)
-            field = field.get_next()
+            field = chain.follow(field.get_next())
         return UEProperty(self.e, 0)
 
     def has_members(self) -> bool:
         if not self.address:
             return False
+        chain = _Chain(self.address, 'field', _MEMBER_LINKS)
         if self.e.settings.Internal.bUseFProperty:
-            ffield = self.get_child_properties()
+            ffield = chain.follow(self.get_child_properties())
             while ffield:
                 if ffield.is_a(EClassCastFlags.Property):
                     return True
-                ffield = ffield.get_next()
+                ffield = chain.follow(ffield.get_next())
         else:
-            f = self.get_child()
+            f = chain.follow(self.get_child())
             while f:
                 if f.is_a(EClassCastFlags.Property):
                     return True
-                f = f.get_next()
+                f = chain.follow(f.get_next())
         return False
 
 
@@ -447,14 +476,16 @@ class UEClass(UEStruct):
     def get_function(self, class_name: str, func_name: str) -> UEFunction:
         """UEClass::GetFunction @ ea0dab3."""
         struct = UEStruct(self.e, self.address)
+        supers = _Chain(self.address, 'super', _PARENT_LINKS)
         while struct:
             if struct.get_name() == class_name:
-                field = struct.get_child()
+                fields = _Chain(struct.address, 'field', _MEMBER_LINKS)
+                field = fields.follow(struct.get_child())
                 while field:
                     if field.is_a(EClassCastFlags.Function) and field.get_name() == func_name:
                         return field.cast(UEFunction)
-                    field = field.get_next()
-            struct = struct.get_super()
+                    field = fields.follow(field.get_next())
+            struct = supers.follow(struct.get_super())
         return UEFunction(self.e, 0)
 
 

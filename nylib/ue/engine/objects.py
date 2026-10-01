@@ -378,14 +378,21 @@ class ObjectArray:
             self._index_key, self._indices = state, {}
         if (index := self._indices.get(kind)) is None:
             index = {}
+            unreadable = 0
             for obj in self:
-                if kind == 'name':
-                    name = obj.get_name()
-                elif kind == 'outer':
-                    name = (obj.get_name(), obj.get_outer().get_name())
-                else:
-                    name = obj.get_full_name()
+                try:
+                    if kind == 'name':
+                        name = obj.get_name()
+                    elif kind == 'outer':
+                        name = (obj.get_name(), obj.get_outer().get_name())
+                    else:
+                        name = obj.get_full_name()
+                except MemoryReadError:
+                    unreadable += 1
+                    continue
                 index.setdefault(name, []).append(obj)
+            if unreadable:
+                e.cerr(f'A6: {unreadable} unreadable objects left out of the {kind} index\n')
             self._indices[kind] = index
         return index.get(key, [])
 
