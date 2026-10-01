@@ -17,6 +17,7 @@ _PROCESS_CALL_TARGETS = frozenset({
     'nylib.process.Process.from_name',
     'nylib.process.Process.from_id',
 })
+_CTYPE_BINDING_MODULE = 'nylib/ue/engine/accessor.py'
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 
@@ -102,6 +103,10 @@ def check(source_text: str, module_path: str) -> list[str]:
                     target = callee
             if target is not None and module_path != 'nylib/ue/memory.py':
                 findings.append(f'{module_path}:{node.lineno}: call to Process outside nylib/ue/memory.py ({target})')
+            if module_path != _CTYPE_BINDING_MODULE:  # G1: nylib.ctype objects are bound to memory only through view()
+                for kw in node.keywords:
+                    if kw.arg in ('_address_', '_accessor_'):
+                        findings.append(f'{module_path}:{node.lineno}: {kw.arg} passed outside {_CTYPE_BINDING_MODULE}; use view()')
         elif isinstance(node, ast.Attribute) and node.attr == 'current' and canonical(node.value) == 'nylib.process.Process':
             parent = parent_map.get(node)
             if isinstance(parent, ast.Attribute) and parent.value is node and parent.attr in ('process_id', 'handle'):
@@ -169,6 +174,7 @@ class HygieneScanTests(unittest.TestCase):
             findings.extend(check((_REPO_ROOT / rel).read_text(encoding='utf-8'), rel))
         self.assertGreaterEqual(len(visited), 1)
         self.assertIn('nylib/ue/memory.py', visited)
+        self.assertIn(_CTYPE_BINDING_MODULE, visited)
         self.assertEqual(findings, [])
 
 
@@ -284,6 +290,19 @@ class HygieneCheckTests(unittest.TestCase):
 
     def test_allows_process_constructor_in_memory_py(self):
         findings = check('p = Process(pid, da=0x410)\n', 'nylib/ue/memory.py')
+        self.assertEqual(findings, [])
+
+    def test_g1_flags_address_keyword_outside_accessor_py(self):
+        findings = check('t = TArray(_address_=p)\n', 'nylib/ue/engine/unreal.py')
+        self.assertTrue(any('_address_' in f for f in findings))
+
+    def test_g1_flags_accessor_keyword_outside_accessor_py(self):
+        findings = check('t = FString(_accessor_=acc)\n', 'nylib/ue/runtime/objects.py')
+        self.assertTrue(any('_accessor_' in f for f in findings))
+
+    def test_g1_allows_ctype_binding_in_accessor_py(self):
+        findings = check('def view(cls, address, accessor):\n    return cls(_address_=address, _accessor_=accessor)\n',
+                         'nylib/ue/engine/accessor.py')
         self.assertEqual(findings, [])
 
 

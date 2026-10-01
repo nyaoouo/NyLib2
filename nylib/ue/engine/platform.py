@@ -185,26 +185,36 @@ class Platform:
                 search_start, search_range = _search_start_and_range(self.image, section, start_address, 0)
                 if search_start == 0 or search_range == 0:
                     continue
-                result = self.find_pattern_in_range(signature, search_start, search_range, offset != 0, offset)
+                result = self._find_pattern_in_range(signature, search_start, search_range, offset != 0, offset, section)
                 if result:
                     return result
             return 0
         section = self.get_section_info('.text')
         if section is None:
             return 0
-        return self.find_pattern_in_range(signature, section.address, section.size, offset != 0, offset)
+        return self._find_pattern_in_range(signature, section.address, section.size, offset != 0, offset, section)
 
     def find_pattern_in_range(self, signature, start: int, range_: int, relative: bool = False, offset: int = 0) -> int:
         """PlatformWindows::FindPatternInRange (both overloads) @ ea0dab3 (A2)."""
+        return self._find_pattern_in_range(signature, start, range_, relative, offset, None)
+
+    def _find_pattern_in_range(self, signature, start: int, range_: int, relative: bool, offset: int, section: Section | None) -> int:
         pattern, length = _compile_pattern(signature)
         endpos = range_ - 1
         if endpos <= 0:
             return 0
-        data = self.source.read(start, range_)
-        m = pattern.search(data, 0, endpos)
+        data, pos = None, 0
+        if section is not None:  # A2: search the cached section chunk that holds the whole range
+            for chunk_addr, chunk in self.scanner.chunks(section):
+                if chunk_addr <= start and start + range_ <= chunk_addr + len(chunk):
+                    data, pos = chunk, start - chunk_addr
+                    break
+        if data is None:
+            data = self.source.read(start, range_)
+        m = pattern.search(data, pos, pos + endpos)
         if m is None:
             return 0
-        address = start + m.start()
+        address = start + m.start() - pos
         if relative:
             eff_offset = length if offset == -1 else offset
             address = address + eff_offset + 4 + self.source.i32(address + eff_offset)
