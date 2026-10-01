@@ -403,10 +403,11 @@ def _run_bootstrap(e, prof, pins: '_Pins | None', steps: list):
     steps.append('objects')
 
     if pins is not None and pins.gnames_rva is not None:
-        e.fname.init_override(pins.gnames_rva, 'GNames', True)
-        if e.names.GNames == 0:
+        try:
+            e.fname.init_override(pins.gnames_rva, 'GNames', True)
+        except errors.DetectionError as err:
             raise errors.DetectionError('FName::Init', f'the GNames value pinned by {prof.path} could not be initialised',
-                                        tuple(e.messages))
+                                        tuple(e.messages)) from err
         e.provenance['Off.InSDK.NameArray.GNames'] = pins.gnames_label
     else:
         e.fname.init_windows()

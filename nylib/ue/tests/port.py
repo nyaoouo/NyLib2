@@ -16,8 +16,10 @@ from ..capture import ImageSource
 from ..engine.context import ENGINE_CORE_STEPS, EngineContext, init_engine_core
 from ..engine.core import Engine
 from ..engine.gnames import FNameEntry
+from ..engine.unreal import UEEnum
 from ..errors import MemoryReadError
 from ..exports import run_export
+from ..flags import EObjectFlags
 from ..snapshot import Snapshot
 from . import real
 from .oracle import (DriftResult, GObjectsDump, compare_gobjects, compare_idmap, compare_offsets, flatten_oracle_offsets,
@@ -26,13 +28,17 @@ from .oracle import (DriftResult, GObjectsDump, compare_gobjects, compare_idmap,
 CAPTURE_RESIDENT_BYTES = 1 << 30
 K14_REASON = ("K14 (root Q30 = A): the oracle's GNames is Dumper-7 ea0dab3's first FNamePool candidate, which it never "
               "validates and which holds zeros in this capture; nylib.ue uses the pool that InitializeNamePool accepts")
-# (target, check, item) -> recorded reason. Items: offsets = flattened key, gobjects / gobjects-props = row index as
-# '%08X', idmap = record name, names = name component, enums = enum name.
+ENUM_INT_REASON = 'oracle EnumsInfo.json stores values as C++ int'
+# (target, check, item) -> recorded reason. Items: offsets = flattened key, gobjects / gobjects-props / props-exact /
+# cdo-types = row index as '%08X', idmap = record name, names = name component, enums = enum name.
 ACCEPTED: dict[tuple[str, str, str], str] = {        # (target, check, item) -> recorded reason; 6-G.2 adds entries, the review checks them
     ('pal', 'offsets', 'Offsets.GNames'): K14_REASON,             # pre-declared under Q30 = A; empty under Q30 = B
     ('pal', 'offsets', 'OffsetsInfo.OFFSET_GNAMES'): K14_REASON,
     ('fb', 'offsets', 'Offsets.GNames'): K14_REASON,
     ('fb', 'offsets', 'OffsetsInfo.OFFSET_GNAMES'): K14_REASON,
+    ('pal', 'enums', 'ESkeletalMeshAsyncProperties'): ENUM_INT_REASON,
+    ('fb', 'enums', 'ESkeletalMeshAsyncProperties'): ENUM_INT_REASON,
+    ('fb', 'enums', 'EHardwareDeviceSupportedFeatures'): ENUM_INT_REASON,
 }
 ORACLE_KEY_CATALOGUE: tuple[str, ...] = (
     'Offsets.GObjects', 'Offsets.AppendString', 'Offsets.GetNameEntry', 'Offsets.GNames', 'Offsets.GWorld', 'Offsets.ProcessEvent',
@@ -64,12 +70,14 @@ NAME_MISS_FLOOR = 10
 NAME_MISS_SHARE = 0.0001
 NAME_MIN_COMPONENTS = 10000
 
-CHECKS = ('offsets', 'gobjects', 'gobjects-props', 'idmap', 'stem', 'names', 'counts', 'enums')
+CHECKS = ('offsets', 'gobjects', 'gobjects-props', 'idmap', 'stem', 'names', 'counts', 'enums', 'props-exact', 'cdo-types')
 EXTRA_CHECKS = ('extra:from_snapshot', 'extra:live_resolver')
 OFFSETS_MIN_VALUES = 25
 IDMAP_MIN_RECORDS = 1000
 ENUMS_MIN_COMPARED = 500
 ENUMS_DRIFT_BOUND = 0.01
+PROPS_EXACT_MIN_KEYS = 10000
+CDO_TYPES_MIN_ROWS = 1000
 EXTRA_NAME_SAMPLES = 1000
 EXTRA_TYPE_SAMPLES = 200
 _NAME_MISS_LISTED = 200
@@ -423,6 +431,42 @@ def _check_idmap(ours: list, oracle: list, *, target: str) -> DriftResult:
     return dr
 
 
+def _props_exact(ours: GObjectsDump, oracle: GObjectsDump) -> DriftResult:
+    """Property rows of every object whose key and full name are equal in both WithProperties dumps; no drift allowance."""
+    o_names = {(i, a): n for i, a, n in oracle.rows}
+    matched, bad = 0, []
+    for i, a, n in ours.rows:
+        if o_names.get((i, a)) != n:
+            continue
+        if (u := ours.props.get(i, [])) == (o := oracle.props.get(i, [])):
+            matched += 1
+        else:
+            bad.append(f'[{i:08X}] {n}: ours {len(u)} property rows, oracle {len(o)}')
+    compared = matched + len(bad)
+    reasons = ([f'{len(bad)} objects differ in their property rows'] if bad else []) +         ([f'too few keys compared ({compared} < {PROPS_EXACT_MIN_KEYS})'] if compared < PROPS_EXACT_MIN_KEYS else [])
+    return DriftResult(ok=not reasons, matched=matched, changed=len(bad), drift=len(bad) / max(1, compared),
+                       reason='; '.join(reasons), samples=tuple(bad[:5]))
+
+
+def _cdo_types(snap, *, target: str) -> DriftResult:
+    """No ClassDefaultObject row has a type record (a cyclic path is skipped)."""
+    accepted = _accepted(target, 'cdo-types')
+    checked, bad = 0, []
+    for row in snap.objects:
+        if not row.flags & EObjectFlags.ClassDefaultObject or f'{row.index:08X}' in accepted:
+            continue
+        try:
+            path = snap.objects.path(row.index)
+        except ValueError:
+            continue
+        checked += 1
+        if (rec := snap.type(path)) is not None:
+            bad.append(f'[{row.index:08X}] {path}: {rec.kind} record')
+    reasons = ([f'{len(bad)} ClassDefaultObject rows have a type record'] if bad else []) +         ([f'too few ClassDefaultObject rows checked ({checked} < {CDO_TYPES_MIN_ROWS})'] if checked < CDO_TYPES_MIN_ROWS else [])
+    return DriftResult(ok=not reasons, matched=checked - len(bad), changed=len(bad), drift=len(bad) / max(1, checked),
+                       reason='; '.join(reasons), samples=tuple(bad[:5]))
+
+
 def _check_equal(pairs: list[tuple[str, object, object]]) -> DriftResult:
     bad = [f'{what}: ours={a!r} oracle={b!r}' for what, a, b in pairs if a != b]
     return DriftResult(ok=not bad, matched=len(pairs) - len(bad), changed=len(bad), drift=len(bad) / max(1, len(pairs)),
@@ -556,7 +600,11 @@ def _extra_live_resolver(ctx, snap) -> DriftResult:
         if (rec := snap.type_of_object(row.index)) is None:
             continue
         compared += 1
-        live = refl.type_record(e.objects.get_by_index(row.index))
+        obj = e.objects.get_by_index(row.index)
+        if rec.kind == 'enum' and rec.underlying_size_from == 'property':  # the size comes from the walk's enum-size map
+            live = refl.enum_record(obj.cast(UEEnum), rec.underlying_size)
+        else:
+            live = refl.type_record(obj)
         if live is None or live.to_json() != rec.to_json():
             bad.append(f'[{row.index:08X}] {rec.path}: live record differs' + (' (None)' if live is None else ''))
     reasons = ([f'{len(bad)} live records differ'] if bad else []) + \
@@ -651,6 +699,8 @@ def run_port(session: real.Session, work_dir: str, *, extra: bool = False) -> Po
             return dr if written > 0 else dataclasses.replace(dr, ok=False, reason='no object rows written')
         steps.check('check:counts', _counts)
         steps.check('check:enums', lambda: _compare_enums(_our_enums(snap), _oracle_enums(od / 'Dumpspace' / 'EnumsInfo.json'), target=t))
+        steps.check('check:props-exact', lambda: _props_exact(_drop_rows(u_props, _accepted(t, 'props-exact')), _drop_rows(o_props, _accepted(t, 'props-exact'))))
+        steps.check('check:cdo-types', lambda: _cdo_types(snap, target=t))
 
         if extra:
             steps.check('extra:from_snapshot', _extra_from_snapshot, ctx, snap, image)

@@ -75,6 +75,33 @@ class PortGateTests(unittest.TestCase):
     def test_enums(self):
         self._check('enums')
 
+    def test_props_exact(self):
+        self._check('props-exact')
+
+    def test_cdo_types(self):
+        self._check('cdo-types')
+
+
+class PortRegressionTests(unittest.TestCase):
+    """Regressions found by 6-G that need no capture; never skipped."""
+
+    def test_gnames_override_rejected(self):
+        from ..engine.core import Engine
+        from ..errors import DetectionError
+        from .pe_file import map_pe_file
+        image = map_pe_file(sys._base_executable)
+        try:
+            base = image.main_module.base
+            rva = next(a - base for r in image.regions()[1:] for a in range(r.end - 0x20, r.base - 1, -0x20)
+                       if image.read(a, 0x20) == bytes(0x20))
+            e = Engine(image)
+            with self.assertRaises(DetectionError) as cm:
+                e.fname.init_override(rva, 'GNames', True)
+            self.assertEqual(cm.exception.step, 'FName::Init')
+            self.assertEqual(e.names.GNames, 0)
+        finally:
+            image.close()
+
 
 if __name__ == '__main__':
     unittest.main()

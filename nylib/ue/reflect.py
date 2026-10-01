@@ -303,6 +303,8 @@ class Reflection:
 
     def type_record(self, obj: UEObject) -> TypeRecord | None:
         _check_wrapper(obj)
+        if obj.get_flags() & EObjectFlags.ClassDefaultObject:  # as the walk: no type record for a CDO
+            return None
         cast_flags = obj.get_class().get_cast_flags()
         if cast_flags & CF.Class:
             return self.class_record(obj.cast(UEClass))
@@ -497,45 +499,51 @@ class _Walk:
             size = None
         return r.enum_record(enum, size), []
 
+    def _emit(self, rec: ObjectRecord, bits: int, *emitted: set) -> tuple[str, TypeRecord, list[int]] | None:
+        """(path, record, listed function addresses), or None after the cyclic_outer / duplicate_path / unreadable_type issue."""
+        try:
+            path = self.table.path(rec.index)
+        except ValueError as err:
+            self.issues.add('cyclic_outer', rec.index, rec.name, err)
+            return None
+        if any(path in s for s in emitted):
+            self.issues.add('duplicate_path', rec.index, rec.name, f'path {path!r} already emitted')
+            return None
+        self.current = (rec.index, rec.name)
+        try:
+            record, functions = self._type_record(rec, bits)
+        except MemoryReadError as err:
+            self.issues.add('unreadable_type', rec.index, rec.name, err)
+            self._fail()
+            return None
+        self._ok()
+        return path, record, functions
+
     def types(self):
         if self.reflection is None:
             raise RuntimeError('the objects stream must be consumed before the types stream')
         table, counts = self.table, self.counts
-        emitted, listed, class_functions = set(), set(), []
+        emitted, nested, listed, class_functions = set(), set(), set(), []
         self._tick(self.unreadable)
         for rec in table:
             bits = self.bits[rec.index]
+            if bits & _CDO or not bits & (_CLASS | _FUNCTION | _STRUCT | _ENUM):  # ea0dab3's managers skip every CDO
+                self._tick()
+                continue
             if bits & _FUNCTION and not bits & _CLASS and (outer := table.get(rec.outer_index)) is not None and self.bits[outer.index] & _CLASS:
                 class_functions.append(rec)
                 self._tick()
                 continue
-            if not bits & (_CLASS | _FUNCTION | _STRUCT | _ENUM):
+            if (got := self._emit(rec, bits, emitted)) is None:
                 self._tick()
                 continue
-            try:
-                path = table.path(rec.index)
-            except ValueError as err:
-                self.issues.add('cyclic_outer', rec.index, rec.name, err)
-                self._tick()
-                continue
-            if path in emitted:
-                self.issues.add('duplicate_path', rec.index, rec.name, f'path {path!r} already emitted')
-                self._tick()
-                continue
-            self.current = (rec.index, rec.name)
-            try:
-                record, functions = self._type_record(rec, bits)
-            except MemoryReadError as err:
-                self.issues.add('unreadable_type', rec.index, rec.name, err)
-                self._fail()
-                self._tick()
-                continue
-            self._ok()
+            path, record, functions = got
             emitted.add(path)
             listed.update(functions)
             if isinstance(record, ClassRecord):
                 counts['classes'] += 1
                 counts['functions'] += len(record.functions)
+                nested.update(fn.path for fn in record.functions.values())
             elif isinstance(record, FunctionRecord):
                 counts['functions'] += 1
             elif isinstance(record, StructRecord):
@@ -544,9 +552,14 @@ class _Walk:
                 counts['enums'] += 1
             self._tick()
             yield record
-        for rec in class_functions:
-            if rec.address not in listed:
-                self.issues.add('orphan_function', rec.index, rec.name, 'no emitted class lists this function')
+        for rec in class_functions:  # orphans: no progress tick, each row was visited above
+            if rec.address in listed:
+                continue
+            self.issues.add('orphan_function', rec.index, rec.name, 'no emitted class lists this function')
+            if (got := self._emit(rec, self.bits[rec.index], emitted, nested)) is not None:
+                emitted.add(got[0])
+                counts['functions'] += 1
+                yield got[1]
         if self.progress is not None:
             self.progress(self.done, self.total)
 

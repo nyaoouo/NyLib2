@@ -268,9 +268,10 @@ class EngineContext:
 
         gnames = values['Off.InSDK.NameArray.GNames']
         use_name_pool = values['Settings.Internal.bUseNamePool']
-        e.fname.init_override(gnames, 'GNames', use_name_pool)
-        if e.names.GNames == 0:
-            raise DetectionError('EngineContext.from_snapshot', f'GNames at {hexs(gnames)} does not validate on this target')
+        try:
+            e.fname.init_override(gnames, 'GNames', use_name_pool)
+        except DetectionError as err:
+            raise DetectionError('EngineContext.from_snapshot', f'GNames at {hexs(gnames)} does not validate on this target') from err
 
         for key, value in values.items():
             setattr(*_holder(e, key), value)

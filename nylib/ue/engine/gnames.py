@@ -716,7 +716,9 @@ class FNameStatics:
         if override_type == 'GNames':
             if e.names.try_init_override(override_offset, is_name_pool):
                 self._ToStr = self._to_str_gnames
-            return
+                return
+            raise DetectionError('FName::Init', f'the GNames override 0x{override_offset:X} could not be initialised',  # DV16
+                                 explanations=tuple(e.messages))
 
         self.AppendString = e.platform.get_module_base() + override_offset
         e.off.InSDK.Name.AppendNameToString = _i32(override_offset)
