@@ -1,9 +1,11 @@
 """G7.5: write_image's round trip against a real x64 PE (I6), plus argument and skip-path coverage."""
 import os
+import stat
 import struct
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 from .. import image
 from ..capture import ImageSource
@@ -36,6 +38,32 @@ class _Mem(MemorySource):
 
     def modules(self):
         return []
+
+
+class _PagedMem(_Mem):
+    """Like _Mem, but refuses any read above PAGE_SIZE: only the page-by-page retry can read it (M7)."""
+
+    def _read(self, address, size):
+        if size > image.PAGE_SIZE:
+            raise MemoryReadError(address, size, 'only page-sized reads served')
+        return super()._read(address, size)
+
+
+def _minimal_pe64_header(size: int, *, file_alignment: int, num_sections: int = 0,
+                         size_of_headers: int = 0x400, size_opt: int = 0xF0, e_lfanew: int = 0xC0) -> bytearray:
+    """A buffer with just enough PE32+ AMD64 fields to reach write_image's layout check and pe_unmap (I1)."""
+    buf = bytearray(size)
+    opt = e_lfanew + 24
+    buf[0:2] = b'MZ'
+    struct.pack_into('<I', buf, 0x3C, e_lfanew)
+    buf[e_lfanew:e_lfanew + 4] = b'PE\0\0'
+    struct.pack_into('<H', buf, e_lfanew + 4, 0x8664)  # IMAGE_FILE_MACHINE_AMD64
+    struct.pack_into('<H', buf, e_lfanew + 6, num_sections)
+    struct.pack_into('<H', buf, e_lfanew + 0x14, size_opt)
+    struct.pack_into('<H', buf, opt, 0x20B)
+    struct.pack_into('<I', buf, opt + 0x24, file_alignment)
+    struct.pack_into('<I', buf, opt + 0x3C, size_of_headers)
+    return buf
 
 
 def _mapped_image(path: str, new_base: int, *, hole: tuple | None = None) -> ImageSource:
@@ -135,6 +163,7 @@ class RoundTripTests(unittest.TestCase):
 
             self.assertEqual(struct.unpack_from('<Q', written_head, opt + 0x18)[0], NEW_BASE)
             if struct.unpack_from('<I', written_head, opt + 0x6C)[0] > 4:
+                self.assertNotEqual(mem_head[opt + 0x90:opt + 0x98], bytes(8))  # M2: precondition, else this proves nothing
                 self.assertEqual(written_head[opt + 0x90:opt + 0x98], bytes(8))
             self.assertEqual(_blanked(mem_head, opt, num_sections, sections_offset),
                              _blanked(written_head, opt, num_sections, sections_offset))
@@ -177,6 +206,38 @@ class RoundTripTests(unittest.TestCase):
             self.assertIsNone(result.path)
             self.assertEqual(result.warnings, (f'image skipped: {result.skipped}',))
             self.assertFalse(os.path.isdir(os.path.join(d, 'image')))
+
+    def test_relative_folder_yields_absolute_path(self):
+        """M3: ImageResult.path is absolute even when `folder` is given as a relative path."""
+        py_exe = sys._base_executable
+        mem = _mapped_image(py_exe, NEW_BASE)
+        with tempfile.TemporaryDirectory() as d:
+            old_cwd = os.getcwd()
+            os.chdir(d)
+            try:
+                result = image.write_image(mem, base=NEW_BASE, size_of_image=mem.main_module.size,
+                                           exe='base.exe', folder='out')
+                self.assertIsNone(result.skipped)
+                self.assertTrue(os.path.isabs(result.path))
+            finally:
+                os.chdir(old_cwd)
+
+
+class RetryPathTests(unittest.TestCase):
+    """M7: no committed test used to exercise the page-by-page retry of a failed READ_STEP piece."""
+
+    def test_page_by_page_retry_covers_every_page(self):
+        py_exe = sys._base_executable
+        mapped = pe_file.map_pe_file(py_exe)
+        main = mapped.main_module
+        buf = bytearray(main.size)
+        for addr, n in mapped.readable_ranges(main.base, main.size):
+            buf[addr - main.base:addr - main.base + n] = mapped.read(addr, n)
+        mem = _PagedMem({NEW_BASE: bytes(buf)})
+        with tempfile.TemporaryDirectory() as d:
+            result = image.write_image(mem, base=NEW_BASE, size_of_image=main.size, exe='x.exe', folder=d)
+            self.assertIsNone(result.skipped)
+            self.assertEqual(result.unreadable_pages, 0)
 
 
 class ArgumentTypeTests(unittest.TestCase):
@@ -225,6 +286,63 @@ class SkipPathTests(unittest.TestCase):
             result = image.write_image(mem, base=base, size_of_image=size, exe='x.exe', folder=d)
         self.assertEqual(result.skipped, 'not a PE32+ AMD64 image')
         self.assertEqual(result.unreadable_pages, 0)
+
+    def test_hostile_file_alignment_is_skipped(self):
+        """I1: FileAlignment above 0x10000 is rejected before pe_unmap, however many sections."""
+        base, size = 0x140000000, 0x10000
+        buf = _minimal_pe64_header(size, file_alignment=0x01000000, num_sections=4)
+        mem = _Mem({base: bytes(buf)})
+        with tempfile.TemporaryDirectory() as d:
+            result = image.write_image(mem, base=base, size_of_image=size, exe='x.exe', folder=d)
+        self.assertEqual(result.skipped, 'not a PE32+ AMD64 image')
+        self.assertIsNone(result.path)
+        self.assertFalse(os.path.isdir(os.path.join(d, 'image')))
+
+    def test_section_table_beyond_headers_is_skipped(self):
+        """I1: a section table that would run past SizeOfHeaders is rejected before pe_unmap's struct.pack_into."""
+        base, size = 0x140000000, 0x1000
+        buf = _minimal_pe64_header(size, file_alignment=1, num_sections=1, size_of_headers=0x100)
+        mem = _Mem({base: bytes(buf)})
+        with tempfile.TemporaryDirectory() as d:
+            result = image.write_image(mem, base=base, size_of_image=size, exe='x.exe', folder=d)
+        self.assertEqual(result.skipped, 'not a PE32+ AMD64 image')
+        self.assertIsNone(result.path)
+
+    def test_memory_error_in_unmap_is_skipped(self):
+        """I2: a MemoryError from pe_unmap (steps 3-6) is skipped, not raised."""
+        py_exe = sys._base_executable
+        mem = _mapped_image(py_exe, NEW_BASE)
+        with tempfile.TemporaryDirectory() as d:
+            with unittest.mock.patch('nylib.ue.image.pe_unmap', side_effect=MemoryError):
+                result = image.write_image(mem, base=NEW_BASE, size_of_image=mem.main_module.size,
+                                           exe='x.exe', folder=d)
+        self.assertIsNotNone(result.skipped)
+        self.assertIn('not enough memory', result.skipped)
+        self.assertIsNone(result.path)
+
+
+class WriteFailureTests(unittest.TestCase):
+    """M4: the write-failure cleanup removes the file only when this call created it."""
+
+    def test_preexisting_readonly_file_survives_skip(self):
+        py_exe = sys._base_executable
+        mem = _mapped_image(py_exe, NEW_BASE)
+        with tempfile.TemporaryDirectory() as d:
+            image_dir = os.path.join(d, 'image')
+            os.makedirs(image_dir)
+            dest = os.path.join(image_dir, 'x.exe')
+            with open(dest, 'wb') as f:
+                f.write(b'preexisting')
+            os.chmod(dest, stat.S_IREAD)
+            try:
+                result = image.write_image(mem, base=NEW_BASE, size_of_image=mem.main_module.size,
+                                           exe='x.exe', folder=d)
+                self.assertIsNotNone(result.skipped)
+                self.assertTrue(os.path.exists(dest))
+                with open(dest, 'rb') as f:
+                    self.assertEqual(f.read(), b'preexisting')
+            finally:
+                os.chmod(dest, stat.S_IWRITE | stat.S_IREAD)
 
 
 class ImageResultMetaTests(unittest.TestCase):
