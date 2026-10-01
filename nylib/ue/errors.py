@@ -78,3 +78,77 @@ class DetectionError(UeError):
         self.detail = detail
         self.explanations = tuple(explanations)
         super().__init__(f'detection stopped at {step}: {detail}')
+
+
+def _set_details(err: UeError, details: dict) -> None:
+    for name, value in details.items():
+        setattr(err, name, value)
+
+
+class AmbiguousTargetError(TargetError):
+    """Raised when a process name matches more than one PID."""
+
+
+class ProfileError(UeError):
+    """Raised when a profile TOML is invalid, has unknown keys or bad values."""
+
+    def __init__(self, path, reason: str):
+        self.path = path
+        self.reason = reason
+        super().__init__(f'invalid profile {path}: {reason}')
+
+
+class OutputRootError(UeError):
+    """Raised when internal mode needs an output root and none was given."""
+
+    def __init__(self, message: str, **details):
+        super().__init__(message)
+        _set_details(self, details)
+
+
+class SessionError(UeError):
+    """Base for runtime session policy violations."""
+
+    def __init__(self, message: str, **details):
+        super().__init__(message)
+        _set_details(self, details)
+
+
+class ReadOnlySessionError(SessionError):
+    """Raised when a write is attempted on a read-only session."""
+
+
+class CallsDisabledError(SessionError):
+    """Raised when a call is attempted on a session with calls disabled."""
+
+
+class DumpMismatchError(SessionError):
+    """Raised when a dump does not match what was expected."""
+
+
+class UnverifiedOffsetsError(SessionError):
+    """Raised when a session would use offsets that were never verified."""
+
+
+class AmbiguousNameError(UeError, LookupError):
+    """Raised when a short-name lookup matches more than one object."""
+
+    def __init__(self, message: str, **details):
+        super().__init__(message)
+        _set_details(self, details)
+
+
+class CallError(UeError):
+    """Raised when a ProcessEvent call fails or times out."""
+
+    def __init__(self, message: str, **details):
+        super().__init__(message)
+        _set_details(self, details)
+
+
+class MarshalError(UeError, TypeError):
+    """Raised when a call argument cannot be marshalled."""
+
+    def __init__(self, message: str, **details):
+        super().__init__(message)
+        _set_details(self, details)
