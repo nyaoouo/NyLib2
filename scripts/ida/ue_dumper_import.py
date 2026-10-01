@@ -6,6 +6,7 @@ Run modes: File > Script file (Alt+F7) or the plugin (Edit > Plugins > UE Dumper
 import argparse
 import bisect
 import collections
+import hashlib
 import json
 import os
 import re
@@ -271,6 +272,16 @@ def mangle_exec(class_cpp: str, function_valid: str) -> str:
 
 def _text(s: str) -> str:
     return _LONE_SURROGATE_RE.sub(chr(0xFFFD), s)
+
+
+def _digest(text: str) -> str:
+    """SHA-256 hex of `text` encoded UTF-8 with surrogatepass (R8's `C` and `T` records)."""
+    return hashlib.sha256(text.encode('utf-8', 'surrogatepass')).hexdigest()
+
+
+def _type_key(name: str) -> int:
+    """The netnode index of type `name`'s `T` record."""
+    return int.from_bytes(hashlib.sha256(name.encode('utf-8', 'surrogatepass')).digest()[:8], 'little') >> 1
 
 
 # --- F8 records (nylib/ue/model.py), validated as model.from_json does ---
@@ -1093,6 +1104,8 @@ class _TypePlanner:
                 else:
                     entry['super'] = _req(d, 'super', str, nullable=True)
                     entry['size'] = _hexkey(d, 'size')
+                    align = max(_req(d, 'min_alignment', int), 1)
+                    entry['udt_size'] = -(-entry['size'] // align) * align if kind == 'struct' else entry['size']
             except _Bad as e:
                 raise SnapshotFormatError(view.folder, f'types.jsonl: type {path!r}: {e}') from None
             self.info[path] = entry
@@ -1291,6 +1304,11 @@ class _TypePlanner:
     def _tarray(self, name: str, elem_spec) -> str:
         return self._support(name, 0x10, [('Data', 0, 64, ('ptr', elem_spec)), ('Num', 64, 32, _i(4)), ('Max', 96, 32, _i(4))])
 
+    def _interface(self, t, size: int) -> str:
+        if size != 0x10:
+            return self._support(self.spell(t), size)
+        return self._support(self.spell(t), 0x10, [('ObjectPointer', 0, 64, _ptr('UObject')), ('InterfacePointer', 64, 64, _ptr())])
+
     def _elem_spec(self, t):
         """The IDA type of a TArray element; only a declaration is needed (Data is a pointer)."""
         k = t['kind']
@@ -1310,8 +1328,10 @@ class _TypePlanner:
             return _i(1, False)
         if k in ('NameProperty', 'StrProperty', 'TextProperty'):
             return _named(self._support_named(self.spell(t)))
-        if k in ('ObjectProperty', 'InterfaceProperty'):
+        if k == 'ObjectProperty':
             return self._ref(_named(self._type_name(t['class'], 'U', 'UObject')))
+        if k == 'InterfaceProperty':
+            return _named(self._interface(t, 0x10))
         if k == 'ClassProperty':
             return self._ref(_named('UClass'))
         if k == 'StructProperty':
@@ -1351,9 +1371,10 @@ class _TypePlanner:
             return (('bool',) if size == 1 else _i(size, False)), 0, False
         if k in ('NameProperty', 'StrProperty', 'TextProperty'):
             return _named(self._support_named(self.spell(t))), 0, False
-        if k in ('ObjectProperty', 'InterfaceProperty'):
-            default = 'UObject'
-            return self._ref(_named(self._type_name(t['class'], 'U', default))), 0, False
+        if k == 'ObjectProperty':
+            return self._ref(_named(self._type_name(t['class'], 'U', 'UObject'))), 0, False
+        if k == 'InterfaceProperty':
+            return _named(self._interface(t, size)), 0, False
         if k == 'ClassProperty':
             return self._ref(_named('UClass')), 0, False
         if k == 'StructProperty':
@@ -1392,7 +1413,7 @@ class _TypePlanner:
                 return self.udts[n]['size']
             if (p := self.by_name.get(n)) is not None:
                 e = self.info[p]
-                return e['width'] if e['kind'] == 'enum' else e['size']
+                return e['width'] if e['kind'] == 'enum' else e['udt_size']
         return 0
 
     def _layout(self, path: str) -> dict:
@@ -1433,12 +1454,12 @@ class _TypePlanner:
         self.untyped += lay['untyped']
         self.dropped += len(lay['dropped'])
         comment = '\n'.join([_TYPE_MARK + _text(rec['path'])] + lay['dropped'])
-        self.udts[name] = self._udt(name, rec['size'], path=rec['path'], folder=_folder(rec['package']), base=lay['base'],
+        self.udts[name] = self._udt(name, self.info[rec['path']]['udt_size'], path=rec['path'], folder=_folder(rec['package']), base=lay['base'],
                                     base_size=lay['start'] if lay['base'] else 0, members=self._name_members(lay['members']),
                                     comment=comment)
 
     def _layout_members(self, rec: dict, name: str, start: int) -> tuple:
-        size = rec['size']
+        size = self.info[rec['path']]['udt_size']
         members, dropped, used, untyped_count = [], [], [], 0
         for p in rec['properties']:
             spec, bit, untyped = self._member_spec(p)
@@ -1526,7 +1547,7 @@ class _TypePlanner:
             end = max(off + sz for _m, off, sz, _s in rows)
             path = self.by_name.get(t)
             path = path if path is not None and self.info[path]['kind'] != 'enum' else None
-            size = self.core_sizes.get(t) or (self.info[path]['size'] if path else max(end, base_size))
+            size = self.core_sizes.get(t) or (self.info[path]['udt_size'] if path else max(end, base_size))
             members = [(m, off * 8, sz * 8, self._core_spec(spec, sz)) for m, off, sz, spec in rows
                        if off >= base_size and off + sz <= size]
             self.udts[t] = self._udt(t, size, base=base, base_size=base_size, members=sorted(members, key=lambda m: m[1]))
@@ -1795,7 +1816,6 @@ class _Applier:
                                                'members_untyped'), 0),
                        'comments': dict.fromkeys(('set', 'unchanged', 'replaced', 'kept', 'failed'), 0),
                        'kept': [], 'failures': []}
-        self.kept_kinds = []
         self.cancelled = False
         self._ticks = 0
 
@@ -1810,17 +1830,32 @@ class _Applier:
         self.report[bucket]['failed'] += 1
         self.report['failures'].append((what, reason))
 
-    def keep(self, bucket: str, kind: str, ea: int, cur: str, planned: str):
+    def keep(self, bucket: str, kind: str, ea: 'int | None', cur: str, planned: str):
         self.report[bucket]['kept'] += 1
-        self.report['kept'].append((ea, cur, planned))
-        self.kept_kinds.append(kind)
+        self.report['kept'].append((ea, cur, planned, kind))
 
     def _rec(self, ea: int, tag: str):
-        v = self.nn.supstr_ea(ea, ord(tag)) or self.nn.supstr(ea, ord(tag))  # then the absolute-ea key of older imports
+        v = self.nn.supstr_ea(ea, ord(tag))
+        if not v and tag in 'NP':
+            v = self.nn.supstr(ea, ord(tag))  # the absolute-ea key of imports before C8.G.2
         return tuple(v.split('\n', 1)) if v and '\n' in v else None
 
-    def _record(self, ea: int, tag: str, value: str):
-        self.nn.supset_ea(ea, value, ord(tag))
+    def _record(self, ea: int, tag: str, value: str, rec=None):
+        if rec != tuple(value.split('\n', 1)):
+            self.nn.supset_ea(ea, value, ord(tag))
+
+    def _comment_digest(self, ea: int) -> 'str | None':
+        rec = self._rec(ea, 'C')
+        return rec[1] if rec and rec[0] == '1' else None
+
+    def _type_digest(self, name: str) -> 'str | None':
+        v = self.nn.supstr(_type_key(name), ord('T'))
+        parts = v.split('\n') if v else []
+        return parts[1] if len(parts) == 3 and parts[0] == '1' and parts[2] == name else None
+
+    def _record_type(self, name: str, digest: str):
+        if self._type_digest(name) != digest:
+            self.nn.supset(_type_key(name), f'1\n{digest}\n{name}', ord('T'))
 
     # -- types
 
@@ -1867,27 +1902,31 @@ class _Applier:
         return t if t.get_named_type(None, name) else None
 
     @staticmethod
-    def _shape(t) -> tuple:
+    def _shape(t, cmt: 'str | None' = None) -> tuple:
+        """The `T` record's digest input; `cmt` stands in for the type comment of a type not yet in the IDB."""
         import ida_typeinf as T
+        cmt = (t.get_type_cmt() or '') if cmt is None else cmt
         if t.is_enum():
             ei = T.enum_type_data_t()
             t.get_enum_details(ei)
-            return 'enum', t.get_size(), ei.is_number_signed(), [(m.name, m.value) for m in ei]
+            return 'enum', t.get_size(), bool(ei.is_number_signed()), cmt, [(m.name, int(m.value), m.cmt or '') for m in ei]
         u = T.udt_type_data_t()
         if not t.get_udt_details(u):
-            return 'other', str(t)
-        return ('udt', t.get_size(), u.is_fixed(), u.is_cppobj(),
-                [(m.name, int(m.offset), int(m.size), str(m.type), m.is_baseclass()) for m in u])
+            return 'other', str(t), cmt
+        return ('udt', t.get_size(), bool(u.is_fixed()), bool(u.is_cppobj()), cmt,
+                [(m.name, int(m.offset), int(m.size), str(m.type), bool(m.is_baseclass()), m.cmt or '') for m in u])
 
-    def _put_type(self, name: str, new, comment: str, folder: str) -> 'str | None':
+    def _put_type(self, name: str, new, comment: str, folder: str) -> str:
         import ida_typeinf as T
         cur = self._existing(name)
         if cur is not None and not cur.is_forward_decl():
-            cmt = cur.get_type_cmt() or ''
-            if cmt == comment and self._shape(cur) == self._shape(new):
-                self._move(name, folder)
+            have = repr(self._shape(cur))
+            if have == repr(self._shape(new, comment)):
+                self._record_type(name, _digest(have))
                 return 'unchanged'
-            if not cmt.startswith(_TYPE_MARK) and not self.overwrite:
+            rec = self._type_digest(name)
+            ours = _digest(have) == rec if rec is not None else (cur.get_type_cmt() or '').startswith(_TYPE_MARK)
+            if not ours and not self.overwrite:
                 return 'kept'
             action = 'replaced'
         else:
@@ -1898,7 +1937,9 @@ class _Applier:
         named = self._existing(name)
         if named is None or named.set_type_cmt(comment) != T.TERR_OK:
             raise RuntimeError('cannot set the type comment')
-        self._move(name, folder)
+        self._record_type(name, _digest(repr(self._shape(self._existing(name)))))
+        if action == 'created':
+            self._move(name, folder)
         return action
 
     def _move(self, name: str, folder: str):
@@ -1970,18 +2011,22 @@ class _Applier:
             if self.tick():
                 return
             try:
-                action = self._put_type(e['name'], self._enum_tif(e), e['comment'], e['folder'])
-                r[action] += 1
+                self._count_type(e, self._put_type(e['name'], self._enum_tif(e), e['comment'], e['folder']))
             except Exception as ex:
                 self.fail('types', f"enum {e['name']}", f'{type(ex).__name__}: {ex}')
         for u in tp['udts']:
             if self.tick():
                 return
             try:
-                action = self._put_type(u['name'], self._udt_tif(u), u['comment'], u['folder'])
-                r[action] += 1
+                self._count_type(u, self._put_type(u['name'], self._udt_tif(u), u['comment'], u['folder']))
             except Exception as ex:
                 self.fail('types', f"type {u['name']}", f'{type(ex).__name__}: {ex}')
+
+    def _count_type(self, planned: dict, action: str):
+        if action == 'kept':
+            self.keep('types', 'type', None, planned['name'], planned['comment'].split('\n', 1)[0])
+        else:
+            self.report['types'][action] += 1
 
     # -- names
 
@@ -2006,6 +2051,7 @@ class _Applier:
         cur = ida_name.get_name(ea) or ''
         rec = self._rec(ea, 'N')
         if cur == planned or (rec and rec[0] == planned and rec[1] == cur):
+            self._record(ea, 'N', f'{planned}\n{cur}', rec)
             r['unchanged'] += 1
             return
         flags = ida_bytes.get_flags(ea)
@@ -2034,13 +2080,17 @@ class _Applier:
         r = self.report['comments']
         pfn = ida_funcs.get_func(ea)
         on_func = pfn is not None and pfn.start_ea == ea
-        cur = (ida_funcs.get_func_cmt(pfn, True) if on_func else ida_bytes.get_cmt(ea, True)) or ''
+        read = lambda: (ida_funcs.get_func_cmt(pfn, True) if on_func else ida_bytes.get_cmt(ea, True)) or ''
+        cur = read()
+        rec = self._comment_digest(ea)
         if cur == text:
+            if rec != _digest(cur):
+                self._record(ea, 'C', f'1\n{_digest(cur)}')
             r['unchanged'] += 1
             return
         if not cur:
             action = 'set'
-        elif cur.startswith(_COMMENT_MARK) or cur.startswith(_ALSO_MARK) or self.overwrite:
+        elif (_digest(cur) == rec if rec is not None else cur.startswith(_COMMENT_MARK)) or self.overwrite:
             action = 'replaced'
         else:
             self.keep('comments', 'comment', ea, cur.split('\n', 1)[0], text.split('\n', 1)[0])
@@ -2052,6 +2102,7 @@ class _Applier:
         if not ok:
             self.fail('comments', f'comment at {ea:#x}', 'IDA refused the comment')
             return
+        self._record(ea, 'C', f'1\n{_digest(read())}')
         r[action] += 1
 
     def apply_type_at(self, ea: int, decl: str, bucket: str, *, function: bool):
@@ -2073,18 +2124,18 @@ class _Applier:
         cur = str(cur_t) if ida_nalt.get_tinfo(cur_t, ea) else ''
         rec = self._rec(ea, 'P')
         if cur == planned:
+            self._record(ea, 'P', f'{planned}\n{planned}', rec)
             r['unchanged'] += 1
             return
-        kind = 'prototype' if function else 'type'
         if not cur:
             action = 'set'
         elif rec and rec[1] == cur or self.overwrite:
             action = 'replaced'
         else:
-            self.keep(bucket, kind, ea, cur, planned)
+            self.keep(bucket, 'decl', ea, cur, planned)
             return
         if not function and not self.overwrite and self._user_data_in_span(ea, t.get_size(), own_item=action == 'replaced'):
-            self.keep(bucket, kind, ea, '<user data in span>', planned)
+            self.keep(bucket, 'decl', ea, '<user data in span>', planned)
             return
         if not T.apply_tinfo(ea, t, T.TINFO_DEFINITE):
             self.fail(bucket, f'type at {ea:#x}', f'IDA refused {decl!r}')
@@ -2195,14 +2246,14 @@ def run(snapshot, *, types='all', roots=(), exec_names=True, vtables=True, globa
               'names': ap.report['names'], 'types': ap.report['types'], 'comments': ap.report['comments'],
               'kept': ap.report['kept'], 'failures': ap.report['failures'], 'seconds': round(time.monotonic() - started, 3),
               'cancelled': ap.cancelled}
-    _print_report(report, p, verbose, ap.kept_kinds)
+    _print_report(report, p, verbose)
     return report
 
 
-def _print_report(report: dict, p: dict, verbose: bool, kinds: list):
+def _print_report(report: dict, p: dict, verbose: bool):
     t = report['types']
-    kept_names = [k for k, kind in zip(report['kept'], kinds) if kind == 'name']
-    kept_other = [(k, kind) for k, kind in zip(report['kept'], kinds) if kind != 'name']
+    kept_names = [k for k in report['kept'] if k[3] == 'name']
+    kept_other = [k for k in report['kept'] if k[3] != 'name']
     _say(f"names     {_fmt(p['counts']['exec'])} exec · {_fmt(p['counts']['vtables'])} vtables · "
          f"{len(p['globals'])} globals; kept {_fmt(len(kept_names))} names you set by hand")
     if p['globals_skipped']:
@@ -2223,14 +2274,14 @@ def _print_report(report: dict, p: dict, verbose: bool, kinds: list):
         shown = kept_names if verbose else kept_names[:3]
         _say(f'kept names (first {len(shown)} of {len(kept_names)}, the rest with -v):' if len(shown) < len(kept_names)
              else f'kept names ({len(kept_names)}):')
-        for ea, cur, planned in shown:
+        for ea, cur, planned, _kind in shown:
             print(f'    0x{ea:X}  {cur:<28} (snapshot: {planned})')
     if kept_other:
         shown = kept_other if verbose else kept_other[:3]
         _say(f'kept comments, prototypes and types (first {len(shown)} of {len(kept_other)}, the rest with -v):'
              if len(shown) < len(kept_other) else f'kept comments, prototypes and types ({len(kept_other)}):')
-        for (ea, cur, planned), kind in shown:
-            print(f'    0x{ea:X}  {kind:<9} {cur:<28} (snapshot: {planned})')
+        for ea, cur, planned, kind in shown:
+            print(f"    {'-' if ea is None else f'0x{ea:X}'}  {kind:<7} {cur:<28} (snapshot: {planned})")
 
 
 def _parser() -> argparse.ArgumentParser:

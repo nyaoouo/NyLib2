@@ -3,6 +3,7 @@ check, stdlib-only and copied-naming guards, and env-gated comparisons on real s
 """
 import ast
 import collections
+import hashlib
 import importlib.util
 import os
 import pathlib
@@ -128,6 +129,32 @@ class TypePlanTests(unittest.TestCase):
         self.assertEqual(sorted(planned), sorted(r.path for r in recs))
         self.assertEqual(len(set(planned.values())), 2)
         self.assertEqual(tp['records'], 2)
+
+    def test_struct_udt_size_rounds_up_to_min_alignment(self):
+        s = model.StructRecord(path='/S/P.S', name='S', cpp_name='FS', package='/S/P', super=None, size=0x6B, min_alignment=8,
+                               properties=[_int('a', 0)])
+        c = model.ClassRecord(path='/S/P.C', name='C', cpp_name='UC', package='/S/P', super=None, size=0x6B, min_alignment=8,
+                              properties=[])
+        sizes = {u['name']: u['size'] for u in self._types([s, c])['udts']}
+        self.assertEqual((sizes['FS'], sizes['UC']), (0x70, 0x6B))
+
+    def test_interface_member_is_16_bytes(self):
+        t = model.PropType(prop='InterfaceProperty', kind='InterfaceProperty', cls='/S/P.Iface')
+        rec = model.StructRecord(path='/S/P.S', name='S', cpp_name='FS', package='/S/P', super=None, size=0x18, min_alignment=8,
+                                 properties=[model.PropertyRecord(name='I', offset=8, size=0x10, array_dim=1, flags=0, type=t)])
+        udts = {u['name']: u for u in self._types([rec])['udts']}
+        member = udts['FS']['members'][0]
+        self.assertEqual(member[:3], ('I', 64, 128))
+        self.assertEqual([m[:3] for m in udts[member[3][1]]['members']], [('ObjectPointer', 0, 64), ('InterfacePointer', 64, 64)])
+
+
+class NetnodeRecordTests(unittest.TestCase):
+    def test_type_key_and_digests(self):
+        h = hashlib.sha256('USmokeLeaf'.encode('utf-8')).digest()
+        self.assertEqual(uei._type_key('USmokeLeaf'), int.from_bytes(h[:8], 'little') >> 1)
+        shape = ('udt', 8, True, True, 'nylib.ue: /S/P.X', [('a', 0, 32, 'int', False, '')])
+        self.assertEqual(uei._digest(repr(shape)), hashlib.sha256(repr(shape).encode('utf-8')).hexdigest())
+        self.assertEqual(uei._digest('a\ud800'), hashlib.sha256(b'a\xed\xa0\x80').hexdigest())
 
 
 class BuildCheckGuardTests(unittest.TestCase):
@@ -323,9 +350,11 @@ class RealSnapshotTests(unittest.TestCase):
                 if bit is not None and p.array_dim == 1:
                     ok = 1 in by_lo.get(p.offset * 8 + bit, ())
                 else:
-                    ok = any(nb <= p.size * p.array_dim * 8 for nb in by_lo.get(p.offset * 8, ()))
-                # root Q49 (not yet answered) decides the stricter short-member / struct-alignment condition; left out here
-                self.assertTrue(ok, f'{r.path}: {p.name} @0x{p.offset:x} size 0x{p.size:x} not placed in the plan')
+                    ok = p.size * p.array_dim * 8 in by_lo.get(p.offset * 8, ())
+                self.assertTrue(ok, f'{r.path}: {p.name} @0x{p.offset:x} size 0x{p.size:x} not placed in the plan at its size')
+            if not isinstance(r, model.ClassRecord):
+                align = max(r.min_alignment, 1)
+                self.assertEqual(us[0]['size'], -(-r.size // align) * align, f'{r.path}: struct UDT size')
         rec_by_cpp = collections.defaultdict(list)
         for r in class_struct:
             rec_by_cpp[r.cpp_name].append(r)
