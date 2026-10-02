@@ -32,8 +32,9 @@ def _is_int(value) -> bool:
 def _require_chunked(e: 'Engine') -> None:
     if not e.off.FUObjectArray.bIsChunked:
         raise DetectionError('ObjectIndex', 'the GObjects layout is not chunked')
-    if e.objects.NumElementsPerChunk <= 0:
-        raise DetectionError('ObjectIndex', f'the GObjects chunk size {e.objects.NumElementsPerChunk} is not positive')
+    per = e.objects.NumElementsPerChunk
+    if not 0 < per <= 0x7FFFFFFF:
+        raise DetectionError('ObjectIndex', f'the GObjects chunk size {per} is not a positive int32')
 
 
 def _iter_item_bytes(e: 'Engine'):
