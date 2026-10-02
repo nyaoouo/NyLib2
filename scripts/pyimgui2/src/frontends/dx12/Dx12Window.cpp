@@ -11,6 +11,19 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 
 START_M_IMGUI_IMPL_DX12_NAMESPACE
 {
+    // Depth of our own render logic, resize handling and submits on this thread; hooks reached from inside it pass through.
+    static thread_local int logicDepth = 0;
+
+    namespace
+    {
+        // Marks our own render logic, resize handling or submit on this thread.
+        struct LogicScope
+        {
+            LogicScope() { logicDepth++; }
+            ~LogicScope() { logicDepth--; }
+        };
+    }
+
     Dx12TextureHelper::Dx12TextureHelper(ID3D12Device *d3dDevice, D3D12_CPU_DESCRIPTOR_HANDLE srvCpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE srvGpuHandle, const char *filename)
         : d3dDevice(d3dDevice), srvCpuHandle(srvCpuHandle), srvGpuHandle(srvGpuHandle)
     {
@@ -149,7 +162,10 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         hr = cmdList->Close();
         if (hr != S_OK)
             _throwV_("Failed to close command list with error code {}", hr);
-        cmdQueue->ExecuteCommandLists(1, (ID3D12CommandList *const *)&cmdList);
+        {
+            LogicScope ownSubmit;
+            cmdQueue->ExecuteCommandLists(1, (ID3D12CommandList *const *)&cmdList);
+        }
         hr = cmdQueue->Signal(fence, 1);
         if (hr != S_OK)
             _throwV_("Failed to signal fence with error code {}", hr);
@@ -551,7 +567,6 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
     static ResizeBuffers1D3D12 oResizeBuffers1D3D12 = nullptr;
 
     static thread_local bool inGamePresent = false;
-    static thread_local int resizeDepth = 0;
     static std::atomic<bool> presentSeen{false};
     static std::atomic<bool> fenceTimeoutReported{false};
     static size_t const SWAP_CHAIN_SCAN_SIZE = 0x400;
@@ -735,7 +750,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         {
             HookBody body;
             Dx12Inbound *instance = hookInstance;
-            if (instance != nullptr && hooksEnabled && (instance->pSwapChain == nullptr || instance->pSwapChain == pSwapChain))
+            if (instance != nullptr && hooksEnabled && logicDepth == 0 && (instance->pSwapChain == nullptr || instance->pSwapChain == pSwapChain))
             {
                 try
                 {
@@ -765,7 +780,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         {
             HookBody body;
             Dx12Inbound *instance = hookInstance;
-            if (instance != nullptr && hooksEnabled && instance->queueFallback && !instance->isInLogic)
+            if (instance != nullptr && hooksEnabled && instance->queueFallback && logicDepth == 0)
                 instance->OfferFallbackQueue(dCommandQueue, inGamePresent);
         }
         oExecuteCommandListsD3D12(dCommandQueue, NumCommandLists, ppCommandLists);
@@ -776,15 +791,14 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
     {
         HookBody body;
         Dx12Inbound *instance = hookInstance;
-        if (resizeDepth > 0 || instance == nullptr || !instance->isImGuiInitialized || instance->pSwapChain != pSwapChain)
+        if (logicDepth > 0 || instance == nullptr || !instance->isImGuiInitialized || instance->pSwapChain != pSwapChain)
             return oResizeBuffersD3D12(pSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
-        resizeDepth++;
+        LogicScope logic;
         instance->BeforeResize();
         HRESULT hr = oResizeBuffersD3D12(pSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
         instance->AfterResize(nullptr, nullptr);
         if (!hooksEnabled)
             instance->CleanupRenderTargets();
-        resizeDepth--;
         return hr;
     }
 
@@ -792,15 +806,14 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
     {
         HookBody body;
         Dx12Inbound *instance = hookInstance;
-        if (resizeDepth > 0 || instance == nullptr || !instance->isImGuiInitialized || instance->pSwapChain != pSwapChain)
+        if (logicDepth > 0 || instance == nullptr || !instance->isImGuiInitialized || instance->pSwapChain != pSwapChain)
             return oResizeBuffers1D3D12(pSwapChain, BufferCount, Width, Height, Format, SwapChainFlags, pCreationNodeMask, ppPresentQueue);
-        resizeDepth++;
+        LogicScope logic;
         instance->BeforeResize();
         HRESULT hr = oResizeBuffers1D3D12(pSwapChain, BufferCount, Width, Height, Format, SwapChainFlags, pCreationNodeMask, ppPresentQueue);
         instance->AfterResize(pCreationNodeMask, SUCCEEDED(hr) ? ppPresentQueue : nullptr);
         if (!hooksEnabled)
             instance->CleanupRenderTargets();
-        resizeDepth--;
         return hr;
     }
 
@@ -1260,12 +1273,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 
     void Dx12Inbound::Update()
     {
-        struct LogicScope
-        {
-            bool &flag;
-            ~LogicScope() { flag = false; }
-        } logic{this->isInLogic};
-        this->isInLogic = true;
+        LogicScope logic;
         this->_Update();
     }
 
@@ -1283,7 +1291,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 
         py::class_<Dx12Render, RenderBase>(m, "Dx12Render", py::dynamic_attr(), py::module_local())
             .def_static("InvalidateDeviceObjects", []() { ImGui_ImplDX12_InvalidateDeviceObjects(); })
-            .def_static("CreateDeviceObjects", []() { return ImGui_ImplDX12_CreateDeviceObjects(); })
+            .def_static("CreateDeviceObjects", []() { LogicScope ownSubmit; return ImGui_ImplDX12_CreateDeviceObjects(); })
             .def("CreateTexture", [](Dx12Render &self, const char *filename) { return self.CreateTexture(filename); }, py::arg("filename"), py::return_value_policy::take_ownership)
             .def("CreateTexture", [](Dx12Render &self) { return self.CreateTexture(); }, py::return_value_policy::take_ownership);
 
@@ -1294,7 +1302,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 
         py::class_<Dx12Inbound, Dx12Render>(m, "Dx12Inbound", py::dynamic_attr(), py::module_local())
             .def(py::init<std::optional<py::function>>(), py::arg("renderCallback") = py::none())
-            .def_property_readonly("isInLogic", [](Dx12Inbound &self) { return self.isInLogic; })
+            .def_property_readonly("isInLogic", [](Dx12Inbound &) { return logicDepth > 0; })
             .def("Attach", &Dx12Inbound::Attach)
             .def("Detach", &Dx12Inbound::Detach);
     }

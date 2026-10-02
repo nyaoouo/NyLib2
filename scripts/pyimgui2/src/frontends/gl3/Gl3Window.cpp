@@ -280,6 +280,8 @@ START_M_IMGUI_IMPL_GL3_NAMESPACE
     static std::atomic<bool> hooksEnabled{false};
     static std::atomic<int> hooksInFlight{0};
     static thread_local int hookBodyDepth = 0;
+    // Depth of our own render logic and submits on this thread; hooks reached from inside it pass through.
+    static thread_local int logicDepth = 0;
     static std::atomic<HWND> attachedHwnd{nullptr};
     static bool swapBuffersHooked = false;
     static bool atexitRegistered = false;
@@ -293,6 +295,13 @@ START_M_IMGUI_IMPL_GL3_NAMESPACE
         {
             HookBody() { hookBodyDepth++; hooksInFlight++; }
             ~HookBody() { hooksInFlight--; hookBodyDepth--; }
+        };
+
+        // Marks our own render logic or submit on this thread.
+        struct LogicScope
+        {
+            LogicScope() { logicDepth++; }
+            ~LogicScope() { logicDepth--; }
         };
     }
 
@@ -379,7 +388,7 @@ START_M_IMGUI_IMPL_GL3_NAMESPACE
         {
             HookBody body;
             Gl3Inbound *instance = hookInstance;
-            if (instance != nullptr && hooksEnabled && !instance->isInLogic)
+            if (instance != nullptr && hooksEnabled && logicDepth == 0)
             {
                 try
                 {
@@ -506,12 +515,7 @@ START_M_IMGUI_IMPL_GL3_NAMESPACE
 
     void Gl3Inbound::Update()
     {
-        struct LogicScope
-        {
-            bool &flag;
-            ~LogicScope() { flag = false; }
-        } logic{this->isInLogic};
-        this->isInLogic = true;
+        LogicScope logic;
         this->_Update();
     }
 
@@ -603,7 +607,7 @@ START_M_IMGUI_IMPL_GL3_NAMESPACE
             .def("Serve", &Gl3Window::Serve, py::call_guard<py::gil_scoped_release>());
         py::class_<Gl3Inbound, Gl3Render>(m, "Gl3Inbound", py::dynamic_attr(), py::module_local())
             .def(py::init<std::optional<py::function>>(), py::arg("renderCallback") = py::none())
-            .def_property_readonly("isInLogic", [](Gl3Inbound &self) { return self.isInLogic; })
+            .def_property_readonly("isInLogic", [](Gl3Inbound &) { return logicDepth > 0; })
             .def("Attach", &Gl3Inbound::Attach)
             .def("Detach", &Gl3Inbound::Detach);
     }
