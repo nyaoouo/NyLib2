@@ -505,13 +505,13 @@ class Unreal:
         try:
             row_cls = e.mem.ptr(a + e.off.UObject.Class)
             row_outer = e.mem.ptr(a + e.off.UObject.Outer)
+            if address not in ctx.index.super_chain(row_cls) or row_outer != actor._address_:
+                logger.debug('component: dropped a stale row (address reused since the index was built)')
+                return None
+            return ctx._proxy_of(a, row_cls)
         except MemoryReadError:
             logger.debug('component: dropped an unreadable row (address reused since the index was built)')
             return None
-        if address not in ctx.index.super_chain(row_cls) or row_outer != actor._address_:
-            logger.debug('component: dropped a stale row (address reused since the index was built)')
-            return None
-        return ctx._proxy_of(a, row_cls)
 
     def world(self) -> UObjectProxy | None:
         ctx = self._live()
