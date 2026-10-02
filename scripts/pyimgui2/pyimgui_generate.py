@@ -1618,6 +1618,11 @@ def patch_frontend_compat_stubs(output_dir, frontends):
     if not init_stub.is_file():
         return
     data = init_stub.read_text(encoding='utf-8')
+    # MonitorInfo.pos/size resolve to imgui.ImVec2 (a submodule type);
+    # stubgen can't resolve the cross-module reference and leaves the
+    # unqualified name / typing.Any instead.
+    data = _patch_field_stub_types(data, {'MonitorInfo': {'pos': 'imgui.ImVec2', 'size': 'imgui.ImVec2'}})
+    data = _patch_function_return_types(data, {'': {'GetMonitors': 'list[MonitorInfo]'}})
     exports = ['gUtils', 'imgui']
     imports = []
     if 'dx9' in frontends:
@@ -1818,6 +1823,7 @@ def generate(backends, debug=0, with_stubs=True):
                 src_dir / 'DllMain.cpp',
                 src_dir / 'gHeader.cpp',
                 src_dir / 'ImguiCtx.cpp',
+                src_dir / 'OverlayQueries.cpp',
                 src_dir / 'OverlayTypes.cpp',
                 src_dir / 'UnhandledException.cpp',
                 src_dir / 'Win32Font.cpp',
