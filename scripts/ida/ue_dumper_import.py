@@ -2190,7 +2190,7 @@ class _Applier:
             r['unchanged'] += 1
             return
         users = None
-        if not cur:
+        if not cur or function and not ida_nalt.is_userti(ea):
             action = 'set'
         elif rec == _hash_record(cur):
             action = 'replaced'
