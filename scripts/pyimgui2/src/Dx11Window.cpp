@@ -497,6 +497,16 @@ START_M_IMGUI_IMPL_NAMESPACE
         this->SetHwnd(nullptr);
     }
 
+    // Sets or clears ImGuiConfigFlags_ViewportsEnable on the current context.
+    static void SetViewportsFlag(bool enable)
+    {
+        ImGuiIO &io = ImGui::GetIO();
+        if (enable)
+            io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+        else
+            io.ConfigFlags &= ~ImGuiConfigFlags_ViewportsEnable;
+    }
+
     void Dx11Inbound::InitImGui(IDXGISwapChain *pSwapChain)
     {
         if (this->isImGuiInitialized)
@@ -532,6 +542,8 @@ START_M_IMGUI_IMPL_NAMESPACE
 
         ImGui_ImplWin32_Init(host);
         ImGui_ImplDX11_Init(this->pd3dDevice, this->pd3dDeviceContext);
+        this->viewportsDirty = false;
+        SetViewportsFlag(this->viewportsEnable);
 
         std::lock_guard<std::mutex> lock(transitionMutex);
         this->isImGuiInitialized = true;
@@ -590,6 +602,9 @@ START_M_IMGUI_IMPL_NAMESPACE
             return;
         }
 
+        // ImGui asserts when ViewportsEnable is first set on frame 1, so an assignment then waits one frame.
+        if (ImGui::GetFrameCount() != 1 && this->viewportsDirty.exchange(false))
+            SetViewportsFlag(this->viewportsEnable);
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
@@ -624,11 +639,10 @@ START_M_IMGUI_IMPL_NAMESPACE
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
         this->pd3dDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
 
-        if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
-        {
-            ImGui::UpdatePlatformWindows();
+        // Runs every frame: ImGui's sanity check expects it even while viewports are off.
+        ImGui::UpdatePlatformWindows();
+        if (ImGui::GetCurrentContext()->ConfigFlagsCurrFrame & ImGuiConfigFlags_ViewportsEnable)
             ImGui::RenderPlatformWindowsDefault();
-        }
     }
 
     void pybind_setup_mImguiImpl(pybind11::module_ m)
@@ -655,6 +669,13 @@ START_M_IMGUI_IMPL_NAMESPACE
         py::class_<Dx11Inbound, Dx11Render>(m, "Dx11Inbound", py::dynamic_attr(), py::module_local())
             .def(py::init<std::optional<py::function>>(), py::arg("renderCallback") = py::none())
             .def_property_readonly("isInLogic", [](Dx11Inbound &) { return logicDepth > 0; })
+            .def_property("viewportsEnable",
+                          [](Dx11Inbound &self) { return self.viewportsEnable.load(); },
+                          [](Dx11Inbound &self, bool enable)
+                          {
+                              self.viewportsEnable = enable;
+                              self.viewportsDirty = true;
+                          })
             .def("Attach", &Dx11Inbound::Attach)
             .def("Detach", &Dx11Inbound::Detach);
     }

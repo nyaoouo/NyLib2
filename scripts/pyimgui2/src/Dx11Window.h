@@ -61,6 +61,8 @@ START_M_IMGUI_IMPL_NAMESPACE
         static inline Dx11Inbound *_instance = nullptr;
         bool isImGuiInitialized = false;
         bool isInLogic = false;
+        std::atomic<bool> viewportsEnable{true};
+        std::atomic<bool> viewportsDirty{false};
 
         Dx11Inbound(std::optional<py::function> renderCallback = std::nullopt);
         ~Dx11Inbound();

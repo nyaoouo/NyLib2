@@ -116,6 +116,8 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         std::atomic<bool> queueFallback{false};
         std::atomic<ID3D12CommandQueue *> fallbackQueueFromPresent{nullptr};
         std::atomic<ID3D12CommandQueue *> fallbackQueueAfterPresent{nullptr};
+        std::atomic<bool> viewportsEnable{true};
+        std::atomic<bool> viewportsDirty{false};
 
         Dx12Inbound(std::optional<py::function> renderCallback = std::nullopt);
         ~Dx12Inbound();
