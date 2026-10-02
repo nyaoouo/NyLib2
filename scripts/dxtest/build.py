@@ -12,6 +12,12 @@ REPO_ROOT = ROOT.parents[1]
 OUT_ROOT = ROOT / "out"
 BACKENDS = ("dx9", "dx11", "dx12")
 
+# Vendored Detours (scripts/pyimgui2/auto_src/detours), reused so
+# foreign_hook.cpp's "detours" mode is a genuinely separate Detours engine,
+# like a third-party hooker statically linking its own copy (VF§7.2 S0).
+PYIMGUI2_AUTO_SRC = REPO_ROOT / "scripts" / "pyimgui2" / "auto_src"
+DETOURS_SRC_DIR = PYIMGUI2_AUTO_SRC / "detours" / "src"
+
 
 def _import_msvc_helpers():
     sys.path.insert(0, str(REPO_ROOT))
@@ -62,9 +68,16 @@ def build_host(env: dict[str, str], backend: str, out_dir: pathlib.Path) -> None
         "dx11": ["d3d11.lib", "dxgi.lib"],
         "dx12": ["d3d12.lib", "dxgi.lib", "dxguid.lib"],
     }[backend]
+    detours_sources = sorted(
+        str(p) for p in DETOURS_SRC_DIR.glob("*.cpp") if p.name != "uimports.cpp"
+    )
     _cl(env, [
+        "/D_AMD64_=1",
         "/I" + str(ROOT / "common"),
+        "/I" + str(PYIMGUI2_AUTO_SRC),
         str(ROOT / "common" / "win32_app.cpp"),
+        str(ROOT / "common" / "foreign_hook.cpp"),
+        *detours_sources,
         str(ROOT / backend / "main.cpp"),
         "/Fo:" + str(out_dir) + "\\",
         "/Fe:" + str(out_dir / f"dxtest_{backend}.exe"),
