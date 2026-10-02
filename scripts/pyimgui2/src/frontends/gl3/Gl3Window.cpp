@@ -3,6 +3,7 @@
 #include "../common/PyDetours.h"
 
 #include <atomic>
+#include <mutex>
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -281,6 +282,9 @@ START_M_IMGUI_IMPL_GL3_NAMESPACE
     static thread_local int hookBodyDepth = 0;
     static std::atomic<HWND> attachedHwnd{nullptr};
     static bool swapBuffersHooked = false;
+    static bool atexitRegistered = false;
+    // Serializes hooksEnabled, the Win32Hook subclass and the visible hwnd; never held while acquiring the GIL.
+    static std::mutex transitionMutex;
 
     namespace
     {
@@ -318,12 +322,11 @@ START_M_IMGUI_IMPL_GL3_NAMESPACE
         }
     }
 
-    // Stops drawing and input after a failure inside a hook and reports it on stderr.
-    static void DisableFromHook(const char *reason)
+    // Stops drawing and input; the hook stays installed.
+    static void StopHooks()
     {
+        std::lock_guard<std::mutex> lock(transitionMutex);
         hooksEnabled = false;
-        fprintf(stderr, "[pyimgui] gl3 inbound disabled: %s\n", reason);
-        std::fflush(stderr);
         try
         {
             if (HWND hwnd = attachedHwnd)
@@ -334,13 +337,30 @@ START_M_IMGUI_IMPL_GL3_NAMESPACE
         }
     }
 
+    // Stops drawing and input after a failure inside a hook and reports it on stderr.
+    static void DisableFromHook(const char *reason)
+    {
+        StopHooks();
+        fprintf(stderr, "[pyimgui] gl3 inbound disabled: %s\n", reason);
+        std::fflush(stderr);
+    }
+
+    // Runs from atexit, before finalization; afterwards no hook reaches Python or the instance.
+    static void StopHooksAtExit()
+    {
+        hookInstance = nullptr;
+        StopHooks();
+        WaitForHooks();
+    }
+
     static int ReleasePendingReference(void *object)
     {
         Py_DECREF((PyObject *)object);
         return 0;
     }
 
-    // Hands the last reference to the object to Python's main thread; keeps the object alive if that cannot be scheduled.
+    // Hands the last reference to Python's main thread and stops drawing and input at once; keeps the object alive if that cannot be scheduled.
+    // The object is freed only when the main thread next runs bytecode.
     static void DeferLastReference(py::object &self)
     {
         if (Py_REFCNT(self.ptr()) != 1)
@@ -351,6 +371,7 @@ START_M_IMGUI_IMPL_GL3_NAMESPACE
             fprintf(stderr, "[pyimgui] gl3 inbound: could not schedule the release of the last reference, keeping the object alive\n");
             std::fflush(stderr);
         }
+        StopHooks();
     }
 
     BOOL WINAPI hkWglSwapBuffers(HDC hDC)
@@ -404,6 +425,11 @@ START_M_IMGUI_IMPL_GL3_NAMESPACE
     // Installs the hook at most once; a later Attach only re-enables drawing and input.
     void Gl3Inbound::Attach()
     {
+        if (!atexitRegistered)
+        {
+            py::module_::import("atexit").attr("register")(py::cpp_function(StopHooksAtExit));
+            atexitRegistered = true;
+        }
         if (!swapBuffersHooked)
         {
             HMODULE libGL = ::GetModuleHandleA("opengl32.dll");
@@ -417,6 +443,7 @@ START_M_IMGUI_IMPL_GL3_NAMESPACE
             PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oWglSwapBuffers, (PVOID)hkWglSwapBuffers);
             swapBuffersHooked = true;
         }
+        std::lock_guard<std::mutex> lock(transitionMutex);
         HWND hwnd = attachedHwnd;
         if (this->isImGuiInitialized && hwnd != nullptr)
         {
@@ -429,10 +456,11 @@ START_M_IMGUI_IMPL_GL3_NAMESPACE
     // Disables drawing and input; the hook, the original and the ImGui context stay.
     void Gl3Inbound::Detach()
     {
+        std::lock_guard<std::mutex> lock(transitionMutex);
         hooksEnabled = false;
         if (HWND hwnd = attachedHwnd)
             M_IMGUI_IMPL_WIN32_NAMESPACE::Detach(hwnd);
-        this->hwnd = nullptr;
+        this->SetHwnd(nullptr);
     }
 
     void Gl3Inbound::InitImGui(HDC hDC)
@@ -444,13 +472,8 @@ START_M_IMGUI_IMPL_GL3_NAMESPACE
         HWND host = ::WindowFromDC(hDC);
         if (host == nullptr)
             _throw_("Failed to resolve HWND from current HDC");
-        this->SetHwnd(host);
         g_sharedRC = this->hostHGLRC;
 
-        attachedHwnd = this->hwnd;
-        M_IMGUI_IMPL_WIN32_NAMESPACE::Attach(this->hwnd);
-        if (!hooksEnabled || hookInstance != this)
-            M_IMGUI_IMPL_WIN32_NAMESPACE::Detach(this->hwnd);
         this->ctx = ImGui::CreateContext();
         ImGuiIO &io = ImGui::GetIO();
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -466,10 +489,18 @@ START_M_IMGUI_IMPL_GL3_NAMESPACE
             style.Colors[ImGuiCol_WindowBg].w = 1.0f;
         }
 
-        ImGui_ImplWin32_InitForOpenGL(this->hwnd);
+        ImGui_ImplWin32_InitForOpenGL(host);
         ImGui_ImplOpenGL3_Init();
         InstallViewportHooksIfNeeded();
+
+        std::lock_guard<std::mutex> lock(transitionMutex);
         this->isImGuiInitialized = true;
+        attachedHwnd = host;
+        if (hooksEnabled && hookInstance == this)
+        {
+            M_IMGUI_IMPL_WIN32_NAMESPACE::Attach(host);
+            this->SetHwnd(host);
+        }
         dbgPrint("init gl3 inbound success\n");
     }
 
@@ -530,7 +561,8 @@ START_M_IMGUI_IMPL_GL3_NAMESPACE
             }
             catch (std::exception &e)
             {
-                printf("Error in render callback, detach: \n%s\n", e.what());
+                fprintf(stderr, "[pyimgui] gl3 inbound render callback raised, detaching:\n%s\n", e.what());
+                std::fflush(stderr);
                 raised = true;
             }
             DeferLastReference(self);

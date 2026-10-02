@@ -2,6 +2,8 @@
 #include "../common/ImguiInbound.h"
 #include "../common/PyDetours.h"
 
+#include <mutex>
+
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
@@ -565,6 +567,9 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
     static bool executeCommandListsHooked = false;
     static bool resizeBuffersHooked = false;
     static bool resizeBuffers1Done = false;
+    static bool atexitRegistered = false;
+    // Serializes hooksEnabled, the Win32Hook subclass and the visible hwnd; never held while acquiring the GIL.
+    static std::mutex transitionMutex;
 
     namespace
     {
@@ -602,12 +607,11 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         }
     }
 
-    // Stops drawing and input after a failure inside a hook and reports it on stderr.
-    static void DisableFromHook(const char *reason)
+    // Stops drawing and input; the hooks stay installed.
+    static void StopHooks()
     {
+        std::lock_guard<std::mutex> lock(transitionMutex);
         hooksEnabled = false;
-        fprintf(stderr, "[pyimgui] dx12 inbound disabled: %s\n", reason);
-        std::fflush(stderr);
         try
         {
             if (HWND hwnd = attachedHwnd)
@@ -618,13 +622,30 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         }
     }
 
+    // Stops drawing and input after a failure inside a hook and reports it on stderr.
+    static void DisableFromHook(const char *reason)
+    {
+        StopHooks();
+        fprintf(stderr, "[pyimgui] dx12 inbound disabled: %s\n", reason);
+        std::fflush(stderr);
+    }
+
+    // Runs from atexit, before finalization; afterwards no hook reaches Python or the instance.
+    static void StopHooksAtExit()
+    {
+        hookInstance = nullptr;
+        StopHooks();
+        WaitForHooks();
+    }
+
     static int ReleasePendingReference(void *object)
     {
         Py_DECREF((PyObject *)object);
         return 0;
     }
 
-    // Hands the last reference to the object to Python's main thread; keeps the object alive if that cannot be scheduled.
+    // Hands the last reference to Python's main thread and stops drawing and input at once; keeps the object alive if that cannot be scheduled.
+    // The object is freed only when the main thread next runs bytecode.
     static void DeferLastReference(py::object &self)
     {
         if (Py_REFCNT(self.ptr()) != 1)
@@ -635,6 +656,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             fprintf(stderr, "[pyimgui] dx12 inbound: could not schedule the release of the last reference, keeping the object alive\n");
             std::fflush(stderr);
         }
+        StopHooks();
     }
 
     static void ReleaseFallbackQueues(Dx12Inbound *instance)
@@ -833,6 +855,11 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
     // Installs each hook at most once; a later Attach only re-enables drawing and input.
     void Dx12Inbound::Attach()
     {
+        if (!atexitRegistered)
+        {
+            py::module_::import("atexit").attr("register")(py::cpp_function(StopHooksAtExit));
+            atexitRegistered = true;
+        }
         if (!presentHooked || !executeCommandListsHooked || !resizeBuffersHooked || !resizeBuffers1Done)
         {
             IMGUI_INBOUND_NAMESPACE::Init(IMGUI_INBOUND_NAMESPACE::D3D12);
@@ -862,6 +889,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             }
             resizeBuffers1Done = true;
         }
+        std::lock_guard<std::mutex> lock(transitionMutex);
         HWND hwnd = attachedHwnd;
         if (this->isImGuiInitialized && hwnd != nullptr)
         {
@@ -874,10 +902,11 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
     // Disables drawing and input; the hooks and originals stay installed.
     void Dx12Inbound::Detach()
     {
+        std::lock_guard<std::mutex> lock(transitionMutex);
         hooksEnabled = false;
         if (HWND hwnd = attachedHwnd)
             M_IMGUI_IMPL_WIN32_NAMESPACE::Detach(hwnd);
-        this->hwnd = nullptr;
+        this->SetHwnd(nullptr);
     }
 
     void Dx12Inbound::InitImGui(IDXGISwapChain3 *pSwapChain)
@@ -891,7 +920,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 
         DXGI_SWAP_CHAIN_DESC sdesc = {};
         pSwapChain->GetDesc(&sdesc);
-        this->SetHwnd(sdesc.OutputWindow);
+        HWND host = sdesc.OutputWindow;
 
         this->pd3dCommandQueue = FindSwapChainQueue(pSwapChain, (void **)IMGUI_INBOUND_NAMESPACE::GetD3D12QueueVtable(), this->pd3dDevice);
         this->queueFallback = this->pd3dCommandQueue == nullptr;
@@ -900,11 +929,6 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             fprintf(stderr, "[pyimgui] dx12 inbound: present queue from swap-chain scan\n");
             std::fflush(stderr);
         }
-
-        attachedHwnd = this->hwnd;
-        M_IMGUI_IMPL_WIN32_NAMESPACE::Attach(this->hwnd);
-        if (!hooksEnabled || hookInstance != this)
-            M_IMGUI_IMPL_WIN32_NAMESPACE::Detach(this->hwnd);
 
         if (!this->CreateRenderTargets())
             _throw_("Failed to create render targets");
@@ -945,9 +969,17 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             style.Colors[ImGuiCol_WindowBg].w = 1.0f;
         }
 
-        ImGui_ImplWin32_Init(this->hwnd);
+        ImGui_ImplWin32_Init(host);
         ImGui_ImplDX12_Init(this->pd3dDevice, NUM_FRAMES_IN_FLIGHT, DXGI_FORMAT_R8G8B8A8_UNORM, this->pd3dSrvDescHeap, this->pd3dSrvDescHeap->GetCPUDescriptorHandleForHeapStart(), this->pd3dSrvDescHeap->GetGPUDescriptorHandleForHeapStart());
+
+        std::lock_guard<std::mutex> lock(transitionMutex);
         this->isImGuiInitialized = true;
+        attachedHwnd = host;
+        if (hooksEnabled && hookInstance == this)
+        {
+            M_IMGUI_IMPL_WIN32_NAMESPACE::Attach(host);
+            this->SetHwnd(host);
+        }
         dbgPrint("init dx12 inbound success, queue from %s\n", this->queueFallback ? "fallback" : "swap-chain scan");
     }
 
