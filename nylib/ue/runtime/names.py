@@ -11,6 +11,7 @@ if typing.TYPE_CHECKING:
 
 _SPLIT_RE = re.compile(r'(.+)_(0|[1-9][0-9]*)')
 _MAX_SUFFIX = 0x7FFFFFFF - 1
+_FNAME_MAX_BLOCKS = 1 << 13  # UE FNameMaxBlocks
 
 
 def _is_int(value) -> bool:
@@ -46,12 +47,15 @@ class NameDecoder:
         self._lock = lock
         self.size = e.off.InSDK.Name.FNameSize
         self._lookup_memo: dict[str, tuple[FNameValue | None, int, int]] = {}
+        self._pool_end = (0, 0)
 
     def decode(self, comparison_index: int, number: int) -> str:
         if not _is_int(comparison_index):
             raise TypeError(f'comparison_index must be int, got {type(comparison_index).__name__}')
         if not _is_int(number):
             raise TypeError(f'number must be int, got {type(number).__name__}')
+        if self.e.settings.Internal.bUseNamePool:
+            self._check_in_pool(comparison_index)
         entry = self.e.names.get_name_entry(comparison_index)
         if entry.address == 0:
             raise ValueError(f'FName comparison index {comparison_index:#x} is outside the name pool')
@@ -62,6 +66,17 @@ class NameDecoder:
         if m > 0:
             return f'{base}_{m - 1}'
         return base
+
+    def _check_in_pool(self, c: int) -> None:
+        names = self.e.names
+        bits = names.FNameBlockOffsetBits
+        pos = (c >> bits, (c & ((1 << bits) - 1)) * names.NameEntryStride)
+        if pos < self._pool_end:
+            return
+        with self._lock:
+            self._pool_end = end = (names.get_num_chunks(), names.get_byte_cursor())
+        if pos >= end:
+            raise ValueError(f'FName comparison index {c:#x} is past the end of the name pool')
 
     def read(self, address: int) -> FNameValue:
         if not _is_int(address):
@@ -87,40 +102,41 @@ class NameDecoder:
                 'FName lookup supports FNamePool engines without case-preserving or outline-number names in v1')
         with self._lock:
             cached = self._lookup_memo.get(text)
-            if cached is not None:
-                value, cached_chunks, cached_cursor = cached
-                if value is not None:
-                    return value
-                if cached_chunks == e.names.get_num_chunks() and cached_cursor == e.names.get_byte_cursor():
-                    return None
-            m = _SPLIT_RE.fullmatch(text)
-            if m and int(m.group(2)) <= _MAX_SUFFIX:
-                base, number = m.group(1), int(m.group(2)) + 1
-            else:
-                base, number = text, 0
-            narrow = all(ord(ch) < 0x80 for ch in base)
-            if narrow:
-                encoded = base.encode('ascii')
-                wide = 0
-                units = len(encoded)
-            else:
-                encoded = base.encode('utf-16-le', 'surrogatepass')
-                wide = 1
-                units = len(encoded) // 2
-            index = self._scan(encoded, wide, units, base, case_insensitive=False)
-            if index is None and narrow:
-                index = self._scan(encoded, wide, units, base, case_insensitive=True)
-            value = None
-            if index is not None:
-                off = e.off
-                raw = bytearray(self.size)
-                raw[off.FName.CompIdx:off.FName.CompIdx + 4] = (index & 0xFFFFFFFF).to_bytes(4, 'little')
-                raw[off.FName.Number:off.FName.Number + 4] = (number & 0xFFFFFFFF).to_bytes(4, 'little')
-                value = FNameValue(self.decode(index, number), index, number, bytes(raw))
-            self._lookup_memo[text] = (value, e.names.get_num_chunks(), e.names.get_byte_cursor())
-            return value
+        if cached is not None and cached[0] is not None:
+            return cached[0]
+        num_chunks, byte_cursor = e.names.get_num_chunks(), e.names.get_byte_cursor()
+        if cached is not None and cached[1:] == (num_chunks, byte_cursor):
+            return None
+        m = _SPLIT_RE.fullmatch(text)
+        if m and int(m.group(2)) <= _MAX_SUFFIX:
+            base, number = m.group(1), int(m.group(2)) + 1
+        else:
+            base, number = text, 0
+        narrow = all(ord(ch) < 0x80 for ch in base)
+        if narrow:
+            encoded = base.encode('ascii')
+            wide = 0
+            units = len(encoded)
+        else:
+            encoded = base.encode('utf-16-le', 'surrogatepass')
+            wide = 1
+            units = len(encoded) // 2
+        index = self._scan(encoded, wide, units, base, num_chunks, byte_cursor, case_insensitive=False)
+        if index is None and narrow:
+            index = self._scan(encoded, wide, units, base, num_chunks, byte_cursor, case_insensitive=True)
+        value = None
+        if index is not None:
+            off = e.off
+            raw = bytearray(self.size)
+            raw[off.FName.CompIdx:off.FName.CompIdx + 4] = (index & 0xFFFFFFFF).to_bytes(4, 'little')
+            raw[off.FName.Number:off.FName.Number + 4] = (number & 0xFFFFFFFF).to_bytes(4, 'little')
+            value = FNameValue(self.decode(index, number), index, number, bytes(raw))
+        with self._lock:
+            self._lookup_memo[text] = (value, num_chunks, byte_cursor)
+        return value
 
-    def _scan(self, encoded: bytes, wide: int, units: int, base: str, case_insensitive: bool) -> int | None:
+    def _scan(self, encoded: bytes, wide: int, units: int, base: str, num_chunks: int, byte_cursor: int,
+              case_insensitive: bool) -> int | None:
         e = self.e
         off, names = e.off, e.names
         string_offset = off.FNameEntry.NamePool.StringOffset
@@ -129,12 +145,10 @@ class NameDecoder:
         offset_bits = names.FNameBlockOffsetBits
         shift = names.FNameEntryLengthShiftCount
         block_bytes = stride << offset_bits
-        num_chunks = names.get_num_chunks()
-        byte_cursor = names.get_byte_cursor()
         base_cf = base.lower() if case_insensitive else None
         pattern = re.compile(re.escape(encoded), re.IGNORECASE) if case_insensitive else None
-        for b in range(num_chunks + 1):
-            size = byte_cursor if b == num_chunks else block_bytes
+        for b in range(min(num_chunks, _FNAME_MAX_BLOCKS - 1) + 1):
+            size = min(byte_cursor, block_bytes) if b == num_chunks else block_bytes
             if size <= 0:
                 continue
             block_addr = e.mem.ptr(names.GNames + off.NameArray.ChunksStart + 8 * b)

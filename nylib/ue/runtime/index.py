@@ -32,6 +32,8 @@ def _is_int(value) -> bool:
 def _require_chunked(e: 'Engine') -> None:
     if not e.off.FUObjectArray.bIsChunked:
         raise DetectionError('ObjectIndex', 'the GObjects layout is not chunked')
+    if e.objects.NumElementsPerChunk <= 0:
+        raise DetectionError('ObjectIndex', f'the GObjects chunk size {e.objects.NumElementsPerChunk} is not positive')
 
 
 def _iter_item_bytes(e: 'Engine'):
@@ -56,7 +58,7 @@ def _iter_item_bytes(e: 'Engine'):
 def find_serial_number_offset(e: 'Engine') -> int | None:
     oa = e.objects
     isz, ioff = oa.SizeOfFUObjectItem, oa.FUObjectItemInitialOffset
-    candidates: dict[int, set[int]] = {}
+    candidates: dict[int, list[int]] = {}
     for _, item in _iter_item_bytes(e):
         obj = int.from_bytes(item[ioff:ioff + 8], 'little')
         if obj == 0:
@@ -67,9 +69,9 @@ def find_serial_number_offset(e: 'Engine') -> int | None:
             v = int.from_bytes(item[k:k + 4], 'little', signed=True)
             if v == 0:
                 continue
-            candidates.setdefault(k, set()).add(v)
+            candidates.setdefault(k, []).append(v)
     qualifying = [k for k, values in candidates.items()
-                  if len(values) >= SERIAL_MIN_SAMPLES and all(v > SERIAL_NUMBER_START for v in values)]
+                  if len(values) >= SERIAL_MIN_SAMPLES and len(set(values)) == len(values) and all(v > SERIAL_NUMBER_START for v in values)]
     if len(qualifying) == 1:
         return qualifying[0]
     _log.debug('find_serial_number_offset: no unique candidate, counts=%s', {k: len(v) for k, v in sorted(candidates.items())})
@@ -139,26 +141,24 @@ class ObjectIndex:
             self._cast_flags_cache.clear()
             self._serial_offset = _UNSET
 
-    def _find_once(self, path: str) -> int | None:
-        t = self.table()
-        i = t.index_of_path(path)
-        if i is None:
-            return None
-        address = t[i].address
-        try:
-            live_path = LiveResolver(self._e).path(address)
-        except MemoryReadError:
-            return None
-        return address if live_path == path else None
-
     def find(self, path: str) -> int | None:
         if not isinstance(path, str):
             raise TypeError(f'path must be str, got {type(path).__name__}')
-        address = self._find_once(path)
-        if address is not None:
-            return address
-        self.refresh()
-        return self._find_once(path)
+        for attempt in range(2):
+            t = self.table()
+            if (i := t.index_of_path(path)) is None:
+                return None
+            address = t[i].address
+            try:
+                if LiveResolver(self._e).path(address) == path:
+                    return address
+            except MemoryReadError:
+                pass
+            if attempt == 0:
+                with self._lock:
+                    if self._table is t:
+                        self._table = None
+        return None
 
     def classes_named(self, name: str) -> list[int]:
         if not isinstance(name, str):

@@ -58,7 +58,9 @@ class RuntimeContext:
         if address == 0:
             return None
         e = self.e
-        cls = e.mem.ptr(address + e.off.UObject.Class)
+        return self._proxy_of(address, e.mem.ptr(address + e.off.UObject.Class))
+
+    def _proxy_of(self, address: int, cls: int) -> UObjectProxy:
         return view(self.factory.class_for(self.types.path_of(cls), cls), address, self.acc)
 
     def struct_view(self, path: str, address: int) -> StructView:
@@ -337,10 +339,11 @@ class Unreal:
         exe, ts, size = info.exe, info.pe_timestamp, info.size_of_image
         out_part = f' --out {root}' if root is not None else ''
         dumped = False
+        loaded = None
         if dump in ('latest', 'auto'):
             refs = [r for r in store.find_snapshots(root, exe=exe, pe_timestamp=ts, size_of_image=size) if _schema_major(r) == SCHEMA_MAJOR]
             if refs:
-                snap = Snapshot.load(refs[0].path)
+                snap = loaded = Snapshot.load(refs[0].path)
             elif dump == 'latest':
                 newest = next(iter(store.find_snapshots(root, exe=exe)), None)
                 text = f'no snapshot matches the running build\n  running   {exe}  pe {hexs(ts)} / {hexs(size)}\n'
@@ -356,8 +359,7 @@ class Unreal:
                 shared = pipeline.OpenedTarget(opened.source, opened.info, opened.process, opened.check_alive, None)
                 res = pipeline.dump(target, profile=profile, out=root, _open_target=lambda *a, **k: shared)
                 unverified_gate(res.unverified, write=write, allow_unverified=allow_unverified, source='dump', target=exe)
-                snap = Snapshot.load(res.path)
-                opened.source.refresh()
+                snap = loaded = Snapshot.load(res.path)
                 dumped = True
         else:
             t = snap.meta.get('target')
@@ -376,7 +378,14 @@ class Unreal:
                     running=(exe, ts, size), snapshot=dump, out_root=root)
             if not (isinstance(snap_exe, str) and snap_exe.casefold() == exe.casefold()):
                 logger.warning('snapshot %s was taken from %s; the target is %s (same build)', dump, snap_exe, exe)
-        ectx = EngineContext.from_snapshot(snap.meta, snap.offsets, opened.source.fresh)
+        try:
+            if dumped:
+                opened.source.refresh()
+            ectx = EngineContext.from_snapshot(snap.meta, snap.offsets, opened.source.fresh)
+        except BaseException:
+            if loaded is not None:
+                loaded.close()
+            raise
         return snap, ectx, dumped
 
     @staticmethod
@@ -428,15 +437,20 @@ class Unreal:
             return found._address_
         raise TypeError(f'expected a class name, path, class object or proxy class of this session, got {type(cls).__name__}')
 
-    def _proxies(self, addresses, what: str) -> list:
-        ctx, out, lost = self._ctx, [], 0
+    def _proxies(self, addresses, what: str, class_address: int | None) -> list:
+        ctx, out, lost, moved = self._ctx, [], 0, 0
+        e = ctx.e
         for a in addresses:
             try:
-                out.append(ctx.proxy(a))
+                cls = e.mem.ptr(a + e.off.UObject.Class)
+                if class_address is not None and class_address not in ctx.index.super_chain(cls):
+                    moved += 1
+                    continue
+                out.append(ctx._proxy_of(a, cls))
             except MemoryReadError:
                 lost += 1
-        if lost:
-            logger.debug('%s: %d objects unreadable (freed since the index was built)', what, lost)
+        if lost or moved:
+            logger.debug('%s: left out %d unreadable objects and %d no longer of the class', what, lost, moved)
         return out
 
     def find(self, path: str) -> UObjectProxy | None:
@@ -464,14 +478,15 @@ class Unreal:
 
     def objects_of(self, cls) -> list[UObjectProxy]:
         ctx = self._live()
-        return self._proxies(ctx.index.instances(self._class_address(cls)), 'objects_of')
+        a = self._class_address(cls)
+        return self._proxies(ctx.index.instances(a), 'objects_of', a)
 
     def search(self, pattern: str, class_=None) -> list[UObjectProxy]:
         ctx = self._live()
         if not isinstance(pattern, str):
             raise TypeError(f'pattern must be a str, got {type(pattern).__name__}')
         a = self._class_address(class_) if class_ is not None else None
-        return self._proxies(ctx.index.search(pattern, a), 'search')
+        return self._proxies(ctx.index.search(pattern, a), 'search', a)
 
     def cdo(self, cls) -> UObjectProxy | None:
         ctx = self._live()

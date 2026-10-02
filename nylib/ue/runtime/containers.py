@@ -1,10 +1,10 @@
-"""nylib.ue runtime container codecs and views (RT5): TArray, TSet, TMap, fixed arrays, multicast delegates.
-Codec objects are duck-typed (kind, size, align, get, set); views hold ctx and read fresh on every access.
-Resize and rehash are refused with NotImplementedError (v1 never calls FMemory or re-hashes).
+"""Container codecs and views (RT5): TArray, TSet, TMap, strings, fixed arrays, multicast delegates.
+Views read fresh on every access; resizing or rehashing raises NotImplementedError.
 """
 import struct
 
 from . import codecs
+from .codecs import _ErrorCodec, _align, _array_header
 from ..engine import containers as _ec
 from ..engine.accessor import view
 from ...ctype import Field, SField, c_int32, c_uint32, c_uint64, check_finalize
@@ -27,48 +27,19 @@ class _SparseHeader(_ec.ViewStruct):
 check_finalize(_SparseHeader)
 
 
-def _align(n: int, a: int) -> int:
-    return (n + a - 1) // a * a
-
-
 def _check_codec(obj, name: str) -> None:
     if not (hasattr(obj, 'size') and hasattr(obj, 'align') and hasattr(obj, 'get') and hasattr(obj, 'set')):
         raise TypeError(f'{name} must be a Codec (size, align, get, set), got {type(obj).__name__}')
-
-
-class _ErrorCodec:
-    """A codec whose get/set raise the error met while building it, as RT4's error codecs do."""
-
-    def __init__(self, kind: str, size: int | None, exc: Exception):
-        self.kind = kind
-        self.size = size if size is not None else 0
-        self.align = 1
-        self._exc = exc
-
-    def get(self, ctx, address, label):
-        raise type(self._exc)(f'{label}: {self._exc}')
-
-    def set(self, ctx, address, value, label):
-        raise type(self._exc)(f'{label}: {self._exc}')
-
-
-def _array_header(ctx, address: int, label: str) -> tuple[int, int, int]:
-    hdr = view(_ec.TArray, address, ctx.acc)
-    data, num, mx = hdr.Data, hdr.NumElements, hdr.MaxElements
-    if not (0 <= num <= mx and (num == 0 or data != 0)):
-        raise ValueError(f'{label}: corrupt TArray (Data {data:#x}, Num {num}, Max {mx})')
-    return data, num, mx
 
 
 def _read_sparse(ctx, address: int, label: str, kind: str):
     hdr = view(_SparseHeader, address, ctx.acc)
     data, data_num, data_max = hdr.Data, hdr.DataNum, hdr.DataMax
     num_bits, num_free = hdr.NumBits, hdr.NumFreeIndices
-    num = data_num - num_free
-    if not (0 <= num_free <= num <= data_max and num_bits >= num):
-        raise ValueError(f'{label}: corrupt {kind} (Data {data:#x}, Num {num}, Max {data_max}, '
+    if not (0 <= num_free <= data_num <= data_max and num_bits >= data_num and (data_num == 0 or data != 0)):
+        raise ValueError(f'{label}: corrupt {kind} (Data {data:#x}, Num {data_num}, Max {data_max}, '
                           f'NumFreeIndices {num_free}, NumBits {num_bits})')
-    return hdr, data, data_num, num
+    return hdr, data, data_num, data_num - num_free
 
 
 def _bit_words(ctx, hdr, count: int, label: str) -> tuple:
@@ -353,14 +324,20 @@ class _ArrayCodec:
         return TArrayValue(ctx, address, self.inner, label)
 
     def set(self, ctx, address, value, label):
+        codecs._commit(ctx, self._ops(ctx, address, value, label), label)
+
+    def _ops(self, ctx, address, value, label):
         if not isinstance(value, (list, tuple, TArrayValue)):
             raise TypeError(f'{label}: expected a list, tuple or TArrayValue, got {type(value).__name__}')
+        if isinstance(value, TArrayValue):
+            value = value.to_list()
         data, num, _ = _array_header(ctx, address, label)
         if len(value) != num:
             raise ValueError(f'{label}: {codecs.HINT_RESIZE}')
-        ctx.check_write(label)
+        ops = []
         for i, v in enumerate(value):
-            self.inner.set(ctx, data + i * self.inner.size, v, f'{label}[{i}]')
+            ops += codecs._plan(self.inner, ctx, data + i * self.inner.size, v, f'{label}[{i}]')
+        return ops
 
 
 class _SetCodec:
@@ -377,6 +354,8 @@ class _SetCodec:
     def set(self, ctx, address, value, label):
         raise NotImplementedError(f'{label}: replacing a TSet or TMap needs the engine allocator and a rehash, which v1 does not do')
 
+    _ops = set
+
 
 class _MapCodec:
     kind = 'MapProperty'
@@ -392,6 +371,8 @@ class _MapCodec:
 
     def set(self, ctx, address, value, label):
         raise NotImplementedError(f'{label}: replacing a TSet or TMap needs the engine allocator and a rehash, which v1 does not do')
+
+    _ops = set
 
 
 _STRING_KINDS = {
@@ -410,24 +391,16 @@ class _StringCodec:
         self.encoding, self.unit = _STRING_KINDS[kind]
 
     def get(self, ctx, address, label):
-        if self.kind == 'StrProperty':
-            return view(_ec.FString, address, ctx.acc).to_wstring()
-        data, num, _ = _array_header(ctx, address, label)
-        if num == 0 or data == 0:
-            return ''
-        raw = ctx.acc.read(data, num * self.unit)
-        nul = raw.find(b'\0' * self.unit)
-        if nul >= 0:
-            raw = raw[:nul]
-        return raw.decode(self.encoding)
+        return codecs._read_string(ctx, address, label, self.encoding, self.unit)
 
     def set(self, ctx, address, value, label):
+        codecs._commit(ctx, self._ops(ctx, address, value, label), label)
+
+    def _ops(self, ctx, address, value, label):
         if not isinstance(value, str):
             raise TypeError(f'{label}: expected str, got {type(value).__name__}')
         if value == '':
-            ctx.check_write(label)
-            ctx.acc.write(address + 0x8, struct.pack('<i', 0))
-            return
+            return [(address + 0x8, struct.pack('<i', 0))]
         encode_errors = 'surrogatepass' if self.encoding == 'utf-16-le' else 'strict'
         try:
             encoded = value.encode(self.encoding, errors=encode_errors)
@@ -438,9 +411,7 @@ class _StringCodec:
         need = units + 1
         if need > mx:
             raise ValueError(f'{label}: the new value needs {need} characters but the buffer holds {mx}; {codecs.HINT_RESIZE}')
-        ctx.check_write(label)
-        ctx.acc.write(data, encoded + b'\0' * self.unit)
-        ctx.acc.write(address + 0x8, struct.pack('<i', need))
+        return [(data, encoded + b'\0' * self.unit), (address + 0x8, struct.pack('<i', need))]
 
 
 class _MulticastCodec:
@@ -456,6 +427,8 @@ class _MulticastCodec:
     def set(self, ctx, address, value, label):
         raise NotImplementedError(f'{label}: multicast delegate invocation lists cannot be replaced in v1')
 
+    _ops = set
+
 
 class _FixedArrayCodec:
     kind = 'FixedArray'
@@ -470,13 +443,17 @@ class _FixedArrayCodec:
         return FixedArrayValue(ctx, address, self.element, self.count, label)
 
     def set(self, ctx, address, value, label):
+        codecs._commit(ctx, self._ops(ctx, address, value, label), label)
+
+    def _ops(self, ctx, address, value, label):
         if not isinstance(value, (list, tuple)):
             raise TypeError(f'{label}: expected a list or tuple, got {type(value).__name__}')
         if len(value) != self.count:
             raise ValueError(f'{label}: expected {self.count} elements, got {len(value)}')
-        ctx.check_write(label)
+        ops = []
         for i, v in enumerate(value):
-            self.element.set(ctx, address + i * self.element.size, v, f'{label}[{i}]')
+            ops += codecs._plan(self.element, ctx, address + i * self.element.size, v, f'{label}[{i}]')
+        return ops
 
 
 def array_codec(ctx, inner):
@@ -521,14 +498,13 @@ def fixed_array_codec(element, count: int):
 
 
 def _sub_codec(ctx, sub_ptype):
-    """(codec, None) on success, or (None, exc) for a missing sub-type or a kind_layout failure."""
+    """(codec, None) on success, or (None, exc) for a missing sub-type or one that builds an error or unsupported codec."""
     if sub_ptype is None:
         return None, LookupError('missing sub-type')
-    try:
-        codecs.kind_layout(ctx, sub_ptype)
-    except (LookupError, NotImplementedError) as exc:
+    codec = codecs.make_codec(ctx, sub_ptype)
+    if (exc := codecs._build_error(codec)) is not None:
         return None, exc
-    return codecs.make_codec(ctx, sub_ptype), None
+    return codec, None
 
 
 def make_container_codec(ctx, ptype, size: int | None):

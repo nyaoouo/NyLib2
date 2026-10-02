@@ -416,24 +416,30 @@ class ClassFactory:
     def base_proxy(self) -> type[UObjectProxy]:
         if self._base is None:
             ctx = self._ctx
-            self._base = type('UObject', (UObjectProxy,), {
-                '_ue_ctx_': ctx, '_ue_path_': None, '_ue_name_': 'UObject', '_ue_type_': None,
-                '_ue_members_': {}, '_ue_attrs_': {}, '_ue_functions_': {}, '_fields_': [], '_size_': 0, '_pad_size_': 1,
-            })
+            with ctx.lock:
+                if self._base is None:
+                    self._base = type('UObject', (UObjectProxy,), {
+                        '_ue_ctx_': ctx, '_ue_path_': None, '_ue_name_': 'UObject', '_ue_type_': None,
+                        '_ue_members_': {}, '_ue_attrs_': {}, '_ue_functions_': {}, '_fields_': [], '_size_': 0, '_pad_size_': 1,
+                    })
         return self._base
 
     def raw_class(self) -> type[RawPointer]:
         if self._raw is None:
-            self._raw = type('RawPointer', (RawPointer,), {'_ue_ctx_': self._ctx})
+            with self._ctx.lock:
+                if self._raw is None:
+                    self._raw = type('RawPointer', (RawPointer,), {'_ue_ctx_': self._ctx})
         return self._raw
 
     def _struct_root(self) -> type[StructView]:
         if self._struct_base is None:
             ctx = self._ctx
-            self._struct_base = type('StructView', (StructView,), {
-                '_ue_ctx_': ctx, '_ue_path_': None, '_ue_name_': '', '_ue_type_': None,
-                '_ue_members_': {}, '_ue_attrs_': {}, '_fields_': [], '_size_': 0, '_pad_size_': 1,
-            })
+            with ctx.lock:
+                if self._struct_base is None:
+                    self._struct_base = type('StructView', (StructView,), {
+                        '_ue_ctx_': ctx, '_ue_path_': None, '_ue_name_': '', '_ue_type_': None,
+                        '_ue_members_': {}, '_ue_attrs_': {}, '_fields_': [], '_size_': 0, '_pad_size_': 1,
+                    })
         return self._struct_base
 
     def class_for(self, path: str | None = None, address: int | None = None) -> type[UObjectProxy]:
@@ -446,29 +452,32 @@ class ClassFactory:
     def _class_for(self, path, address, depth: int) -> type[UObjectProxy]:
         if depth > _MAX_SUPER_DEPTH:
             raise LookupError(f'class supers of {path!r} are nested more than {_MAX_SUPER_DEPTH} levels deep')
-        if path is not None and path in self._classes:
-            return self._classes[path]
-        ctx = self._ctx
-        record = ctx.types.type(path, address) if path is not None else None
-        if isinstance(record, ClassRecord):
-            if record.super is None:
-                super_cls = self.base_proxy()
-            else:
-                super_addr = UEStruct(ctx.e, address).get_super().address if address is not None else None
-                super_cls = self._class_for(record.super, super_addr, depth + 1)
-            cls = self._build_class(record, super_cls)
-            self._classes[path] = cls
+        if path is not None and (cls := self._classes.get(path)) is not None:
             return cls
-        if address is not None:
-            for super_addr in ctx.index.super_chain(address)[1:]:
-                super_path = ctx.types.path_of(super_addr)
-                if super_path is None:
-                    continue
-                super_record = ctx.types.type(super_path, super_addr)
-                if isinstance(super_record, ClassRecord):
-                    _log.debug('class_for: %s falls back to %s through the super chain', path, super_path)
-                    return self._class_for(super_path, super_addr, depth + 1)
-        return self.base_proxy()
+        ctx = self._ctx
+        with ctx.lock:
+            if path is not None and (cls := self._classes.get(path)) is not None:
+                return cls
+            record = ctx.types.type(path, address) if path is not None else None
+            if isinstance(record, ClassRecord):
+                if record.super is None:
+                    super_cls = self.base_proxy()
+                else:
+                    super_addr = UEStruct(ctx.e, address).get_super().address if address is not None else None
+                    super_cls = self._class_for(record.super, super_addr, depth + 1)
+                cls = self._build_class(record, super_cls)
+                self._classes[path] = cls
+                return cls
+            if address is not None:
+                for super_addr in ctx.index.super_chain(address)[1:]:
+                    super_path = ctx.types.path_of(super_addr)
+                    if super_path is None:
+                        continue
+                    super_record = ctx.types.type(super_path, super_addr)
+                    if isinstance(super_record, ClassRecord):
+                        _log.debug('class_for: %s falls back to %s through the super chain', path, super_path)
+                        return self._class_for(super_path, super_addr, depth + 1)
+            return self.base_proxy()
 
     def _build_class(self, record: ClassRecord, super_cls: type[UObjectProxy]) -> type[UObjectProxy]:
         ctx = self._ctx
@@ -502,15 +511,18 @@ class ClassFactory:
     def _struct_for(self, path: str, depth: int) -> type[StructView]:
         if depth > _MAX_SUPER_DEPTH:
             raise LookupError(f'struct supers of {path!r} are nested more than {_MAX_SUPER_DEPTH} levels deep')
-        if path in self._structs:
-            return self._structs[path]
-        record = self._ctx.types.type(path)
-        if not isinstance(record, StructRecord) or isinstance(record, ClassRecord):
-            raise LookupError(f'no struct type {path!r}')
-        super_cls = self._struct_for(record.super, depth + 1) if record.super is not None else self._struct_root()
-        cls = self._build_struct_class(record, super_cls)
-        self._structs[path] = cls
-        return cls
+        if (cls := self._structs.get(path)) is not None:
+            return cls
+        with self._ctx.lock:
+            if (cls := self._structs.get(path)) is not None:
+                return cls
+            record = self._ctx.types.type(path)
+            if not isinstance(record, StructRecord) or isinstance(record, ClassRecord):
+                raise LookupError(f'no struct type {path!r}')
+            super_cls = self._struct_for(record.super, depth + 1) if record.super is not None else self._struct_root()
+            cls = self._build_struct_class(record, super_cls)
+            self._structs[path] = cls
+            return cls
 
     def _build_struct_class(self, record: StructRecord, super_cls: type[StructView]) -> type[StructView]:
         ctx = self._ctx
@@ -530,10 +542,13 @@ class ClassFactory:
     def enum_for(self, path: str) -> type[enum.IntEnum] | None:
         if not isinstance(path, str):
             raise TypeError(f'path must be str, got {type(path).__name__}')
-        if path in self._enums:
-            return self._enums[path]
-        record = self._ctx.types.type(path)
-        if not isinstance(record, EnumRecord):
-            return None
-        cls = self._enums[path] = _build_enum(record)
-        return cls
+        if (cls := self._enums.get(path)) is not None:
+            return cls
+        with self._ctx.lock:
+            if (cls := self._enums.get(path)) is not None:
+                return cls
+            record = self._ctx.types.type(path)
+            if not isinstance(record, EnumRecord):
+                return None
+            cls = self._enums[path] = _build_enum(record)
+            return cls

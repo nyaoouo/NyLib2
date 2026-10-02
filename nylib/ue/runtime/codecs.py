@@ -1,16 +1,13 @@
 """Value codecs (RT4): get/set one property's value at an address through ctx.acc.
-
-Every data problem (an unresolvable struct/enum/SoftObjectPath type, a missing
-inner/underlying type, a bad BoolProperty mask, or a size that disagrees with a
-fixed-size kind) makes an error codec instead of raising at build time, so one
-bad member never stops a class from building.
+A type that cannot be resolved builds an error codec, whose get and set raise, instead of raising at build time.
 """
-import keyword
+import copy
 import struct
 from typing import Any, NamedTuple, Protocol
 
 from ..engine.accessor import view
-from ..engine.containers import FString, TArray
+from ..engine.containers import TArray
+from ..errors import MemoryReadError
 from ..model import PropType, StructRecord, UNKNOWN_KIND
 
 NATURAL_SIZES: dict[str, int] = {
@@ -31,6 +28,7 @@ _CONTAINER_KINDS = frozenset({
     'MulticastInlineDelegateProperty',
 })
 _STRUCT_CHAIN_BOUND = 256
+_CLASS_PATH = '/Script/CoreUObject.Class'
 
 
 class Codec(Protocol):                                  # the protocol; codecs need not subclass it
@@ -54,8 +52,69 @@ def _check_int(value, label: str, allow_bool: bool) -> None:
         raise TypeError(f'{label}: expected int, got {type(value).__name__}')
 
 
-def _py_name(raw: str) -> str:
-    return raw + '_' if keyword.iskeyword(raw) else raw
+def _relabel(exc: Exception, label: str) -> Exception:
+    """A new exception of exc's type and attributes whose message is prefixed with f'{label}: '."""
+    msg = f'{label}: {exc}'
+    try:
+        return type(exc)(msg)
+    except Exception:
+        pass
+    new = type(exc).__new__(type(exc), msg)
+    new.__dict__.update(vars(exc))
+    new.args = (msg,)
+    if str(new) != msg:  # str() reads fields __new__ left unset (UnicodeDecodeError): copy instead, label as a note
+        new = copy.copy(exc)
+        new.__notes__ = [*getattr(exc, '__notes__', ()), label]
+    return new
+
+
+def _array_header(ctx, address: int, label: str) -> tuple[int, int, int]:
+    hdr = view(TArray, address, ctx.acc)
+    data, num, mx = hdr.Data, hdr.NumElements, hdr.MaxElements
+    if not (0 <= num <= mx and (num == 0 or data != 0)):
+        raise ValueError(f'{label}: corrupt TArray (Data {data:#x}, Num {num}, Max {mx})')
+    return data, num, mx
+
+
+def _read_string(ctx, address: int, label: str, encoding: str = 'utf-16-le', unit: int = 2) -> str:
+    """The units of the string TArray at address before the first NUL, reading at most Num - 1 units."""
+    data, num, _ = _array_header(ctx, address, label)
+    if num <= 1:
+        return ''
+    raw = ctx.acc.read(data, (num - 1) * unit)
+    if unit == 2:
+        return raw.decode(encoding, 'surrogatepass').split('\0', 1)[0]
+    return raw.split(b'\0', 1)[0].decode(encoding)
+
+
+def _plan(codec, ctx, address: int, value, label: str) -> list:
+    """The writes codec.set would make, after every check it makes; nothing is written."""
+    if (ops := getattr(codec, '_ops', None)) is None:
+        return [lambda: codec.set(ctx, address, value, label)]
+    return ops(ctx, address, value, label)
+
+
+def _commit(ctx, ops: list, label: str) -> None:
+    """Gate once, then apply planned writes: (address, bytes), (address, field_mask, bits) or a callable."""
+    ctx.check_write(label)
+    for op in ops:
+        if callable(op):
+            op()
+        elif len(op) == 2:
+            ctx.acc.write(*op)
+        else:
+            address, field_mask, bits = op
+            b = ctx.acc.read(address, 1)[0]
+            ctx.acc.write(address, bytes(((b & ~field_mask & 0xFF) | bits,)))
+
+
+def _build_error(codec) -> Exception | None:
+    """The error an error or unsupported codec holds, else None."""
+    if isinstance(codec, _ErrorCodec):
+        return codec._error
+    if isinstance(codec, _UnsupportedCodec):
+        return NotImplementedError(f'{codec._prop} values are not supported in v1')
+    return None
 
 
 class WeakObjectPtr:
@@ -138,9 +197,10 @@ def _soft_object_path(view_) -> str:
 class FTextValue:
     """FText, decoded only on demand (str() / .string); v1 cannot write one."""
 
-    def __init__(self, ctx, address: int):
+    def __init__(self, ctx, address: int, label: str = 'FText'):
         self._ctx = ctx
         self._address = address
+        self._label = label
 
     @property
     def string(self) -> str:
@@ -148,7 +208,7 @@ class FTextValue:
         data = self._ctx.e.mem.ptr(self._address + dat)
         if data == 0:
             return ''
-        return view(FString, data + sto, self._ctx.acc).to_wstring()
+        return _read_string(self._ctx, data + sto, self._label)
 
     def __str__(self) -> str:
         return self.string
@@ -201,17 +261,17 @@ class FieldPathValue:
 
 
 class _Codec:
-    __slots__ = ('kind', 'size', 'align', '_get', '_set')
+    __slots__ = ('kind', 'size', 'align', '_get', '_ops')
 
-    def __init__(self, kind, size, align, get_fn, set_fn):
+    def __init__(self, kind, size, align, get_fn, ops_fn):
         self.kind, self.size, self.align = kind, size, align
-        self._get, self._set = get_fn, set_fn
+        self._get, self._ops = get_fn, ops_fn
 
     def get(self, ctx, address, label):
         return self._get(ctx, address, label)
 
     def set(self, ctx, address, value, label):
-        self._set(ctx, address, value, label)
+        _commit(ctx, self._ops(ctx, address, value, label), label)
 
 
 class _ErrorCodec:
@@ -219,16 +279,19 @@ class _ErrorCodec:
     __slots__ = ('kind', 'size', 'align', '_error')
 
     def __init__(self, kind, size, error: Exception):
-        self.kind, self.size, self.align = kind, size, 1
+        self.kind, self.size, self.align = kind, size if size is not None else 0, 1
         self._error = error
 
     def _raise(self, label):
-        raise type(self._error)(f'{label}: {self._error}')
+        raise _relabel(self._error, label)
 
     def get(self, ctx, address, label):
         self._raise(label)
 
     def set(self, ctx, address, value, label):
+        self._raise(label)
+
+    def _ops(self, ctx, address, value, label):
         self._raise(label)
 
 
@@ -249,6 +312,9 @@ class _UnsupportedCodec:
     def set(self, ctx, address, value, label):
         self._raise()
 
+    def _ops(self, ctx, address, value, label):
+        self._raise()
+
 
 def _int_codec(size: int, signed: bool, allow_bool: bool):
     lo = -(1 << (8 * size - 1)) if signed else 0
@@ -257,31 +323,29 @@ def _int_codec(size: int, signed: bool, allow_bool: bool):
     def _get(ctx, address, label):
         return int.from_bytes(ctx.acc.read(address, size), 'little', signed=signed)
 
-    def _set(ctx, address, value, label):
+    def _ops(ctx, address, value, label):
         _check_int(value, label, allow_bool)
         if value < lo or value > hi:
             raise ValueError(f'{label}: {value} is outside [{lo}, {hi}]')
-        ctx.check_write(label)
-        ctx.acc.write(address, value.to_bytes(size, 'little', signed=signed))
+        return [(address, value.to_bytes(size, 'little', signed=signed))]
 
-    return _get, _set
+    return _get, _ops
 
 
 def _float_codec(fmt: str, size: int):
     def _get(ctx, address, label):
         return struct.unpack(fmt, ctx.acc.read(address, size))[0]
 
-    def _set(ctx, address, value, label):
+    def _ops(ctx, address, value, label):
         if not isinstance(value, (int, float)):
             raise TypeError(f'{label}: expected int or float, got {type(value).__name__}')
         try:
             data = struct.pack(fmt, value)
         except OverflowError:
             raise ValueError(f'{label}: {value!r} does not fit in {size} bytes') from None
-        ctx.check_write(label)
-        ctx.acc.write(address, data)
+        return [(address, data)]
 
-    return _get, _set
+    return _get, _ops
 
 
 def _resolve_byte(ptype: PropType):
@@ -297,14 +361,13 @@ def _resolve_byte(ptype: PropType):
                 return raw
         return raw
 
-    def _set(ctx, address, value, label):
+    def _ops(ctx, address, value, label):
         _check_int(value, label, allow_bool=False)
         if value < 0 or value > 0xFF:
             raise ValueError(f'{label}: {value} is outside [0, 255]')
-        ctx.check_write(label)
-        ctx.acc.write(address, bytes((value,)))
+        return [(address, bytes((value,)))]
 
-    return _get, _set
+    return _get, _ops
 
 
 def _resolve_enum(ptype: PropType):
@@ -316,7 +379,7 @@ def _resolve_enum(ptype: PropType):
         raise LookupError(f'EnumProperty {ptype.prop!r} has an unsupported underlying kind {underlying.kind!r}')
     signed = underlying.kind in _SIGNED_INT_KINDS
     enum_path = ptype.enum
-    get_fn, set_fn = _int_codec(size, signed, allow_bool=False)
+    get_fn, ops_fn = _int_codec(size, signed, allow_bool=False)
 
     def _get(ctx, address, label):
         raw = get_fn(ctx, address, label)
@@ -328,7 +391,7 @@ def _resolve_enum(ptype: PropType):
                 return raw
         return raw
 
-    return size, size, _get, set_fn
+    return size, size, _get, ops_fn
 
 
 def _resolve_bool(ptype: PropType):
@@ -340,24 +403,19 @@ def _resolve_bool(ptype: PropType):
     def _get(ctx, address, label):
         return bool(ctx.acc.read(address + byte_offset, 1)[0] & field_mask)
 
-    def _set(ctx, address, value, label):
+    def _ops(ctx, address, value, label):
         if not isinstance(value, int):
             raise TypeError(f'{label}: expected bool or int, got {type(value).__name__}')
-        ctx.check_write(label)
-        b = ctx.acc.read(address + byte_offset, 1)[0]
-        b = b & ~field_mask & 0xFF
-        if value:
-            b |= byte_mask
-        ctx.acc.write(address + byte_offset, bytes((b,)))
+        return [(address + byte_offset, field_mask, byte_mask if value else 0)]
 
-    return size, 1, _get, _set
+    return size, 1, _get, _ops
 
 
 def _name_codec():
     def _get(ctx, address, label):
         return ctx.names.read(address)
 
-    def _set(ctx, address, value, label):
+    def _ops(ctx, address, value, label):
         if not isinstance(value, str):
             raise TypeError(f'{label}: expected str, got {type(value).__name__}')
         size = ctx.e.off.InSDK.Name.FNameSize
@@ -373,26 +431,34 @@ def _name_codec():
             if found is None:
                 raise ValueError(f'{label}: {value!r} is not in the name pool; v1 cannot add names (that needs the engine)')
             data = found.raw
-        ctx.check_write(label)
-        ctx.acc.write(address, data)
+        return [(address, data)]
 
-    return _get, _set
+    return _get, _ops
 
 
 def _text_codec():
     def _get(ctx, address, label):
-        return FTextValue(ctx, address)
+        return FTextValue(ctx, address, label)
 
-    def _set(ctx, address, value, label):
+    def _ops(ctx, address, value, label):
         raise NotImplementedError('FText values cannot be written in v1')
 
-    return _get, _set
+    return _get, _ops
 
 
-def _proxy_of_session(ctx, value, label: str):
-    if getattr(value, '_ue_ctx_', None) is not ctx:
+def _checked_object(ctx, value, base: str | None, kind: str, label: str) -> int:
+    """The address of value, a proxy of this session whose runtime class, read fresh, is base or derives from it."""
+    from .types import UObjectProxy
+    if base is None:
+        raise TypeError(f'{label}: {kind} has no class to check against')
+    if not isinstance(value, UObjectProxy) or type(value)._ue_ctx_ is not ctx:
         raise TypeError(f'{label}: expected a UObjectProxy of this session, got {value!r}')
-    return value._address_, value._ue_path_
+    addr = value._address_
+    cls = ctx.e.mem.ptr(addr + ctx.e.off.UObject.Class)
+    path = ctx.types.path_of(cls) if cls else None
+    if path is None or not ctx.is_subclass(path, base):
+        raise TypeError(f'{label}: {value!r} is not a {base}')
+    return addr
 
 
 def _object_codec(ptype: PropType):
@@ -402,20 +468,13 @@ def _object_codec(ptype: PropType):
         addr = int.from_bytes(ctx.acc.read(address, 8), 'little', signed=False)
         return ctx.proxy(addr)
 
-    def _set(ctx, address, value, label):
+    def _ops(ctx, address, value, label):
         if value is None:
-            ctx.check_write(label)
-            ctx.acc.write(address, bytes(8))
-            return
-        if cls_path is None:
-            raise TypeError(f'{label}: ObjectProperty has no class to check against')
-        addr, path = _proxy_of_session(ctx, value, label)
-        if not ctx.is_subclass(path, cls_path):
-            raise TypeError(f'{label}: {value!r} is not a {cls_path}')
-        ctx.check_write(label)
-        ctx.acc.write(address, addr.to_bytes(8, 'little'))
+            return [(address, bytes(8))]
+        addr = _checked_object(ctx, value, cls_path, 'ObjectProperty', label)
+        return [(address, addr.to_bytes(8, 'little'))]
 
-    return _get, _set
+    return _get, _ops
 
 
 def _class_codec(ptype: PropType):
@@ -425,21 +484,18 @@ def _class_codec(ptype: PropType):
         addr = int.from_bytes(ctx.acc.read(address, 8), 'little', signed=False)
         return ctx.proxy(addr)
 
-    def _set(ctx, address, value, label):
+    def _ops(ctx, address, value, label):
         if value is None:
-            ctx.check_write(label)
-            ctx.acc.write(address, bytes(8))
-            return
+            return [(address, bytes(8))]
         if meta_path is None:
             raise TypeError(f'{label}: ClassProperty has no meta class to check against')
-        addr, _ = _proxy_of_session(ctx, value, label)
+        addr = _checked_object(ctx, value, _CLASS_PATH, 'ClassProperty', label)
         path = ctx.types.path_of(addr)
         if path is None or not ctx.is_subclass(path, meta_path):
             raise TypeError(f'{label}: {value!r} is not a subclass of {meta_path}')
-        ctx.check_write(label)
-        ctx.acc.write(address, addr.to_bytes(8, 'little'))
+        return [(address, addr.to_bytes(8, 'little'))]
 
-    return _get, _set
+    return _get, _ops
 
 
 def _interface_codec():
@@ -447,14 +503,12 @@ def _interface_codec():
         addr = int.from_bytes(ctx.acc.read(address, 8), 'little', signed=False)
         return ctx.proxy(addr)
 
-    def _set(ctx, address, value, label):
+    def _ops(ctx, address, value, label):
         if value is None:
-            ctx.check_write(label)
-            ctx.acc.write(address, bytes(0x10))
-            return
+            return [(address, bytes(0x10))]
         raise NotImplementedError('assigning an interface needs its pointer offset, which v1 does not verify')
 
-    return _get, _set
+    return _get, _ops
 
 
 def _read_weak_pair(ctx, address) -> tuple[int, int]:
@@ -462,24 +516,28 @@ def _read_weak_pair(ctx, address) -> tuple[int, int]:
     return (int.from_bytes(raw[0:4], 'little', signed=True), int.from_bytes(raw[4:8], 'little', signed=True))
 
 
-def _write_weak_pair(ctx, address, index: int, serial: int) -> None:
-    ctx.acc.write(address, index.to_bytes(4, 'little', signed=True) + serial.to_bytes(4, 'little', signed=True))
+def _weak_pair_bytes(index: int, serial: int) -> bytes:
+    return index.to_bytes(4, 'little', signed=True) + serial.to_bytes(4, 'little', signed=True)
 
 
-def _weak_object_codec():
+def _weak_object_codec(ptype: PropType):
+    cls_path = ptype.cls
+
     def _get(ctx, address, label):
         index, serial = _read_weak_pair(ctx, address)
         return WeakObjectPtr(ctx, index, serial)
 
-    def _set(ctx, address, value, label):
-        if isinstance(value, WeakObjectPtr):
+    def _ops(ctx, address, value, label):
+        if value is None:
+            index, serial = 0, 0
+        elif isinstance(value, WeakObjectPtr):
             index, serial = value.index, value.serial
         else:
+            _checked_object(ctx, value, cls_path, 'WeakObjectProperty', label)
             index, serial = ctx.weak_ref(value)
-        ctx.check_write(label)
-        _write_weak_pair(ctx, address, index, serial)
+        return [(address, _weak_pair_bytes(index, serial))]
 
-    return _get, _set
+    return _get, _ops
 
 
 def _lazy_oid(ctx) -> int:
@@ -496,10 +554,10 @@ def _resolve_lazy(ctx):
         a, b, c, d = struct.unpack('<4I', ctx.acc.read(address + oid, 16))
         return LazyObjectPtr(weak, '%08X-%08X-%08X-%08X' % (a, b, c, d))
 
-    def _set(ctx, address, value, label):
+    def _ops(ctx, address, value, label):
         raise NotImplementedError('LazyObjectProperty values cannot be written in v1')
 
-    return size, 4, _get, _set
+    return size, 4, _get, _ops
 
 
 def _resolve_soft(ctx, kind: str):
@@ -515,10 +573,10 @@ def _resolve_soft(ctx, kind: str):
         path_view = ctx.struct_view('/Script/CoreUObject.SoftObjectPath', address + oid8)
         return SoftObjectPtr(ctx, weak, _soft_object_path(path_view))
 
-    def _set(ctx, address, value, label):
+    def _ops(ctx, address, value, label):
         raise NotImplementedError(f'{kind} values cannot be written in v1')
 
-    return size, 8, _get, _set
+    return size, 8, _get, _ops
 
 
 def _resolve_field_path(ctx):
@@ -530,10 +588,10 @@ def _resolve_field_path(ctx):
         names = tuple(ctx.names.read(arr.element_address(i, ctx.e.off.InSDK.Name.FNameSize)) for i in range(arr.num()))
         return FieldPathValue(names)
 
-    def _set(ctx, address, value, label):
+    def _ops(ctx, address, value, label):
         raise NotImplementedError('FieldPathProperty values cannot be written in v1')
 
-    return size, 8, _get, _set
+    return size, 8, _get, _ops
 
 
 def _resolve_delegate(ctx):
@@ -544,20 +602,20 @@ def _resolve_delegate(ctx):
         fname = ctx.names.read(address + 8)
         return DelegateValue(WeakObjectPtr(ctx, index, serial).get(), fname)
 
-    def _set(ctx, address, value, label):
+    def _ops(ctx, address, value, label):
         raise NotImplementedError('DelegateProperty values cannot be written in v1')
 
-    return size, 4, _get, _set
+    return size, 4, _get, _ops
 
 
 def _resolve_sparse():
     def _get(ctx, address, label):
         return SparseDelegateValue(ctx.acc.read(address, 1)[0] != 0)
 
-    def _set(ctx, address, value, label):
+    def _ops(ctx, address, value, label):
         raise NotImplementedError('MulticastSparseDelegateProperty values cannot be written in v1')
 
-    return _get, _set
+    return _get, _ops
 
 
 def _flatten_struct_members(ctx, path: str) -> list:
@@ -588,37 +646,59 @@ def _resolve_struct(ctx, ptype: PropType):
 
     def _members(ctx):
         if not members_cache:
-            members_cache.append(_flatten_struct_members(ctx, struct_path))
+            members_cache.append([(m, _member_codec(ctx, m)) for m in _flatten_struct_members(ctx, struct_path)])
         return members_cache[0]
 
     def _get(ctx, address, label):
         return ctx.struct_view(struct_path, address)
 
-    def _set(ctx, address, value, label):
+    def _ops(ctx, address, value, label):
         members = _members(ctx)
         if isinstance(value, dict):
-            by_raw = {m.name: m for m in members}
-            by_py = {_py_name(m.name): m for m in members}
+            from .types import member_names
+            by_raw, by_py = {}, {}
+            for mc in members:
+                by_raw.setdefault(mc[0].name, mc)
+                for n in member_names(mc[0].name):
+                    by_py.setdefault(n, mc)
+            pairs = []
             for key, v in value.items():
-                m = by_raw.get(key) or by_py.get(key)
-                if m is None:
+                if (mc := by_raw.get(key) or by_py.get(key)) is None:
                     raise AttributeError(f'{struct_path} has no member {key!r}')
-                make_codec(ctx, m.type, m.size).set(ctx, address + m.offset, v, f'{label}.{m.name}')
+                pairs.append((mc, v))
         elif isinstance(value, (tuple, list)):
             if len(value) != len(members):
                 raise ValueError(f'{label}: expected {len(members)} members, got {len(value)}')
-            for m, v in zip(members, value):
-                make_codec(ctx, m.type, m.size).set(ctx, address + m.offset, v, f'{label}.{m.name}')
+            pairs = list(zip(members, value))
         elif hasattr(value, '_ue_path_'):
             if getattr(value, '_ue_path_', None) != struct_path:
                 raise TypeError(f'{label}: expected a StructView of {struct_path}, got {value!r}')
-            for m in members:
-                sub = getattr(value, m.name)
-                make_codec(ctx, m.type, m.size).set(ctx, address + m.offset, sub, f'{label}.{m.name}')
+            pairs = [(mc, _member_of_view(ctx, value, *mc, f'{label}.{mc[0].name}')) for mc in members]
         else:
             raise TypeError(f'{label}: expected a StructView, tuple, list or dict for {struct_path}')
+        ops = []
+        for (m, codec), v in pairs:
+            ops += _plan(codec, ctx, address + m.offset, v, f'{label}.{m.name}')
+        return ops
 
-    return size, align, _get, _set
+    return size, align, _get, _ops
+
+
+def _member_codec(ctx, m):
+    codec = make_codec(ctx, m.type, m.size)
+    if m.array_dim > 1:
+        from . import containers
+        codec = containers.fixed_array_codec(codec, m.array_dim)
+    return codec
+
+
+def _member_of_view(ctx, view_, m, codec, label: str):
+    """Member m of a StructView: by offset in this session, else by raw name; fixed arrays as lists."""
+    if type(view_)._ue_ctx_ is ctx:
+        value = codec.get(ctx, view_._address_ + m.offset, label)
+    else:
+        value = view_._get_(m.name)
+    return value.to_list() if m.array_dim > 1 else value
 
 
 def _resolve(ctx, ptype: PropType):
@@ -638,7 +718,7 @@ def _resolve(ctx, ptype: PropType):
     if kind == 'InterfaceProperty':
         return (0x10, 8, *_interface_codec())
     if kind == 'WeakObjectProperty':
-        return (8, 4, *_weak_object_codec())
+        return (8, 4, *_weak_object_codec(ptype))
     if kind == 'EnumProperty':
         return _resolve_enum(ptype)
     if kind == 'BoolProperty':
@@ -664,13 +744,15 @@ def _resolve(ctx, ptype: PropType):
 
 
 def kind_layout(ctx, ptype: PropType) -> tuple:
-    """The (size, align) of the codec table's 'size when None' column for ptype's own kind."""
+    """The (size, align) of the codec table's 'size when None' column for ptype's own kind.
+    Raises the error its error codec would hold, and NotImplementedError for OptionalProperty and unknown kinds.
+    """
     if not isinstance(ptype, PropType):
         raise TypeError(f'ptype must be a PropType, got {type(ptype).__name__}')
-    if ptype.kind in ('OptionalProperty', UNKNOWN_KIND):
-        raise NotImplementedError(f'{ptype.prop} values are not supported in v1')
-    size, align, _get, _set = _resolve(ctx, ptype)
-    return size, align
+    codec = make_codec(ctx, ptype)
+    if (exc := _build_error(codec)) is not None:
+        raise exc
+    return codec.size, codec.align
 
 
 def make_codec(ctx, ptype: PropType, size: int | None = None):
@@ -690,10 +772,10 @@ def make_codec(ctx, ptype: PropType, size: int | None = None):
     try:
         if size is not None and kind in NATURAL_SIZES and size != NATURAL_SIZES[kind]:
             raise ValueError(f'{kind} cannot be {size:#x} bytes')
-        layout_size, align, get_fn, set_fn = _resolve(ctx, ptype)
-    except (LookupError, ValueError) as exc:
-        return _ErrorCodec(kind, size if size is not None else 0, exc)
-    return _Codec(kind, size if size is not None else layout_size, align, get_fn, set_fn)
+        layout_size, align, get_fn, ops_fn = _resolve(ctx, ptype)
+    except (LookupError, ValueError, MemoryReadError) as exc:
+        return _ErrorCodec(kind, size, exc)
+    return _Codec(kind, size if size is not None else layout_size, align, get_fn, ops_fn)
 
 
 def raw_pointer_codec() -> Codec:
@@ -701,7 +783,7 @@ def raw_pointer_codec() -> Codec:
         addr = int.from_bytes(ctx.acc.read(address, 8), 'little', signed=False)
         return ctx.raw_view(addr)
 
-    def _set(ctx, address, value, label):
+    def _ops(ctx, address, value, label):
         raise NotImplementedError('raw pointer values cannot be written in v1')
 
-    return _Codec('raw', 8, 8, _get, _set)
+    return _Codec('raw', 8, 8, _get, _ops)

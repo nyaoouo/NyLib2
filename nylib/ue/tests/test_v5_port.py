@@ -284,6 +284,26 @@ class PortRegressionTests(unittest.TestCase):
         finally:
             e.mem.close()
 
+    def test_invalid_ansi_name_array_bytes_are_unreadable(self):
+        import struct
+        from ..engine.gnames import FNameEntry
+        from ..errors import MemoryReadError
+        base = 0x100000
+        data = bytearray(0x1000)  # _read_until_nul reads up to the page end
+        struct.pack_into('<i', data, 0x0, 3 << 1)  # index 3, narrow
+        data[0x4] = 0xA9
+        e = self._engine_with_segment(base, bytes(data))
+        try:
+            e.settings.Internal.bUseNamePool = False
+            e.off.FNameEntry.NameArray.IndexOffset, e.off.FNameEntry.NameArray.StringOffset = 0x0, 0x4
+            e.names._GetStr = e.names._get_str_name_array
+            with self.assertRaises(MemoryReadError) as cm:
+                FNameEntry(e, base).get_wstring()
+            self.assertEqual(cm.exception.address, base)
+            self.assertIn('not valid UTF-8', cm.exception.reason)
+        finally:
+            e.mem.close()
+
     def test_stem_skips_bad_candidate(self):
         import struct
         from ..capture import ImageSource
