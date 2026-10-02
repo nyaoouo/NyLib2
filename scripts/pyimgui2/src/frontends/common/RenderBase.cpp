@@ -71,6 +71,11 @@ START_M_IMGUI_IMPL_NAMESPACE
         this->renderCallback_argc = renderCallback ? PyFuncArgc(renderCallback.value()) : 0;
     }
 
+    void RenderBase::SetInputPolicy(OVERLAY_TYPES_NAMESPACE::InputPolicy policy)
+    {
+        this->inputPolicy = (int)policy;
+    }
+
     void RenderBase::ProcessCallBeforeFrameOnce(py::object self)
     {
         auto gstate = PyGILState_Ensure();
@@ -244,6 +249,9 @@ START_M_IMGUI_IMPL_NAMESPACE
         py::class_<RenderBase>(m, "_RenderBase", py::dynamic_attr(), py::module_local())
             .def_property("renderCallback", [](RenderBase &self) { return self.renderCallback; }, &RenderBase::SetRenderCallback)
             .def_property("title", &RenderBase::GetTitle, &RenderBase::SetTitle)
+            .def_property("inputPolicy",
+                           [](RenderBase &self) { return (OVERLAY_TYPES_NAMESPACE::InputPolicy)(int)self.inputPolicy.load(); },
+                           &RenderBase::SetInputPolicy)
             .def("CallBeforeFrameOnce", [](RenderBase &self, py::function func) { self.callBeforeFrameOnce.push_back(func); })
             .def("Close", &RenderBase::Close)
             .def("UpdateTrayIconInfo", &RenderBase::UpdateTrayIconInfo, py::arg("tooltip"), py::arg("iconPath") = L"")

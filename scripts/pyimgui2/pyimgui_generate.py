@@ -1,3 +1,4 @@
+import ast
 import atexit
 import io
 import json
@@ -1641,9 +1642,23 @@ def patch_frontend_compat_stubs(output_dir, frontends):
         imports.append('from pyimgui.vk import VkInbound as VkInbound, VkWindow as VkWindow, _VkRender as _VkRender')
         imports.append('VkRender = _VkRender')
     if imports:
+        # Merge, don't replace: keep whatever stubgen already put in __all__
+        # (core names like MINIDUMP_TYPE, InputPolicy, OverlayZOrder) and
+        # union in the frontend names, deduping in order.
+        existing = []
+        existing_match = re.search(r"__all__: list\[str\] = \[([^\]]*)\]", data)
+        if existing_match:
+            try:
+                existing = ast.literal_eval('[' + existing_match.group(1) + ']')
+            except (SyntaxError, ValueError):
+                existing = []
+        merged = list(existing)
+        for name in exports:
+            if name not in merged:
+                merged.append(name)
         data = re.sub(
             r"__all__: list\[str\] = \[[^\]]*\]",
-            f"__all__: list[str] = {exports!r}",
+            f"__all__: list[str] = {merged!r}",
             data,
             count=1,
         )
@@ -1669,6 +1684,9 @@ def patch_frontend_module_stubs(output_dir, module_name):
     if package_stub.is_file() and flat_stub.is_file():
         flat_stub.unlink()
     data = module_stub.read_text(encoding='utf-8')
+    # _RenderBase.inputPolicy is defined on core pyimgui.InputPolicy; stubgen
+    # may not resolve the cross-module type and emit typing.Any instead.
+    data = _patch_field_stub_types(data, {'_RenderBase': {'inputPolicy': 'pyimgui.InputPolicy'}})
     if module_key == 'dx9':
         data = re.sub(
             r"__all__: list\[str\] = \[[^\]]*\]",
@@ -1800,6 +1818,7 @@ def generate(backends, debug=0, with_stubs=True):
                 src_dir / 'DllMain.cpp',
                 src_dir / 'gHeader.cpp',
                 src_dir / 'ImguiCtx.cpp',
+                src_dir / 'OverlayTypes.cpp',
                 src_dir / 'UnhandledException.cpp',
                 src_dir / 'Win32Font.cpp',
             ])),

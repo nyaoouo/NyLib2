@@ -2,6 +2,7 @@
 #include "./gheader.h"
 #include "./pyimgui.h"
 #include "./ImguiCtx.h"
+#include "./OverlayTypes.h"
 #include "./UnhandledException.h"
 #include "./Win32Font.h"
 
@@ -62,6 +63,7 @@ PYBIND11_MODULE(pyimgui, m) {
     // the top level of `pyimgui`. The filter is NOT installed automatically;
     // the user must call `setup_unhandle_exception_filter(...)` explicitly.
     G_UTILS_NAMESPACE::pybind_setup_UnhandledException(m);
+    OVERLAY_TYPES_NAMESPACE::pybind_setup_OverlayTypes(m);
     G_UTILS_NAMESPACE::pybind_setup_gUtils(m.def_submodule("gUtils"));
     auto imgui_m = m.def_submodule("imgui");
     PYIMGUI_CORE_NAMESPACE::pybind_setup_pyimgui_core(imgui_m);
