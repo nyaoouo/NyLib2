@@ -481,7 +481,7 @@ START_M_IMGUI_IMPL_NAMESPACE
         HWND hwnd = attachedHwnd;
         if (this->isImGuiInitialized && hwnd != nullptr)
         {
-            M_IMGUI_IMPL_WIN32_NAMESPACE::Attach(hwnd);
+            M_IMGUI_IMPL_WIN32_NAMESPACE::Attach(hwnd, &this->inputPolicy);
             this->SetHwnd(hwnd);
         }
         hooksEnabled = true;
@@ -538,7 +538,7 @@ START_M_IMGUI_IMPL_NAMESPACE
         attachedHwnd = host;
         if (hooksEnabled && hookInstance == this)
         {
-            M_IMGUI_IMPL_WIN32_NAMESPACE::Attach(host);
+            M_IMGUI_IMPL_WIN32_NAMESPACE::Attach(host, &this->inputPolicy);
             this->SetHwnd(host);
         }
         dbgPrint("init dx11 inbound success\n");

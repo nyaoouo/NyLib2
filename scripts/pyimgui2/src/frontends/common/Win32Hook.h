@@ -11,7 +11,8 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 
 START_M_IMGUI_IMPL_WIN32_NAMESPACE
 {
-    void Attach(HWND hwnd);
+    // policySource must stay alive until the matching Detach returns.
+    void Attach(HWND hwnd, std::atomic<int> *policySource);
     void Detach(HWND hwnd);
     inline void pybind_setup_mImguiImpl_Win32(pybind11::module_ m) {}
 }
