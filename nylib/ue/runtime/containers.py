@@ -552,6 +552,8 @@ def make_container_codec(ctx, ptype, size: int | None):
         expected = ctx.e.property_sizes.MulticastInlineDelegateProperty
         if size is not None and size != expected:
             return _ErrorCodec(kind, size, ValueError(f'{kind} cannot be {size:#x} bytes'))
+        if expected < 0x10:
+            return _ErrorCodec(kind, size, ValueError(f'{kind} cannot be {expected:#x} bytes: its InvocationList needs 0x10'))
         return multicast_codec(ctx, size if size is not None else expected)
 
     raise ValueError(f'make_container_codec does not handle kind {kind!r}')
