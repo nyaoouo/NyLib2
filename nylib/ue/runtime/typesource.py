@@ -1,5 +1,6 @@
 """Type sources over the stage-6 core (9-a4, RT3): snapshot-backed with a live fallback, and plain live reflection."""
 import logging
+import struct
 import threading
 import time
 import typing
@@ -7,7 +8,7 @@ from typing import Callable
 
 from ..engine.unreal import UEClass, UEObject
 from ..model import TypeRecord
-from ..reflect import LiveResolver, Reflection
+from ..reflect import _MAX_OUTERS, LiveResolver, Reflection
 
 if typing.TYPE_CHECKING:
     from ..engine.core import Engine
@@ -30,12 +31,43 @@ def _counts(record: TypeRecord) -> tuple[int, int]:
     return len(properties), len(getattr(record, 'functions', {}))
 
 
-def _fname_pair(e: 'Engine', address: int) -> tuple[int, int]:
-    """RT1's `read` rule for the two FName fields at `address + Off.UObject.Name`, without building a NameDecoder."""
-    name_address = address + e.off.UObject.Name
-    comparison_index = e.mem.i32(name_address + e.off.FName.CompIdx)
-    number = 0 if e.settings.Internal.bUseOutlineNumberName else e.mem.u32(name_address + e.off.FName.Number)
-    return comparison_index, number
+def _link_reader(e: 'Engine') -> Callable[[int], tuple[int, int, int, int]]:
+    """Reads one object's `(class, comparison index, number, outer)` in one fresh read (RT1's `read` rule for the FName fields)."""
+    off = e.off.UObject
+    lo = min(off.Class, off.Name, off.Outer)
+    size = max(off.Class + 8, off.Name + e.off.InSDK.Name.FNameSize, off.Outer + 8) - lo
+    cls, outer = off.Class - lo, off.Outer - lo
+    comparison_index = off.Name - lo + e.off.FName.CompIdx
+    number = None if e.settings.Internal.bUseOutlineNumberName else off.Name - lo + e.off.FName.Number
+
+    def read(address: int) -> tuple[int, int, int, int]:
+        data = e.mem.read(address + lo, size)
+        return (struct.unpack_from('<Q', data, cls)[0], struct.unpack_from('<i', data, comparison_index)[0],
+                0 if number is None else struct.unpack_from('<I', data, number)[0], struct.unpack_from('<Q', data, outer)[0])
+    return read
+
+
+def _link_signature(e: 'Engine', address: int) -> tuple[tuple[int, int, int, int], ...] | None:
+    """One link per object of `address`'s outer chain, outermost last; None for a cycle or LiveResolver's outer bound."""
+    read = _link_reader(e)
+    chain, links = [address], []
+    while True:
+        links.append(link := read(chain[-1]))
+        if not (outer := link[3]):
+            return tuple(links)
+        if outer in chain or len(chain) > _MAX_OUTERS:
+            return None
+        chain.append(outer)
+
+
+def _signature_holds(e: 'Engine', address: int, signature: tuple[tuple[int, int, int, int], ...]) -> bool:
+    """Re-reads the links of `signature` in order; False at the first difference."""
+    read = _link_reader(e)
+    for link in signature:
+        if read(address) != link:
+            return False
+        address = link[3]
+    return True
 
 
 class _NotedResolver(LiveResolver):
@@ -64,7 +96,7 @@ class LiveTypeSource:
         self._records: dict[str, TypeRecord] = {}
         self._negative: set[str] = set()
         self._noted: dict[str, int] = {}
-        self._path_memo: dict[int, tuple[str, int, int]] = {}
+        self._path_memo: dict[int, tuple[str, tuple[tuple[int, int, int, int], ...]]] = {}
         self._seeded = False
 
     def _seed_once(self) -> None:
@@ -122,16 +154,18 @@ class LiveTypeSource:
         if address == 0:
             return None
         e = self.e
-        if (cached := self._path_memo.get(address)) is not None and _fname_pair(e, address) == cached[1:]:
+        if (cached := self._path_memo.get(address)) is not None and _signature_holds(e, address, cached[1]):
             return cached[0]
         with self._lock:
-            if (cached := self._path_memo.get(address)) is not None and _fname_pair(e, address) == cached[1:]:
+            if (cached := self._path_memo.get(address)) is not None and _signature_holds(e, address, cached[1]):
                 return cached[0]
-            path = LiveResolver(e).path(address)
-            if path is None:
+            if (before := _link_signature(e, address)) is None:
                 return None
-            self._path_memo[address] = (path, *_fname_pair(e, address))
+            if (path := LiveResolver(e).path(address)) is None:
+                return None
             self.note(path, address)
+            if _link_signature(e, address) == before:
+                self._path_memo[address] = (path, before)
             return path
 
     def note(self, path: str, address: int) -> None:
