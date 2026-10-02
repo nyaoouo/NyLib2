@@ -470,12 +470,22 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             }
             this->swapChainOccluded = false;
 
-            this->ProcessCallBeforeFrameOnce(py::cast(this));
+            {
+                py::gil_scoped_acquire gil;
+                py::object self = py::cast(this, py::return_value_policy::reference);
+                this->ProcessCallBeforeFrameOnce(self);
+            }
 
             ImGui_ImplDX12_NewFrame();
             ImGui_ImplWin32_NewFrame();
             ImGui::NewFrame();
-            this->ProcessRenderCallback(py::cast(this));
+
+            {
+                py::gil_scoped_acquire gil;
+                py::object self = py::cast(this, py::return_value_policy::reference);
+                this->ProcessRenderCallback(self);
+            }
+
             ImGui::Render();
 
             FrameContext *frameCtx = this->WaitForNextFrameResources();
