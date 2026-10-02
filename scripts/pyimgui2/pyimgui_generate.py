@@ -1758,6 +1758,18 @@ def cleanup_legacy_frontend_outputs(cwd):
             legacy_file.unlink()
 
 
+def copy_python_modules(cwd):
+    cwd = pathlib.Path(cwd)
+    src_dir = cwd / 'py'
+    if not src_dir.is_dir():
+        print('copy_python_modules: py/ is missing, skipping')
+        return
+    dst_dir = cwd / 'pyimgui'
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for src_file in src_dir.glob('*.py'):
+        shutil.copy2(src_file, dst_dir / src_file.name)
+
+
 def copy_build_outputs(cwd, debug=0):
     cwd = pathlib.Path(cwd)
     core_files = sorted(cwd.glob('pyimgui*.pyd'))
@@ -1957,6 +1969,7 @@ def generate(backends, debug=0, with_stubs=True):
                 stub_gen(frontend_module, str(cwd))
                 patch_frontend_module_stubs(cwd, frontend_module)
             patch_frontend_compat_stubs(cwd, {module.rsplit('.', 1)[-1] for module in frontend_modules})
+        copy_python_modules(cwd)
         copy_build_outputs(cwd, debug=debug)
     finally:
         os.chdir(old_cwd)
