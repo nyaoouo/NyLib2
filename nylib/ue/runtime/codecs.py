@@ -618,7 +618,8 @@ def _resolve_sparse():
     return _get, _ops
 
 
-def _flatten_struct_members(ctx, path: str) -> list:
+def _struct_chain(ctx, path: str) -> list:
+    """Own struct first, then each super in order."""
     chain, seen, p = [], set(), path
     while p is not None:
         if p in seen or len(chain) > _STRUCT_CHAIN_BOUND:
@@ -629,10 +630,7 @@ def _flatten_struct_members(ctx, path: str) -> list:
             raise LookupError(f'struct {p!r} not found')
         chain.append(rec)
         p = rec.super
-    members = []
-    for rec in reversed(chain):
-        members.extend(rec.properties)
-    return members
+    return chain
 
 
 def _resolve_struct(ctx, ptype: PropType):
@@ -645,22 +643,26 @@ def _resolve_struct(ctx, ptype: PropType):
     members_cache: list = []
 
     def _members(ctx):
+        """Returns (flat, own_first): flat in layout order (super before own), own_first per level, own first."""
         if not members_cache:
-            members_cache.append([(m, _member_codec(ctx, m)) for m in _flatten_struct_members(ctx, struct_path)])
+            own_first = [[(m, _member_codec(ctx, m)) for m in level.properties] for level in _struct_chain(ctx, struct_path)]
+            flat = [mc for group in reversed(own_first) for mc in group]
+            members_cache.append((flat, own_first))
         return members_cache[0]
 
     def _get(ctx, address, label):
         return ctx.struct_view(struct_path, address)
 
     def _ops(ctx, address, value, label):
-        members = _members(ctx)
+        members, own_first = _members(ctx)
         if isinstance(value, dict):
             from .types import member_names
             by_raw, by_py = {}, {}
-            for mc in members:
-                by_raw.setdefault(mc[0].name, mc)
-                for n in member_names(mc[0].name):
-                    by_py.setdefault(n, mc)
+            for group in own_first:
+                for mc in group:
+                    by_raw.setdefault(mc[0].name, mc)
+                    for n in member_names(mc[0].name):
+                        by_py.setdefault(n, mc)
             pairs = []
             for key, v in value.items():
                 if (mc := by_raw.get(key) or by_py.get(key)) is None:
