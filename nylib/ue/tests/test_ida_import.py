@@ -33,8 +33,44 @@ _ORACLE_GLOBALS = {'GObjects': 'OFFSET_GOBJECTS', 'GNames': 'OFFSET_GNAMES', 'GW
 
 
 def _ascii_ident(kind: str, name: str) -> str:
-    """Stand-in for IDA 9.3's `validate_name`: every non-ASCII code point becomes `_` (review-8 `fb.log`)."""
+    """Stand-in for IDA 9.3's `validate_name`: every non-ASCII code point becomes `_`."""
     return re.sub(r'[^\x00-\x7f]', '_', name)
+
+
+def _type_ident(name: str) -> str:
+    """R3's IDA type name of a spelled specialisation, under `_ascii_ident`."""
+    if (v := _ascii_ident('type', name)) == name:
+        return name
+    return _ascii_ident('type', name.replace('<', '_').replace('>', '').replace(', ', '_').replace('*', 'Ptr'))
+
+
+def _member_type_error(p, spec, planned: dict, widths: dict, udts: dict) -> str | None:
+    """Why the planned member `spec` of property `p` is not the type R4 gives it, or None (unchecked kinds pass)."""
+    t = p.type
+    named = lambda path, prefix, default: default if path is None else planned.get(path) or prefix + names.make_name_valid(
+        re.split('[.:]', path)[-1])
+    want = None
+    if t.kind == 'ObjectProperty':
+        want = ('ptr', ('named', named(t.cls, 'U', 'UObject')))
+    elif t.kind == 'ClassProperty':
+        want = ('ptr', ('named', 'UClass'))
+    elif t.kind == 'StructProperty':
+        want = ('named', planned.get(t.struct, f'<no record {t.struct}>'))
+    elif t.kind in ('ByteProperty', 'EnumProperty') and t.enum is not None and widths.get(t.enum) == p.size:
+        want = ('named', planned[t.enum])
+    elif t.kind == 'InterfaceProperty':
+        base = _type_ident(f"TScriptInterface<{named(t.cls, 'I', 'IInterface')}>")
+        inner = spec[1] if spec[0] == 'array' else spec
+        u = udts.get(inner[1]) if inner[0] == 'named' else None
+        if u is None or not (inner[1] == base or inner[1].startswith(base + '__')) or u['size'] != p.size or (
+                p.size == 0x10 and [m[0] for m in u['members']] != ['ObjectPointer', 'InterfacePointer']):
+            return f'{spec!r} is not the {p.size:#x}-byte {base}'
+        return None
+    if want is None:
+        return None
+    if p.array_dim > 1:
+        want = ('array', want, p.array_dim)
+    return None if tuple(spec) == want else f'{spec!r} != {want!r}'
 
 
 def _load_importer():
@@ -148,13 +184,30 @@ class TypePlanTests(unittest.TestCase):
         self.assertEqual([m[:3] for m in udts[member[3][1]]['members']], [('ObjectPointer', 0, 64), ('InterfacePointer', 64, 64)])
 
 
-class NetnodeRecordTests(unittest.TestCase):
-    def test_type_key_and_digests(self):
+class RecordFormatGuardTests(unittest.TestCase):
+    """The netnode record values and the type digest's encoding are formats stored in users' IDBs."""
+    LONG = 'é\ud800' + 'x' * 1998
+    PAIR, ONE = re.compile(r'[0-9a-f]{64}\n[0-9a-f]{64}'), re.compile(r'[0-9a-f]{64}')
+
+    def test_type_key_and_h(self):
         h = hashlib.sha256('USmokeLeaf'.encode('utf-8')).digest()
         self.assertEqual(uei._type_key('USmokeLeaf'), int.from_bytes(h[:8], 'little') >> 1)
-        shape = ('udt', 8, True, True, 'nylib.ue: /S/P.X', [('a', 0, 32, 'int', False, '')])
-        self.assertEqual(uei._digest(repr(shape)), hashlib.sha256(repr(shape).encode('utf-8')).hexdigest())
         self.assertEqual(uei._digest('a\ud800'), hashlib.sha256(b'a\xed\xa0\x80').hexdigest())
+
+    def test_record_values_are_fixed_size(self):
+        values = {'N': uei._name_record(self.LONG, self.LONG + 'y'), 'P': uei._hash_record(self.LONG),
+                  'C': uei._hash_record(self.LONG + '\n' + self.LONG), 'T': uei._type_record(self.LONG, uei._type_digest(['other', self.LONG]))}
+        for tag, v in values.items():
+            with self.subTest(tag=tag):
+                self.assertLessEqual(len(v.encode('ascii')), 129)
+                self.assertRegex(v, (self.ONE if tag in 'PC' else self.PAIR).pattern + r'\Z')
+        self.assertEqual(values['T'].split('\n')[0], hashlib.sha256(self.LONG.encode('utf-8', 'surrogatepass')).hexdigest())
+
+    def test_type_digest_encoding_is_pinned(self):
+        x = ['udt', 8, False, 0x41, 'nylib.ue: /S/P.é\ud800\x01', True, [['m', 0, 32, 'int', 0, 0, '', 'hex']]]
+        pinned = b'["udt",8,false,65,"nylib.ue: /S/P.\\u00e9\\ud800\\u0001",true,[["m",0,32,"int",0,0,"","hex"]]]'
+        self.assertEqual(uei._canonical(x), pinned)
+        self.assertEqual(uei._type_digest(x), 'e4b9ea97cf3372300029a20ae25afbca4d03a53b16c2f22152426396bde1c18a')
 
 
 class BuildCheckGuardTests(unittest.TestCase):
@@ -290,6 +343,18 @@ class CommentLengthGuardTests(unittest.TestCase):
         _rva, text, _is_exec = next(c for c in p['comments'] if c[0] == 0x4000)
         self.assertLessEqual(len(text.encode('utf-8')), uei._COMMENT_BYTE_LIMIT)
 
+    def test_surrogate_in_vtable_also_name(self):
+        objects, classes = [_obj(0, 0x1000, outer_index=-1, name=PKG)], []
+        for i, letter in enumerate(('A', 'B\ud800'), 1):
+            objects.append(_obj(2 * i - 1, 0x2000 + i, name=letter))
+            objects.append(_obj(2 * i, 0x3000 + i, flags=EObjectFlags.ClassDefaultObject, class_index=2 * i - 1, vtable_rva=0x4000,
+                                name=f'Default__{letter}'))
+            classes.append(_cls(letter))
+        with tempfile.TemporaryDirectory() as root, uei.load_snapshot(_write(root, list(model.ObjectTable(objects)), classes)) as view:
+            p = uei.plan(view)
+        _rva, text, _is_exec = next(c for c in p['comments'] if c[0] == 0x4000)
+        self.assertEqual(text, 'also: UB�_VFT')
+
 
 def _newest_snapshot(ours: str) -> str | None:
     found = []
@@ -319,10 +384,13 @@ class RealSnapshotTests(unittest.TestCase):
                 self._check(s, snap, port.ACCEPTED)
 
     def _check_plan_audit(self, view, snapshot):
-        """The plan vs. the snapshot `Snapshot.load` reads, independent of the importer's own reader (review-8 I3)."""
+        """The plan vs. the snapshot `Snapshot.load` reads, independent of the importer's own reader; asserts once, on every violation."""
         full = uei.plan(view, ident=_ascii_ident)
         tp = full['types']
-        self.assertEqual(tp['members_dropped'], 0)
+        bad = collections.defaultdict(list)
+        for key in ('members_dropped', 'members_untyped'):
+            if tp[key]:
+                bad[f'types.{key} is not 0'].append(tp[key])
         udts_by_path = collections.defaultdict(list)
         for u in tp['udts']:
             if u['path'] is not None:
@@ -334,41 +402,54 @@ class RealSnapshotTests(unittest.TestCase):
         class_struct = [r for r in snapshot.types() if isinstance(r, model.StructRecord)]
         enum_recs = [r for r in snapshot.types() if isinstance(r, model.EnumRecord)]
         for r in class_struct:
-            self.assertEqual(len(udts_by_path.get(r.path, ())), 1, f'{r.path}: planned UDTs')
-        self.assertEqual(tp['records'], len(class_struct))
+            if len(udts_by_path.get(r.path, ())) != 1:
+                bad['class or struct record without exactly one planned UDT'].append(f'{r.path}: {len(udts_by_path.get(r.path, ()))}')
+        if tp['records'] != len(class_struct):
+            bad['types.records differs from the class and struct records'].append(f"{tp['records']} != {len(class_struct)}")
         for r in enum_recs:
-            self.assertEqual(len(enums_by_path.get(r.path, ())), 1, f'{r.path}: planned enums')
+            if len(enums_by_path.get(r.path, ())) != 1:
+                bad['enum record without exactly one planned enum'].append(f'{r.path}: {len(enums_by_path.get(r.path, ()))}')
+        planned = {path: us[0]['name'] for path, us in udts_by_path.items()} | {path: es[0]['name'] for path, es in enums_by_path.items()}
+        widths = {path: es[0]['width'] for path, es in enums_by_path.items()}
+        by_name = {u['name']: u for u in tp['udts']}
         for r in class_struct:
             us = udts_by_path.get(r.path)
             if not us:
                 continue
-            by_lo = collections.defaultdict(set)
-            for _n, lo, nbits, _s in us[0]['members']:
-                by_lo[lo].add(nbits)
+            by_lo = {lo: (nbits, spec) for _n, lo, nbits, spec in us[0]['members']}
             for p in r.properties:
+                where = f'{r.path}: {p.name} @0x{p.offset:x} size 0x{p.size:x}'
                 bit = p.type.bit
-                if bit is not None and p.array_dim == 1:
-                    ok = 1 in by_lo.get(p.offset * 8 + bit, ())
-                else:
-                    ok = p.size * p.array_dim * 8 in by_lo.get(p.offset * 8, ())
-                self.assertTrue(ok, f'{r.path}: {p.name} @0x{p.offset:x} size 0x{p.size:x} not placed in the plan at its size')
+                lo, want = (p.offset * 8 + bit, 1) if bit is not None and p.array_dim == 1 else (p.offset * 8, p.size * p.array_dim * 8)
+                if (m := by_lo.get(lo)) is None:
+                    bad['property not planned at its offset'].append(where)
+                elif m[0] > want:
+                    bad['member longer than its property'].append(f'{where}: {m[0]} bits')
+                elif m[0] < want:
+                    bad['member shorter than its property'].append(f'{where}: {m[0]} bits')
+                elif (why := _member_type_error(p, m[1], planned, widths, by_name)) is not None:
+                    bad['member type differs from R4'].append(f'{where}: {why}')
             if not isinstance(r, model.ClassRecord):
                 align = max(r.min_alignment, 1)
-                self.assertEqual(us[0]['size'], -(-r.size // align) * align, f'{r.path}: struct UDT size')
+                if us[0]['size'] != -(-r.size // align) * align:
+                    bad['struct UDT size is not size rounded up to min_alignment'].append(f"{r.path}: 0x{us[0]['size']:x}")
         rec_by_cpp = collections.defaultdict(list)
         for r in class_struct:
             rec_by_cpp[r.cpp_name].append(r)
-        by_name = {u['name']: u for u in tp['udts']}
         for (t, m), (off, sz) in uei.core_members(view).items():
             u = by_name.get(t)
-            self.assertIsNotNone(u, f'{t}.{m}: core member with no planned type')
-            hit = any(mn == m and ml == off * 8 and mb == sz * 8 for mn, ml, mb, _s in u['members'])
-            if not hit:
+            if u is None:
+                bad['core member with no planned type'].append(f'{t}.{m}')
+            elif not any(mn == m and ml == off * 8 and mb == sz * 8 for mn, ml, mb, _s in u['members']):
                 rr = [r for r in rec_by_cpp.get(t, ()) if r.package == '/Script/CoreUObject']
-                self.assertTrue(rr and any(pp.offset == off for pp in rr[0].properties),
-                                f'{t}.{m} @0x{off:x}: not a planned member and no reflected property overrides it')
-        for _rva, ctext, _is_exec in full['comments']:
-            self.assertLessEqual(len(ctext.encode('utf-8')), uei._COMMENT_BYTE_LIMIT)
+                if not (rr and any(pp.offset == off for pp in rr[0].properties)):
+                    bad['core member not planned and no reflected property overrides it'].append(f'{t}.{m} @0x{off:x}')
+        for rva, ctext, _is_exec in full['comments']:
+            if len(ctext.encode('utf-8')) > uei._COMMENT_BYTE_LIMIT:
+                bad['comment longer than _COMMENT_BYTE_LIMIT'].append(f'0x{rva:x}')
+        if bad:
+            self.fail('plan audit: ' + '; '.join(f'{k}: {len(v)}' for k, v in bad.items()) + '\n'
+                      + '\n'.join(f'  {k}, first 5: {v[:5]}' for k, v in bad.items()))
 
     def _check(self, s, snap: str, accepted: dict):
         oracle_dir = pathlib.Path(s.dir, 'oracle', s.data['oracle']['folder'])

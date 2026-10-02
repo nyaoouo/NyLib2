@@ -25,6 +25,8 @@ SCHEMA_MAJOR = 1
 _OFFSETS_SCHEMA = 'nylib.ue.offsets'
 _OBJECTS_SCHEMA = 'nylib.ue.objects'
 _NETNODE = '$ nylib.ue.import'
+_RECORDS_VERSION = '1'
+_FOLDER_BYTE_LIMIT = 1000
 _TYPE_MARK = 'nylib.ue: '
 _COMMENT_MARK = 'UFunction '
 _ALSO_MARK = 'also: '
@@ -46,6 +48,8 @@ _UHEX_RE = re.compile(r'0[xX][0-9A-Fa-f]+')
 _SHA256_RE = re.compile(r'[0-9A-Fa-f]{64}')
 _VERSION_RE = re.compile(r'\d+\.\d+')
 _LONE_SURROGATE_RE = re.compile('[\ud800-\udfff]')
+_H_RE = re.compile('[0-9a-f]{64}')
+_H_PAIR_RE = re.compile('[0-9a-f]{64}\n[0-9a-f]{64}')
 
 # EFunctionFlags names of nylib/ue/flags.py (Dumper-7 Enums.h), copied.
 _EFUNCTION_FLAGS = (
@@ -275,13 +279,35 @@ def _text(s: str) -> str:
 
 
 def _digest(text: str) -> str:
-    """SHA-256 hex of `text` encoded UTF-8 with surrogatepass (R8's `C` and `T` records)."""
+    """H(text): the lowercase SHA-256 hex of `text` encoded UTF-8 with surrogatepass."""
     return hashlib.sha256(text.encode('utf-8', 'surrogatepass')).hexdigest()
 
 
 def _type_key(name: str) -> int:
     """The netnode index of type `name`'s `T` record."""
     return int.from_bytes(hashlib.sha256(name.encode('utf-8', 'surrogatepass')).digest()[:8], 'little') >> 1
+
+
+def _name_record(planned: str, applied: str) -> str:
+    return f'{_digest(planned)}\n{_digest(applied)}'
+
+
+def _hash_record(text: str) -> str:
+    """The `P` and `C` record value."""
+    return _digest(text)
+
+
+def _type_record(name: str, digest: str) -> str:
+    return f'{_digest(name)}\n{digest}'
+
+
+def _canonical(x) -> bytes:
+    """The type digest's input encoding: JSON with every non-ASCII code point escaped."""
+    return json.dumps(x, ensure_ascii=True, separators=(',', ':')).encode('ascii')
+
+
+def _type_digest(x) -> str:
+    return hashlib.sha256(_canonical(x)).hexdigest()
 
 
 # --- F8 records (nylib/ue/model.py), validated as model.from_json does ---
@@ -1676,6 +1702,7 @@ def _also_line(names: list, used: int) -> str:
     plus `used` other bytes of the same comment stays inside IDA's cap (R2; never splits a name mid-character).
     """
     budget = max(0, _COMMENT_BYTE_LIMIT - used)
+    names = [_text(n) for n in names]
     full = _ALSO_MARK + ', '.join(names)
     if len(full.encode('utf-8')) <= budget:
         return full
@@ -1811,11 +1838,14 @@ class _Applier:
         self.overwrite = overwrite
         self.verbose = verbose
         self.nn = ida_netnode.netnode(_NETNODE, 0, True)
+        if self.nn.hashstr('schema') is None and not (self.nn.hashset_buf('schema', _RECORDS_VERSION)
+                                                      and self.nn.hashstr('schema') == _RECORDS_VERSION):
+            raise RuntimeError('cannot write the import record version')
         self.report = {'names': dict.fromkeys(('set', 'unchanged', 'replaced', 'kept', 'failed', 'renamed_for_ida'), 0),
                        'types': dict.fromkeys(('created', 'replaced', 'unchanged', 'kept', 'failed', 'members_dropped',
                                                'members_untyped'), 0),
                        'comments': dict.fromkeys(('set', 'unchanged', 'replaced', 'kept', 'failed'), 0),
-                       'kept': [], 'failures': []}
+                       'kept': [], 'overwritten': [], 'failures': []}
         self.cancelled = False
         self._ticks = 0
 
@@ -1834,28 +1864,36 @@ class _Applier:
         self.report[bucket]['kept'] += 1
         self.report['kept'].append((ea, cur, planned, kind))
 
-    def _rec(self, ea: int, tag: str):
+    def _rec(self, ea: int, tag: str) -> 'str | None':
+        """The `N`, `P` or `C` record at `ea`, or None when it does not have its tag's form."""
         v = self.nn.supstr_ea(ea, ord(tag))
-        if not v and tag in 'NP':
-            v = self.nn.supstr(ea, ord(tag))  # the absolute-ea key of imports before C8.G.2
-        return tuple(v.split('\n', 1)) if v and '\n' in v else None
+        return v if v and (_H_PAIR_RE if tag == 'N' else _H_RE).fullmatch(v) else None
 
-    def _record(self, ea: int, tag: str, value: str, rec=None):
-        if rec != tuple(value.split('\n', 1)):
-            self.nn.supset_ea(ea, value, ord(tag))
+    def _store(self, bucket: str, what: str, key: int, tag: str, value: str, *, by_ea: bool = True):
+        if by_ea:
+            ok = self.nn.supset_ea(key, value, ord(tag)) and self.nn.supstr_ea(key, ord(tag)) == value
+        else:
+            ok = self.nn.supset(key, value, ord(tag)) and self.nn.supstr(key, ord(tag)) == value
+        if not ok:
+            self.fail(bucket, what, 'cannot write the import record')
 
-    def _comment_digest(self, ea: int) -> 'str | None':
-        rec = self._rec(ea, 'C')
-        return rec[1] if rec and rec[0] == '1' else None
+    def _record(self, bucket: str, what: str, ea: int, tag: str, value: str, rec: 'str | None'):
+        if rec != value:
+            self._store(bucket, what, ea, tag, value)
 
-    def _type_digest(self, name: str) -> 'str | None':
+    def _type_rec(self, name: str) -> 'str | None':
+        """The type digest in `name`'s `T` record, or None."""
         v = self.nn.supstr(_type_key(name), ord('T'))
-        parts = v.split('\n') if v else []
-        return parts[1] if len(parts) == 3 and parts[0] == '1' and parts[2] == name else None
+        if not v or not _H_PAIR_RE.fullmatch(v) or v[:64] != _digest(name):
+            return None
+        return v[65:]
 
     def _record_type(self, name: str, digest: str):
-        if self._type_digest(name) != digest:
-            self.nn.supset(_type_key(name), f'1\n{digest}\n{name}', ord('T'))
+        if self._type_rec(name) != digest:
+            self._store('types', f'type {name}', _type_key(name), 'T', _type_record(name, digest), by_ea=False)
+
+    def _overwrote(self, kind: str, ea: 'int | None', cur: str, planned: str):
+        self.report['overwritten'].append((ea, cur, planned, kind))
 
     # -- types
 
@@ -1902,33 +1940,37 @@ class _Applier:
         return t if t.get_named_type(None, name) else None
 
     @staticmethod
-    def _shape(t, cmt: 'str | None' = None) -> tuple:
-        """The `T` record's digest input; `cmt` stands in for the type comment of a type not yet in the IDB."""
+    def _shape(t, cmt: 'str | None' = None) -> list:
+        """The type digest's input; `cmt` is the planned (repeatable) type comment of a type not yet stored."""
         import ida_typeinf as T
-        cmt = (t.get_type_cmt() or '') if cmt is None else cmt
+        cmt, rpt = (t.get_type_cmt() or '', bool(t.get_type_rptcmt())) if cmt is None else (cmt, True)
         if t.is_enum():
             ei = T.enum_type_data_t()
             t.get_enum_details(ei)
-            return 'enum', t.get_size(), bool(ei.is_number_signed()), cmt, [(m.name, int(m.value), m.cmt or '') for m in ei]
+            return ['enum', t.get_size(), int(ei.bte), int(ei.taenum_bits), [int(g) for g in ei.group_sizes], cmt, rpt,
+                    [[m.name, int(m.value), m.cmt or ''] for m in ei]]
         u = T.udt_type_data_t()
         if not t.get_udt_details(u):
-            return 'other', str(t), cmt
-        return ('udt', t.get_size(), bool(u.is_fixed()), bool(u.is_cppobj()), cmt,
-                [(m.name, int(m.offset), int(m.size), str(m.type), bool(m.is_baseclass()), m.cmt or '') for m in u])
+            return ['other', str(t), cmt, rpt]
+        return ['udt', t.get_size(), bool(u.is_union), int(u.taudt_bits), int(u.pack), int(u.sda), cmt, rpt,
+                [[m.name, int(m.offset), int(m.size), str(m.type), int(m.tafld_bits), int(m.fda), m.cmt or '', str(m.repr)]
+                 for m in u]]
 
     def _put_type(self, name: str, new, comment: str, folder: str) -> str:
+        """R8 for one local type: 'created', 'replaced', 'unchanged', 'kept' or 'overwritten' (a replaced kept type)."""
         import ida_typeinf as T
         cur = self._existing(name)
         if cur is not None and not cur.is_forward_decl():
-            have = repr(self._shape(cur))
-            if have == repr(self._shape(new, comment)):
-                self._record_type(name, _digest(have))
+            have = _type_digest(self._shape(cur))
+            if have == _type_digest(self._shape(new, comment)):
+                self._record_type(name, have)
                 return 'unchanged'
-            rec = self._type_digest(name)
-            ours = _digest(have) == rec if rec is not None else (cur.get_type_cmt() or '').startswith(_TYPE_MARK)
-            if not ours and not self.overwrite:
+            if have == self._type_rec(name):
+                action = 'replaced'
+            elif self.overwrite:
+                action = 'overwritten'
+            else:
                 return 'kept'
-            action = 'replaced'
         else:
             action = 'created'
         rc = new.set_named_type(None, name, T.NTF_REPLACE)
@@ -1937,7 +1979,7 @@ class _Applier:
         named = self._existing(name)
         if named is None or named.set_type_cmt(comment) != T.TERR_OK:
             raise RuntimeError('cannot set the type comment')
-        self._record_type(name, _digest(repr(self._shape(self._existing(name)))))
+        self._record_type(name, _type_digest(self._shape(self._existing(name))))
         if action == 'created':
             self._move(name, folder)
         return action
@@ -1994,7 +2036,11 @@ class _Applier:
         t = T.tinfo_t()
         if not t.create_enum(ei):
             raise RuntimeError('create_enum failed')
-        return t
+        t.set_enum_is_bitmask(T.tinfo_t.ENUMBM_AUTO)  # IDA does this when it stores a UDT whose member has the enum type
+        ser, stored = t.serialize(), T.tinfo_t()  # the form IDA stores (it adds TAENUM_64BIT, for example)
+        if not ser or not stored.deserialize(None, ser[0], ser[1], ser[2]):
+            raise RuntimeError('cannot serialize the enum')
+        return stored
 
     def forward_declare(self, names):
         import ida_typeinf as T
@@ -2023,8 +2069,12 @@ class _Applier:
                 self.fail('types', f"type {u['name']}", f'{type(ex).__name__}: {ex}')
 
     def _count_type(self, planned: dict, action: str):
+        entry = ('type', None, planned['name'], planned['comment'].split('\n', 1)[0])
         if action == 'kept':
-            self.keep('types', 'type', None, planned['name'], planned['comment'].split('\n', 1)[0])
+            self.keep('types', *entry)
+        elif action == 'overwritten':
+            self.report['types']['replaced'] += 1
+            self._overwrote(*entry)
         else:
             self.report['types'][action] += 1
 
@@ -2048,29 +2098,35 @@ class _Applier:
         import ida_bytes
         import ida_name
         r = self.report['names']
+        what = f'name {planned} at {ea:#x}'
         cur = ida_name.get_name(ea) or ''
         rec = self._rec(ea, 'N')
-        if cur == planned or (rec and rec[0] == planned and rec[1] == cur):
-            self._record(ea, 'N', f'{planned}\n{cur}', rec)
+        if cur == planned or rec == _name_record(planned, cur):
+            self._record('names', what, ea, 'N', _name_record(planned, cur), rec)
             r['unchanged'] += 1
             return
         flags = ida_bytes.get_flags(ea)
+        users = False
         if not cur or ida_bytes.has_dummy_name(flags) or ida_bytes.has_auto_name(flags):
             action = 'set'
-        elif rec and rec[1] == cur or self.overwrite:
+        elif rec is not None and rec[65:] == _digest(cur):
             action = 'replaced'
+        elif self.overwrite:
+            action, users = 'replaced', True
         else:
             self.keep('names', 'name', ea, cur, planned)
             return
         if ida_bytes.is_tail(flags):
-            self.fail('names', f'name {planned} at {ea:#x}', 'the address is inside an instruction or data item')
+            self.fail('names', what, 'the address is inside an instruction or data item')
             return
         applied = self._set_name(ea, planned)
         if applied is None:
-            self.fail('names', f'name {planned} at {ea:#x}', 'IDA refused the name')
+            self.fail('names', what, 'IDA refused the name')
             return
-        self._record(ea, 'N', f'{planned}\n{applied}')
         r[action] += 1
+        if users:
+            self._overwrote('name', ea, cur, planned)
+        self._record('names', what, ea, 'N', _name_record(planned, applied), None)
 
     # -- comments and prototypes
 
@@ -2081,29 +2137,34 @@ class _Applier:
         pfn = ida_funcs.get_func(ea)
         on_func = pfn is not None and pfn.start_ea == ea
         read = lambda: (ida_funcs.get_func_cmt(pfn, True) if on_func else ida_bytes.get_cmt(ea, True)) or ''
+        what = f'comment at {ea:#x}'
         cur = read()
-        rec = self._comment_digest(ea)
+        rec = self._rec(ea, 'C')
         if cur == text:
-            if rec != _digest(cur):
-                self._record(ea, 'C', f'1\n{_digest(cur)}')
+            self._record('comments', what, ea, 'C', _hash_record(cur), rec)
             r['unchanged'] += 1
             return
+        users = False
         if not cur:
             action = 'set'
-        elif (_digest(cur) == rec if rec is not None else cur.startswith(_COMMENT_MARK)) or self.overwrite:
+        elif rec == _hash_record(cur):
             action = 'replaced'
+        elif self.overwrite:
+            action, users = 'replaced', True
         else:
             self.keep('comments', 'comment', ea, cur.split('\n', 1)[0], text.split('\n', 1)[0])
             return
         if not on_func and ida_bytes.is_tail(ida_bytes.get_flags(ea)):
-            self.fail('comments', f'comment at {ea:#x}', 'the address is inside an instruction or data item')
+            self.fail('comments', what, 'the address is inside an instruction or data item')
             return
         ok = ida_funcs.set_func_cmt(pfn, text, True) if on_func else ida_bytes.set_cmt(ea, text, True)
         if not ok:
-            self.fail('comments', f'comment at {ea:#x}', 'IDA refused the comment')
+            self.fail('comments', what, 'IDA refused the comment')
             return
-        self._record(ea, 'C', f'1\n{_digest(read())}')
         r[action] += 1
+        if users:
+            self._overwrote('comment', ea, cur.split('\n', 1)[0], text.split('\n', 1)[0])
+        self._record('comments', what, ea, 'C', _hash_record(read()), None)
 
     def apply_type_at(self, ea: int, decl: str, bucket: str, *, function: bool):
         import ida_funcs
@@ -2120,51 +2181,74 @@ class _Applier:
             self.fail(bucket, f'type at {ea:#x}', f'cannot parse {decl!r}')
             return
         planned = str(t)
+        what = f'type at {ea:#x}'
         cur_t = T.tinfo_t()
         cur = str(cur_t) if ida_nalt.get_tinfo(cur_t, ea) else ''
         rec = self._rec(ea, 'P')
         if cur == planned:
-            self._record(ea, 'P', f'{planned}\n{planned}', rec)
+            self._record(bucket, what, ea, 'P', _hash_record(planned), rec)
             r['unchanged'] += 1
             return
+        users = None
         if not cur:
             action = 'set'
-        elif rec and rec[1] == cur or self.overwrite:
+        elif rec == _hash_record(cur):
             action = 'replaced'
+        elif self.overwrite:
+            action, users = 'replaced', cur
         else:
             self.keep(bucket, 'decl', ea, cur, planned)
             return
-        if not function and not self.overwrite and self._user_data_in_span(ea, t.get_size(), own_item=action == 'replaced'):
-            self.keep(bucket, 'decl', ea, '<user data in span>', planned)
-            return
+        if not function and users is None and self._user_data_in_span(ea, t.get_size(), own_item=action == 'replaced'):
+            if not self.overwrite:
+                self.keep(bucket, 'decl', ea, '<user data in span>', planned)
+                return
+            users = '<user data in span>'
         if not T.apply_tinfo(ea, t, T.TINFO_DEFINITE):
-            self.fail(bucket, f'type at {ea:#x}', f'IDA refused {decl!r}')
+            self.fail(bucket, what, f'IDA refused {decl!r}')
             return
-        self._record(ea, 'P', f'{planned}\n{planned}')
         r[action] += 1
+        if users is not None:
+            self._overwrote('decl', ea, users, planned)
+        self._record(bucket, what, ea, 'P', _hash_record(planned), None)
 
     @staticmethod
     def _user_data_in_span(ea: int, size: int, *, own_item: bool) -> bool:
-        """`ea` is inside another item, or [ea, ea+size) holds a user name, a comment or an item reaching past it.
+        """`ea` is inside another item, or [ea, ea+size) holds an item of the user's or one reaching past it (R8).
 
-        `own_item`: the item at `ea` is ours, so its own size does not count.
+        `own_item`: the importer typed the item at `ea`, so its size and display format do not count.
         """
         import ida_bytes
         import ida_idaapi
+        import ida_nalt
         import ida_name
-        if ida_bytes.is_tail(ida_bytes.get_flags(ea)):
+        import ida_typeinf
+        f = ida_bytes.get_flags(ea)
+        if ida_bytes.is_tail(f) or not own_item and ida_bytes.is_defarg0(f):
             return True
         end = ea + max(size, 1)
         h = ea
         while h != ida_idaapi.BADADDR and h < end:
             f = ida_bytes.get_flags(h)
             if h != ea and (ida_name.get_name(h) and not ida_bytes.has_dummy_name(f) and not ida_bytes.has_auto_name(f)
-                            or ida_bytes.get_cmt(h, False) or ida_bytes.get_cmt(h, True)):
+                            or ida_bytes.get_cmt(h, False) or ida_bytes.get_cmt(h, True)
+                            or ida_nalt.get_tinfo(ida_typeinf.tinfo_t(), h) or ida_bytes.is_defarg0(f)):
                 return True
             if h + ida_bytes.get_item_size(h) > end and not (own_item and h == ea):
                 return True
             h = ida_bytes.next_head(h, end)
         return False
+
+
+def _check_records_version():
+    """Refuse an IDB whose import records are of another version, before anything is read or changed (R8)."""
+    import ida_netnode
+    if not ida_netnode.netnode.exist(_NETNODE):
+        return
+    v = ida_netnode.netnode(_NETNODE, 0, False).hashstr('schema')
+    if v is not None and v != _RECORDS_VERSION:
+        raise RuntimeError(f'the import records in this IDB are version {v!r}; this importer reads version '
+                           f'{_RECORDS_VERSION!r}. Use the copy of ue_dumper_import.py that wrote them.')
 
 
 def _say(line: str):
@@ -2184,6 +2268,7 @@ def run(snapshot, *, types='all', roots=(), exec_names=True, vtables=True, globa
     _require_ida()
     import ida_kernwin
     import ida_nalt
+    _check_records_version()
     started = time.monotonic()
     with load_snapshot(snapshot) as view:
         address_bound = exec_names or vtables or global_names or comments
@@ -2244,7 +2329,8 @@ def run(snapshot, *, types='all', roots=(), exec_names=True, vtables=True, globa
             ida_kernwin.hide_wait_box()
     report = {'snapshot': os.fspath(snapshot), 'build': verdict, 'forced': bool(force and verdict in ('mismatch', 'unknown')),
               'names': ap.report['names'], 'types': ap.report['types'], 'comments': ap.report['comments'],
-              'kept': ap.report['kept'], 'failures': ap.report['failures'], 'seconds': round(time.monotonic() - started, 3),
+              'kept': ap.report['kept'], 'overwritten': ap.report['overwritten'], 'failures': ap.report['failures'],
+              'seconds': round(time.monotonic() - started, 3),
               'cancelled': ap.cancelled}
     _print_report(report, p, verbose)
     return report
@@ -2276,10 +2362,11 @@ def _print_report(report: dict, p: dict, verbose: bool):
              else f'kept names ({len(kept_names)}):')
         for ea, cur, planned, _kind in shown:
             print(f'    0x{ea:X}  {cur:<28} (snapshot: {planned})')
-    if kept_other:
-        shown = kept_other if verbose else kept_other[:3]
-        _say(f'kept comments, prototypes and types (first {len(shown)} of {len(kept_other)}, the rest with -v):'
-             if len(shown) < len(kept_other) else f'kept comments, prototypes and types ({len(kept_other)}):')
+    for label, items in (('kept comments, prototypes and types', kept_other), ('overwritten', report['overwritten'])):
+        if not items:
+            continue
+        shown = items if verbose else items[:3]
+        _say(f'{label} (first {len(shown)} of {len(items)}, the rest with -v):' if len(shown) < len(items) else f'{label} ({len(items)}):')
         for ea, cur, planned, kind in shown:
             print(f"    {'-' if ea is None else f'0x{ea:X}'}  {kind:<7} {cur:<28} (snapshot: {planned})")
 
@@ -2337,7 +2424,8 @@ def _last_folder() -> str:
 
 def _remember_folder(folder: str):
     import ida_netnode
-    ida_netnode.netnode(_NETNODE, 0, True).hashset_buf('last_folder', folder)
+    if len(folder.encode('utf-8', 'surrogatepass')) <= _FOLDER_BYTE_LIMIT:
+        ida_netnode.netnode(_NETNODE, 0, True).hashset_buf('last_folder', folder)
 
 
 def _describe(folder: str) -> tuple:
@@ -2379,7 +2467,7 @@ UE Dumper Import
 <none:{rNone}>{rgScope}>
 <Roots :{iRoots}>
 <##Comments##UFunction signature and flags on each exec function:{cComments}>{cgComments}>
-<##Conflicts##overwrite names I set by hand (off: keep yours and list them):{cOverwrite}>{cgConflicts}>
+<##Conflicts##overwrite what I changed by hand: names, types, comments (off: keep yours and list them):{cOverwrite}>{cgConflicts}>
 """, {
                 'FormChangeCb': F.FormChangeCb(self.on_change),
                 'iFolder': F.DirInput(value=folder),
