@@ -2467,7 +2467,7 @@ UE Dumper Import
 <none:{rNone}>{rgScope}>
 <Roots :{iRoots}>
 <##Comments##UFunction signature and flags on each exec function:{cComments}>{cgComments}>
-<##Conflicts##overwrite what I changed by hand: names, types, comments (off: keep yours and list them):{cOverwrite}>{cgConflicts}>
+<##Conflicts##overwrite what I changed by hand (names, types, comments; off keeps yours and lists them):{cOverwrite}>{cgConflicts}>
 """, {
                 'FormChangeCb': F.FormChangeCb(self.on_change),
                 'iFolder': F.DirInput(value=folder),
