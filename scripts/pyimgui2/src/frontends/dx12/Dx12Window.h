@@ -112,6 +112,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         UINT frameIndex = 0;
         UINT bufferCount = 0;
         BackBuffer *backBuffers = nullptr;
+        DXGI_FORMAT backBufferFormat = DXGI_FORMAT_UNKNOWN;
         std::atomic<bool> queueFallback{false};
         std::atomic<ID3D12CommandQueue *> fallbackQueueFromPresent{nullptr};
         std::atomic<ID3D12CommandQueue *> fallbackQueueAfterPresent{nullptr};

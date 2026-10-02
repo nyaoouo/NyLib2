@@ -983,7 +983,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         }
 
         ImGui_ImplWin32_Init(host);
-        ImGui_ImplDX12_Init(this->pd3dDevice, NUM_FRAMES_IN_FLIGHT, DXGI_FORMAT_R8G8B8A8_UNORM, this->pd3dSrvDescHeap, this->pd3dSrvDescHeap->GetCPUDescriptorHandleForHeapStart(), this->pd3dSrvDescHeap->GetGPUDescriptorHandleForHeapStart());
+        ImGui_ImplDX12_Init(this->pd3dDevice, NUM_FRAMES_IN_FLIGHT, this->backBufferFormat, this->pd3dSrvDescHeap, this->pd3dSrvDescHeap->GetCPUDescriptorHandleForHeapStart(), this->pd3dSrvDescHeap->GetGPUDescriptorHandleForHeapStart());
 
         std::lock_guard<std::mutex> lock(transitionMutex);
         this->isImGuiInitialized = true;
@@ -1002,6 +1002,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         DXGI_SWAP_CHAIN_DESC sdesc = {};
         if (this->pSwapChain->GetDesc(&sdesc) != S_OK || sdesc.BufferCount == 0)
             return false;
+        this->backBufferFormat = sdesc.BufferDesc.Format;
         if (this->pd3dRtvDescHeap == nullptr || sdesc.BufferCount != this->bufferCount)
         {
             this->CleanupRenderTargets();
