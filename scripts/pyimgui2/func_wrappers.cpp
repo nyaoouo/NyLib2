@@ -244,3 +244,23 @@ void _(py::module_ m)
 /*START:_GFUNC_:TextWrapped*/
     m.def("TextWrapped", [](const char* text) { ImGui::TextWrapped("%s", text ? text : ""); }, py::arg("text") = "");
 /*END:_GFUNC_:TextWrapped*/
+
+/*START:_GFUNC_:BulletText*/
+    m.def("BulletText", [](const char* text) { ImGui::BulletText("%s", text ? text : ""); }, py::arg("text") = "");
+/*END:_GFUNC_:BulletText*/
+
+/*START:_GFUNC_:LabelText*/
+    m.def("LabelText", [](const char* label, const char* text) { ImGui::LabelText(label, "%s", text ? text : ""); }, py::arg("label"), py::arg("text") = "");
+/*END:_GFUNC_:LabelText*/
+
+/*START:_GFUNC_:LogText*/
+    m.def("LogText", [](const char* text) { ImGui::LogText("%s", text ? text : ""); }, py::arg("text") = "");
+/*END:_GFUNC_:LogText*/
+
+/*START:_GFUNC_:SetTooltip*/
+    m.def("SetTooltip", [](const char* text) { ImGui::SetTooltip("%s", text ? text : ""); }, py::arg("text") = "");
+/*END:_GFUNC_:SetTooltip*/
+
+/*START:_GFUNC_:SetItemTooltip*/
+    m.def("SetItemTooltip", [](const char* text) { ImGui::SetItemTooltip("%s", text ? text : ""); }, py::arg("text") = "");
+/*END:_GFUNC_:SetItemTooltip*/
