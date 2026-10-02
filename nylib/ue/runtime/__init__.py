@@ -23,6 +23,7 @@ _LAZY: dict[str, str] = {
     'TMapValue': 'containers',
     'FixedArrayValue': 'containers',
     'MulticastDelegateValue': 'containers',
+    'StructValue': 'invoke',
 }
 
 

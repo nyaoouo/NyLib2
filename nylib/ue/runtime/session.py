@@ -1,11 +1,13 @@
 """Runtime sessions (RT8): Unreal.attach / attach_current, the session context (RT0), policies and lookups."""
 import enum
 import logging
+import math
 import os
 import re
 import threading
 from typing import Iterable
 
+from .. import calls as _calls
 from .. import pipeline, profiles, store
 from ..engine.accessor import view
 from ..engine.context import EngineContext
@@ -17,6 +19,7 @@ from ..model import ClassRecord, EnumRecord, FunctionRecord, StructRecord, hexs,
 from ..snapshot import SCHEMA_MAJOR, Snapshot
 from .accessor import RuntimeAccessor
 from .index import ObjectIndex
+from .invoke import Invoker
 from .names import FNameValue, NameDecoder
 from .types import ClassFactory, RawPointer, StructView, UObjectProxy
 from .typesource import LiveTypeSource, SnapshotTypeSource
@@ -26,6 +29,8 @@ _info = logging.getLogger('nylib.ue.runtime')
 
 _SUPER_STEPS = 256
 _TEXT_KEYS = ('Off.InSDK.Text.TextDatOffset', 'Off.InSDK.Text.InTextDataStringOffset')
+CALL_EXEMPT = ('Off.InSDK.Text.TextDatOffset', 'Off.InSDK.Text.InTextDataStringOffset',
+               'Settings.Generator.GameName', 'Settings.Generator.GameVersion')
 _KNOWN_LABELS = ('auto:', 'profile:')
 _PYTHON_EXE_RE = re.compile(r'pythonw?[0-9.]*\.exe', re.IGNORECASE)
 _GAME_THREAD = ("calls='game-thread' (a detour on UObject::ProcessEvent) is not implemented yet (stage 15); "
@@ -40,6 +45,15 @@ def _closed_error() -> SessionError:
     return SessionError('the session is closed')
 
 
+def _check_timeout(timeout) -> None:
+    if timeout is None:
+        return
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise TypeError(f'call_timeout must be None or a number, got {type(timeout).__name__}')
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError(f'call_timeout must be greater than 0 and finite, got {timeout!r}')
+
+
 class RuntimeContext:
     """One session's shared state (RT0); codecs, containers and dynamic classes reach the target only through it."""
 
@@ -51,6 +65,8 @@ class RuntimeContext:
         self.closed = False
         self.lock = threading.RLock()
         self.acc = self.names = self.index = self.types = self.factory = None
+        self.invoker = None
+        self.call_timeout = _calls.DEFAULT_TIMEOUT
 
     def proxy(self, address: int) -> UObjectProxy | None:
         if not _is_int(address):
@@ -153,30 +169,44 @@ class RuntimeContext:
                 f"  Unreal.attach_current(calls='any-thread')    injected: runs on the calling thread; can crash\n"
                 f"calls='game-thread' (queued onto the game thread through a ProcessEvent detour) is not available yet.",
                 owner=owner, function=fn.name)
-        raise NotImplementedError('UFunction calls are not implemented yet (stage 10)')
+        return self.invoker.invoke(obj, fn, args, kwargs)
 
 
 def unverified_gate(keys: Iterable[str], *, write: bool, allow_unverified: bool, source: str = 'probe',
-                    target: str = '<exe>') -> tuple[str, ...]:
-    """D13 (literal, no key exempt): refuse write=True over unverified offsets unless allow_unverified; returns the keys."""
+                    target: str = '<exe>', calls: str | None = None) -> tuple[str, ...]:
+    """D13 ([93] = D: CALL_EXEMPT keys do not gate calls): refuse unverified offsets unless allow_unverified; returns the keys."""
     if not isinstance(source, str) or not isinstance(target, str):
         raise TypeError('source and target must be str')
+    if calls is not None and not isinstance(calls, str):
+        raise TypeError(f'calls must be None or a str, got {type(calls).__name__}')
     try:
-        gating = tuple(keys)
+        all_keys = tuple(keys)
     except TypeError:
         raise TypeError(f'keys must be an iterable of str, got {type(keys).__name__}') from None
-    if not all(isinstance(k, str) for k in gating):
+    if not all(isinstance(k, str) for k in all_keys):
         raise TypeError('keys must be an iterable of str')
-    if write and gating:
+    if write:
+        gating = all_keys
+    elif calls is not None:
+        gating = tuple(k for k in all_keys if k not in CALL_EXEMPT)
+    else:
+        gating = ()
+    if gating:
+        if write and calls is not None:
+            what, who = f'write=True and calls={calls!r} would use them', f'write=True and calls={calls!r}'
+        elif write:
+            what, who = 'write=True would write through them', 'write=True'
+        else:
+            what, who = f'calls={calls!r} would call through them', f'calls={calls!r}'
         if not allow_unverified:
             raise UnverifiedOffsetsError(
-                f'{len(gating)} offsets of this {source} are unverified, and write=True would write through them:\n'
+                f'{len(gating)} offsets of this {source} are unverified, and {what}:\n'
                 + ''.join(f'  {k}\n' for k in gating)
                 + f'Check them with:  python -m nylib.ue probe {target}\n'
                   f'Then pin them in a profile (a snapshot session needs a new dump made with it), or pass allow_unverified=True.',
                 keys=gating)
-        logger.warning('write=True with %d unverified offsets of this %s (allow_unverified=True): %s', len(gating), source, ', '.join(gating))
-    return gating
+        logger.warning('%s with %d unverified offsets of this %s (allow_unverified=True): %s', who, len(gating), source, ', '.join(gating))
+    return all_keys
 
 
 def _check_path_arg(value, name: str) -> str:
@@ -288,12 +318,18 @@ class Unreal:
             opened = (open_target or pipeline.open_target)(target, write=write, remote_calls=(calls == 'remote-thread'), cache_bytes=None)
             info = opened.info
             if dump is not None:
-                snap, ectx, dumped = cls._snapshot_engine(target, root, dump, snap, profile, opened, write, allow_unverified)
+                snap, ectx, dumped = cls._snapshot_engine(target, root, dump, snap, profile, opened, write, calls, allow_unverified)
                 unverified = tuple(ectx.unverified())
                 if not dumped:
-                    unverified_gate(unverified, write=write, allow_unverified=allow_unverified, source='snapshot', target=info.exe)
+                    unverified_gate(unverified, write=write, allow_unverified=allow_unverified, source='snapshot', target=info.exe,
+                                     calls=calls)
             else:
-                ectx, unverified, probe_line = cls._live_engine(opened, profile, root, write, allow_unverified)
+                ectx, unverified, probe_line = cls._live_engine(opened, profile, root, write, calls, allow_unverified)
+
+            if calls is not None and ectx.engine.off.InSDK.ProcessEvent.PEIndex <= 0:
+                raise DetectionError('Off::InSDK::ProcessEvent::InitPE',
+                                     'ProcessEvent was not found on this target, so UFunction calls cannot be made; pin its vtable '
+                                     'index in a profile ([globals] process_event = { index = <n> })')
 
             ctx = RuntimeContext(ectx.engine, write=write, calls=calls, mode=info.mode)
             e, lock = ctx.e, ctx.lock
@@ -304,6 +340,18 @@ class Unreal:
             ctx.acc = RuntimeAccessor(e.mem)
             ctx.acc.ctx = ctx
             ctx.factory = ClassFactory(ctx)
+
+            if calls is not None:
+                ctx.invoker = Invoker(ctx, _calls.open_transport(calls, opened.process))
+                if calls == 'remote-thread':
+                    _info.info("calls='remote-thread': each UFunction call runs ProcessEvent on a new thread in the game "
+                               "(CreateRemoteThread), not the game thread, so it races the game thread and its garbage collector; its "
+                               "parameters are reserved there; engine-allocated out values are not freed; UE skips some calls without "
+                               'a sign, so zero outputs can mean "not run"')
+                else:
+                    _info.info("calls='any-thread': UFunction calls run ProcessEvent on the calling thread, not the game thread, so "
+                               "they race the game thread and its garbage collector; engine-allocated out values are not freed; UE "
+                               'skips some calls without a sign, so zero outputs can mean "not run"')
 
             if snap is not None:
                 _info.info('snapshot %s matches the running build (pe %s / %s)', os.path.basename(snap.path), hexs(info.pe_timestamp),
@@ -336,7 +384,7 @@ class Unreal:
         return self
 
     @staticmethod
-    def _snapshot_engine(target, root, dump, snap, profile, opened, write, allow_unverified):
+    def _snapshot_engine(target, root, dump, snap, profile, opened, write, calls, allow_unverified):
         info = opened.info
         exe, ts, size = info.exe, info.pe_timestamp, info.size_of_image
         out_part = f' --out {root}' if root is not None else ''
@@ -360,7 +408,7 @@ class Unreal:
                 _info.info('no snapshot for build %s; running the dumper (%s)', hexs(ts), info.mode)
                 shared = pipeline.OpenedTarget(opened.source, opened.info, opened.process, opened.check_alive, None)
                 res = pipeline.dump(target, profile=profile, out=root, _open_target=lambda *a, **k: shared)
-                unverified_gate(res.unverified, write=write, allow_unverified=allow_unverified, source='dump', target=exe)
+                unverified_gate(res.unverified, write=write, allow_unverified=allow_unverified, source='dump', target=exe, calls=calls)
                 snap = loaded = Snapshot.load(res.path)
                 dumped = True
         else:
@@ -391,7 +439,7 @@ class Unreal:
         return snap, ectx, dumped
 
     @staticmethod
-    def _live_engine(opened, profile, root, write, allow_unverified):
+    def _live_engine(opened, profile, root, write, calls, allow_unverified):
         report = pipeline.probe_opened(opened, profile=profile, out_root=root)
         if not report.ok:
             raise report.error
@@ -400,7 +448,7 @@ class Unreal:
             hook = report.context.engine.objects.DecryptionLambdaStr
             raise DetectionError('Unreal.attach', f'runtime sessions cannot use a GObjects decryption hook in v1 (the probe used {hook}); '
                                                   f'dump the game instead')
-        unverified = unverified_gate(report.unverified, write=write, allow_unverified=allow_unverified, target=opened.info.exe)
+        unverified = unverified_gate(report.unverified, write=write, allow_unverified=allow_unverified, target=opened.info.exe, calls=calls)
         ectx = EngineContext.from_snapshot(meta, report.context.to_offsets(), opened.source.fresh)
         g = meta['globals']
         probe_line = (f'probe: GObjects {g["GObjects"]["rva"]} · GNames {g["GNames"]["rva"]} · {len(report.values)} offsets '
@@ -547,17 +595,32 @@ class Unreal:
             return ctx.factory.enum_for(path)
         return None
 
+    @property
+    def call_timeout(self) -> float | None:
+        """Seconds a remote-thread call waits before `CallError(timed_out=True)`; None waits forever; ignored by any-thread."""
+        return self._live().call_timeout
+
+    @call_timeout.setter
+    def call_timeout(self, value) -> None:
+        ctx = self._live()
+        _check_timeout(value)
+        ctx.call_timeout = value
+
     def refresh(self) -> None:
         ctx = self._live()
         ctx.index.refresh()
         ctx.names.refresh()
         ctx.types.refresh()
+        if ctx.invoker is not None:
+            ctx.invoker.refresh()
 
     def close(self) -> None:
         ctx = self._ctx
         if ctx.closed:
             return
         ctx.closed = True
+        if ctx.invoker is not None:
+            ctx.invoker.close()
         with ctx.lock:
             if self._snap is not None:
                 self._snap.close()

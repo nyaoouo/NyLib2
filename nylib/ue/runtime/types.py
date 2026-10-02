@@ -222,7 +222,7 @@ class UObjectProxy(ViewStruct):
     def _set_(self, name: str, value) -> None:
         _set_impl(self, name, value)
 
-    def _call_(self, name: str, *args, **kwargs):
+    def _call_(self, name: str, /, *args, **kwargs):
         if not isinstance(name, str):
             raise TypeError(f'name must be str, got {type(name).__name__}')
         cls = type(self)
