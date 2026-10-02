@@ -6,6 +6,7 @@
 #include <wrl/client.h>
 #include <mutex>
 #include <algorithm>
+#include <deque>
 
 #pragma comment(lib, "dwrite.lib")
 
@@ -450,9 +451,19 @@ const ScriptProfile* LookupScriptProfile(const std::wstring& locale)
 // SECTION 5 — ImGui atlas installation
 // ============================================================
 
+// Returns a process-lifetime copy of `ranges`, de-duplicated by content.
+const ImWchar* InternRanges(const std::vector<ImWchar>& ranges)
+{
+    static std::deque<std::vector<ImWchar>> store;
+    for (const auto& existing : store)
+        if (existing == ranges) return existing.data();
+    store.push_back(ranges);
+    return store.back().data();
+}
+
 // Install a chain of matches as a single merged ImFont. Returns the primary
-// ImFont* (py wrapped). matches is held by const ref AND iterated without
-// moves — ImGui keeps the ranges pointer until Build() runs.
+// ImFont* (py wrapped). Ranges are interned via InternRanges before being
+// handed to the atlas (see above).
 py::object InstallMatches(const std::vector<Win32FontMatch>& matches, float size_pixels)
 {
     if (matches.empty()) return py::none();
@@ -469,7 +480,7 @@ py::object InstallMatches(const std::vector<Win32FontMatch>& matches, float size
             WstrToUtf8(m.file_path).c_str(),
             size_pixels,
             &cfg,
-            m.ranges.data());
+            InternRanges(m.ranges));
         if (i == 0) primary = f;
     }
     atlas->Build();
