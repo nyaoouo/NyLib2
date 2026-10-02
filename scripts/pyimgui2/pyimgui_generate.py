@@ -1622,7 +1622,7 @@ def patch_frontend_compat_stubs(output_dir, frontends):
     # stubgen can't resolve the cross-module reference and leaves the
     # unqualified name / typing.Any instead.
     data = _patch_field_stub_types(data, {'MonitorInfo': {'pos': 'imgui.ImVec2', 'size': 'imgui.ImVec2'}})
-    data = _patch_function_return_types(data, {'': {'GetMonitors': 'list[MonitorInfo]'}})
+    data = _patch_function_return_types(data, {'': {'GetMonitors': 'list[MonitorInfo]', 'CreateInbound': '_RenderBase'}})
     exports = ['gUtils', 'imgui']
     imports = []
     if 'dx9' in frontends:
