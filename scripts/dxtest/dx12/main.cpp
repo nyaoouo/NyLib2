@@ -44,6 +44,20 @@ namespace
         }
         return result;
     }
+
+    // Maps rgba8|bgra8|rgb10a2 to a back-buffer format; empty gives `fallback`, anything else DXGI_FORMAT_UNKNOWN.
+    DXGI_FORMAT ParseFormat(const std::string &text, DXGI_FORMAT fallback)
+    {
+        if (text.empty())
+            return fallback;
+        if (text == "rgba8")
+            return DXGI_FORMAT_R8G8B8A8_UNORM;
+        if (text == "bgra8")
+            return DXGI_FORMAT_B8G8R8A8_UNORM;
+        if (text == "rgb10a2")
+            return DXGI_FORMAT_R10G10B10A2_UNORM;
+        return DXGI_FORMAT_UNKNOWN;
+    }
 }
 
 extern "C" __declspec(dllexport) void dxtest_tick(unsigned long long in,
@@ -144,11 +158,20 @@ int main()
     ID3D12CommandQueue *queue = nullptr;
     device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue));
 
+    // DXTEST_DX12_FORMAT sets the swap chain format; DXTEST_DX12_RESIZE_FORMAT the one passed from the first DXTEST_RESIZE_AT on.
+    DXGI_FORMAT back_buffer_format = ParseFormat(EnvOrEmpty("DXTEST_DX12_FORMAT"), DXGI_FORMAT_R8G8B8A8_UNORM);
+    DXGI_FORMAT resize_format = ParseFormat(EnvOrEmpty("DXTEST_DX12_RESIZE_FORMAT"), back_buffer_format);
+    if (back_buffer_format == DXGI_FORMAT_UNKNOWN || resize_format == DXGI_FORMAT_UNKNOWN)
+    {
+        std::printf("dx12 unknown DXTEST_DX12_FORMAT / DXTEST_DX12_RESIZE_FORMAT value\n");
+        return 14;
+    }
+
     DXGI_SWAP_CHAIN_DESC1 swap_desc = {};
     swap_desc.BufferCount = FrameCount;
     swap_desc.Width = 0;
     swap_desc.Height = 0;
-    swap_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    swap_desc.Format = back_buffer_format;
     swap_desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     swap_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     swap_desc.SampleDesc.Count = 1;
@@ -188,6 +211,7 @@ int main()
 
     auto resize_at = ParseTimes(EnvOrEmpty("DXTEST_RESIZE_AT"));
     size_t resize_at_next = 0;
+    DXGI_FORMAT current_format = back_buffer_format;
     std::string foreign_mode = EnvOrEmpty("DXTEST_FOREIGN");
     unsigned long long foreign_calls_snapshot = 0;
     auto foreign_snapshot_time = std::chrono::steady_clock::now();
@@ -216,6 +240,7 @@ int main()
         if (resize_at_next < resize_at.size() && elapsed_s >= resize_at[resize_at_next])
         {
             ++resize_at_next;
+            current_format = resize_format;
             int new_w = (window.width > 800) ? 640 : 960;
             int new_h = (window.height > 480) ? 360 : 540;
             SetWindowPos(window.hwnd, nullptr, 0, 0, new_w, new_h, SWP_NOMOVE | SWP_NOZORDER);
@@ -233,7 +258,7 @@ int main()
 
             HRESULT hrz = swap_chain->ResizeBuffers(
                 FrameCount, (UINT)window.width, (UINT)window.height,
-                DXGI_FORMAT_R8G8B8A8_UNORM, 0);
+                current_format, 0);
             if (FAILED(hrz))
             {
                 std::printf("dx12 ResizeBuffers failed: 0x%08lx\n", hrz);
