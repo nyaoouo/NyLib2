@@ -724,18 +724,28 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
     {
         if (!this->pd3dCommandQueue)
             return;
-        this->ProcessCallBeforeFrameOnce(py::cast(this));
+        // Runs on the game's render thread inside Present, which does not hold the GIL.
+        {
+            py::gil_scoped_acquire gil;
+            py::object self = py::cast(this, py::return_value_policy::reference);
+            this->ProcessCallBeforeFrameOnce(self);
+        }
 
         ImGui_ImplDX12_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
         try
         {
-            this->ProcessRenderCallback(py::cast(this));
+            py::gil_scoped_acquire gil;
+            py::object self = py::cast(this, py::return_value_policy::reference);
+            this->ProcessRenderCallback(self);
         }
         catch (std::exception &e)
         {
-            printf("Error in render callback, detach: \n%s\n", e.what());
+            // `e` may be error_already_set: what() and its destructor need the GIL.
+            py::gil_scoped_acquire gil;
+            fprintf(stderr, "[pyimgui] dx12 inbound render callback raised, detaching:\n%s\n", e.what());
+            std::fflush(stderr);
             this->Detach();
             return;
         }
