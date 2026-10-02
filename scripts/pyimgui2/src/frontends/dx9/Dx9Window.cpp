@@ -2,6 +2,8 @@
 #include "../common/ImguiInbound.h"
 #include "../common/PyDetours.h"
 
+#include <atomic>
+
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 START_M_IMGUI_IMPL_DX9_NAMESPACE
@@ -229,84 +231,186 @@ START_M_IMGUI_IMPL_DX9_NAMESPACE
         this->hwnd = nullptr;
     }
 
-    Dx9Inbound::Dx9Inbound(std::optional<py::function> renderCallback) : Dx9Render(renderCallback)
-    {
-        if (_instance != nullptr)
-            _throw_("Only one Dx9Inbound instance is allowed");
-        _instance = this;
-    }
-
-    Dx9Inbound::~Dx9Inbound()
-    {
-        this->Detach();
-        if (_instance == this)
-            _instance = nullptr;
-    }
-
     typedef HRESULT(__stdcall *EndSceneD3D9)(LPDIRECT3DDEVICE9);
     typedef HRESULT(__stdcall *ResetD3D9)(LPDIRECT3DDEVICE9, D3DPRESENT_PARAMETERS *);
 
     static EndSceneD3D9 oEndSceneD3D9 = nullptr;
     static ResetD3D9 oResetD3D9 = nullptr;
 
+    // Hooks stay installed for the process lifetime and reach the instance only through hookInstance.
+    static std::atomic<Dx9Inbound *> hookInstance{nullptr};
+    static std::atomic<bool> hooksEnabled{false};
+    static std::atomic<int> hooksInFlight{0};
+    static thread_local int hookBodyDepth = 0;
+    static std::atomic<HWND> attachedHwnd{nullptr};
+    static bool resetHooked = false;
+    static bool endSceneHooked = false;
+    static std::atomic<bool> backendInitialized{false};
+
+    namespace
+    {
+        // Marks a hook body that may use hookInstance.
+        struct HookBody
+        {
+            HookBody() { hookBodyDepth++; hooksInFlight++; }
+            ~HookBody() { hooksInFlight--; hookBodyDepth--; }
+        };
+    }
+
+    static bool IsFinalizing()
+    {
+#if PY_VERSION_HEX >= 0x030D0000
+        return Py_IsFinalizing();
+#else
+        return _Py_IsFinalizing();
+#endif
+    }
+
+    // Waits until no other thread is inside a hook body, releasing the GIL and serving sent messages meanwhile.
+    static void WaitForHooks()
+    {
+        auto busy = []() { return hooksInFlight.load() != hookBodyDepth && !IsFinalizing(); };
+        if (!busy())
+            return;
+        std::optional<py::gil_scoped_release> release;
+        if (PyGILState_Check())
+            release.emplace();
+        MSG msg;
+        while (busy())
+        {
+            ::MsgWaitForMultipleObjects(0, nullptr, FALSE, 1, QS_SENDMESSAGE);
+            ::PeekMessage(&msg, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+        }
+    }
+
+    // Stops drawing and input after a failure inside a hook and reports it on stderr.
+    static void DisableFromHook(const char *reason)
+    {
+        hooksEnabled = false;
+        fprintf(stderr, "[pyimgui] dx9 inbound disabled: %s\n", reason);
+        std::fflush(stderr);
+        try
+        {
+            if (HWND hwnd = attachedHwnd)
+                M_IMGUI_IMPL_WIN32_NAMESPACE::Detach(hwnd);
+        }
+        catch (...)
+        {
+        }
+    }
+
+    static int ReleasePendingReference(void *object)
+    {
+        Py_DECREF((PyObject *)object);
+        return 0;
+    }
+
+    // Hands the last reference to the object to Python's main thread; keeps the object alive if that cannot be scheduled.
+    static void DeferLastReference(py::object &self)
+    {
+        if (Py_REFCNT(self.ptr()) != 1)
+            return;
+        PyObject *object = self.release().ptr();
+        if (IsFinalizing() || Py_AddPendingCall(ReleasePendingReference, object) != 0)
+        {
+            fprintf(stderr, "[pyimgui] dx9 inbound: could not schedule the release of the last reference, keeping the object alive\n");
+            std::fflush(stderr);
+        }
+    }
+
     HRESULT __stdcall hkResetD3D9(LPDIRECT3DDEVICE9 pd3dDevice, D3DPRESENT_PARAMETERS *pPresentationParameters)
     {
-        if (Dx9Inbound::_instance != nullptr && Dx9Inbound::_instance->isImGuiInitialized)
+        if (backendInitialized)
             ImGui_ImplDX9_InvalidateDeviceObjects();
         HRESULT result = oResetD3D9(pd3dDevice, pPresentationParameters);
-        if (Dx9Inbound::_instance != nullptr && Dx9Inbound::_instance->isImGuiInitialized && result == D3D_OK)
+        if (backendInitialized && hookInstance != nullptr && result == D3D_OK)
             ImGui_ImplDX9_CreateDeviceObjects();
         return result;
     }
 
     HRESULT __stdcall hkEndSceneD3D9(LPDIRECT3DDEVICE9 pd3dDevice)
     {
-        if (Dx9Inbound::_instance != nullptr && !Dx9Inbound::_instance->isInLogic)
         {
-            auto instance = Dx9Inbound::_instance;
-            try
+            HookBody body;
+            Dx9Inbound *instance = hookInstance;
+            if (instance != nullptr && hooksEnabled && !instance->isInLogic)
             {
-                instance->InitImGui(pd3dDevice);
-                instance->Update();
-            }
-            catch (...)
-            {
-                instance->Detach();
+                try
+                {
+                    instance->InitImGui(pd3dDevice);
+                    instance->Update();
+                }
+                catch (const std::exception &e)
+                {
+                    DisableFromHook(e.what());
+                }
+                catch (...)
+                {
+                    DisableFromHook("unknown exception");
+                }
             }
         }
         return oEndSceneD3D9(pd3dDevice);
     }
 
-    void Dx9Inbound::Attach()
+    Dx9Inbound::Dx9Inbound(std::optional<py::function> renderCallback) : Dx9Render(renderCallback)
     {
-        IMGUI_INBOUND_NAMESPACE::Init(IMGUI_INBOUND_NAMESPACE::D3D9);
-        oResetD3D9 = (ResetD3D9)IMGUI_INBOUND_NAMESPACE::GetMethod(16);
-        oEndSceneD3D9 = (EndSceneD3D9)IMGUI_INBOUND_NAMESPACE::GetMethod(42);
-        PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oResetD3D9, (PVOID)hkResetD3D9);
-        PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oEndSceneD3D9, (PVOID)hkEndSceneD3D9);
+        if (_instance != nullptr)
+            _throw_("Only one Dx9Inbound instance is allowed");
+        _instance = this;
+        hookInstance = this;
     }
 
+    Dx9Inbound::~Dx9Inbound()
+    {
+        hookInstance = nullptr;
+        try
+        {
+            this->Detach();
+        }
+        catch (...)
+        {
+        }
+        WaitForHooks();
+        if (_instance == this)
+            _instance = nullptr;
+    }
+
+    // Installs each hook at most once; a later Attach only re-enables drawing and input.
+    void Dx9Inbound::Attach()
+    {
+        if (!resetHooked || !endSceneHooked)
+        {
+            IMGUI_INBOUND_NAMESPACE::Init(IMGUI_INBOUND_NAMESPACE::D3D9);
+            if (!resetHooked)
+            {
+                oResetD3D9 = (ResetD3D9)IMGUI_INBOUND_NAMESPACE::GetMethod(16);
+                PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oResetD3D9, (PVOID)hkResetD3D9);
+                resetHooked = true;
+            }
+            if (!endSceneHooked)
+            {
+                oEndSceneD3D9 = (EndSceneD3D9)IMGUI_INBOUND_NAMESPACE::GetMethod(42);
+                PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oEndSceneD3D9, (PVOID)hkEndSceneD3D9);
+                endSceneHooked = true;
+            }
+        }
+        HWND hwnd = attachedHwnd;
+        if (this->isImGuiInitialized && hwnd != nullptr)
+        {
+            M_IMGUI_IMPL_WIN32_NAMESPACE::Attach(hwnd);
+            this->SetHwnd(hwnd);
+        }
+        hooksEnabled = true;
+    }
+
+    // Disables drawing and input; the hooks and originals stay installed.
     void Dx9Inbound::Detach()
     {
-        if (this->hwnd != nullptr)
-        {
-            M_IMGUI_IMPL_WIN32_NAMESPACE::Detach(this->hwnd);
-            this->hwnd = nullptr;
-        }
-        if (oResetD3D9 != nullptr)
-        {
-            auto originalReset = (ResetD3D9)IMGUI_INBOUND_NAMESPACE::GetMethod(16);
-            if (oResetD3D9 != originalReset)
-                PYDETOURS_NAMESPACE::SimpleDetach((PVOID *)&oResetD3D9, (PVOID)hkResetD3D9);
-            oResetD3D9 = nullptr;
-        }
-        if (oEndSceneD3D9 != nullptr)
-        {
-            auto originalEndScene = (EndSceneD3D9)IMGUI_INBOUND_NAMESPACE::GetMethod(42);
-            if (oEndSceneD3D9 != originalEndScene)
-                PYDETOURS_NAMESPACE::SimpleDetach((PVOID *)&oEndSceneD3D9, (PVOID)hkEndSceneD3D9);
-            oEndSceneD3D9 = nullptr;
-        }
+        hooksEnabled = false;
+        if (HWND hwnd = attachedHwnd)
+            M_IMGUI_IMPL_WIN32_NAMESPACE::Detach(hwnd);
+        this->hwnd = nullptr;
     }
 
     void Dx9Inbound::InitImGui(LPDIRECT3DDEVICE9 pd3dDevice)
@@ -320,7 +424,10 @@ START_M_IMGUI_IMPL_DX9_NAMESPACE
             _throwV_("Failed to get D3D9 device creation parameters: {}", hr);
         this->SetHwnd(params.hFocusWindow);
 
+        attachedHwnd = this->hwnd;
         M_IMGUI_IMPL_WIN32_NAMESPACE::Attach(this->hwnd);
+        if (!hooksEnabled || hookInstance != this)
+            M_IMGUI_IMPL_WIN32_NAMESPACE::Detach(this->hwnd);
         this->ctx = ImGui::CreateContext();
         ImGuiIO &io = ImGui::GetIO();
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -338,33 +445,76 @@ START_M_IMGUI_IMPL_DX9_NAMESPACE
 
         ImGui_ImplWin32_Init(this->hwnd);
         ImGui_ImplDX9_Init(pd3dDevice);
+        backendInitialized = true;
         this->isImGuiInitialized = true;
         dbgPrint("init dx9 inbound success\n");
     }
 
     void Dx9Inbound::Update()
     {
+        struct LogicScope
+        {
+            bool &flag;
+            ~LogicScope() { flag = false; }
+        } logic{this->isInLogic};
         this->isInLogic = true;
         this->_Update();
-        this->isInLogic = false;
     }
 
     void Dx9Inbound::_Update()
     {
-        this->ProcessCallBeforeFrameOnce(py::cast(this));
+        // Runs on the game's render thread, which does not hold the GIL.
+        if (IsFinalizing())
+            return;
+        bool raised = false;
+        {
+            py::gil_scoped_acquire gil;
+            if (hookInstance != this)
+                return;
+            py::object self = py::cast(this, py::return_value_policy::reference);
+            try
+            {
+                this->ProcessCallBeforeFrameOnce(self);
+            }
+            catch (std::exception &e)
+            {
+                fprintf(stderr, "[pyimgui] dx9 inbound CallBeforeFrameOnce raised:\n%s\n", e.what());
+                std::fflush(stderr);
+                raised = true;
+            }
+            DeferLastReference(self);
+        }
+        if (raised)
+        {
+            DisableFromHook("CallBeforeFrameOnce raised");
+            return;
+        }
 
         ImGui_ImplDX9_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
-        try
+        if (IsFinalizing())
+            return;
         {
-            this->ProcessRenderCallback(py::cast(this));
+            py::gil_scoped_acquire gil;
+            if (hookInstance != this)
+                return;
+            py::object self = py::cast(this, py::return_value_policy::reference);
+            try
+            {
+                this->ProcessRenderCallback(self);
+            }
+            catch (std::exception &e)
+            {
+                printf("Error in render callback, detach: \n%s\n", e.what());
+                raised = true;
+            }
+            DeferLastReference(self);
         }
-        catch (std::exception &e)
+        if (raised)
         {
-            printf("Error in render callback, detach: \n%s\n", e.what());
-            this->Detach();
+            DisableFromHook("render callback raised");
             return;
         }
 

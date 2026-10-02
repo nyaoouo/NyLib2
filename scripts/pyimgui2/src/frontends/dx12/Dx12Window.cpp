@@ -538,20 +538,6 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         this->hwnd = nullptr;
     }
 
-    Dx12Inbound::Dx12Inbound(std::optional<py::function> renderCallback) : Dx12Render(renderCallback)
-    {
-        if (_instance != nullptr)
-            _throw_("Only one Dx12Inbound instance is allowed");
-        _instance = this;
-    }
-
-    Dx12Inbound::~Dx12Inbound()
-    {
-        this->Detach();
-        if (_instance == this)
-            _instance = nullptr;
-    }
-
     typedef long(__fastcall *PresentD3D12)(IDXGISwapChain3 *pSwapChain, UINT SyncInterval, UINT Flags);
     typedef void(__fastcall *ExecuteCommandListsD3D12)(ID3D12CommandQueue *dCommandQueue, UINT NumCommandLists, ID3D12CommandList *const *ppCommandLists);
     typedef HRESULT(__fastcall *ResizeBuffersD3D12)(IDXGISwapChain3 *pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags);
@@ -568,6 +554,95 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
     static std::atomic<bool> fenceTimeoutReported{false};
     static size_t const SWAP_CHAIN_SCAN_SIZE = 0x400;
     static DWORD const FENCE_TIMEOUT_MS = 1000;
+
+    // Hooks stay installed for the process lifetime and reach the instance only through hookInstance.
+    static std::atomic<Dx12Inbound *> hookInstance{nullptr};
+    static std::atomic<bool> hooksEnabled{false};
+    static std::atomic<int> hooksInFlight{0};
+    static thread_local int hookBodyDepth = 0;
+    static std::atomic<HWND> attachedHwnd{nullptr};
+    static bool presentHooked = false;
+    static bool executeCommandListsHooked = false;
+    static bool resizeBuffersHooked = false;
+    static bool resizeBuffers1Done = false;
+
+    namespace
+    {
+        // Marks a hook body that may use hookInstance.
+        struct HookBody
+        {
+            HookBody() { hookBodyDepth++; hooksInFlight++; }
+            ~HookBody() { hooksInFlight--; hookBodyDepth--; }
+        };
+    }
+
+    static bool IsFinalizing()
+    {
+#if PY_VERSION_HEX >= 0x030D0000
+        return Py_IsFinalizing();
+#else
+        return _Py_IsFinalizing();
+#endif
+    }
+
+    // Waits until no other thread is inside a hook body, releasing the GIL and serving sent messages meanwhile.
+    static void WaitForHooks()
+    {
+        auto busy = []() { return hooksInFlight.load() != hookBodyDepth && !IsFinalizing(); };
+        if (!busy())
+            return;
+        std::optional<py::gil_scoped_release> release;
+        if (PyGILState_Check())
+            release.emplace();
+        MSG msg;
+        while (busy())
+        {
+            ::MsgWaitForMultipleObjects(0, nullptr, FALSE, 1, QS_SENDMESSAGE);
+            ::PeekMessage(&msg, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+        }
+    }
+
+    // Stops drawing and input after a failure inside a hook and reports it on stderr.
+    static void DisableFromHook(const char *reason)
+    {
+        hooksEnabled = false;
+        fprintf(stderr, "[pyimgui] dx12 inbound disabled: %s\n", reason);
+        std::fflush(stderr);
+        try
+        {
+            if (HWND hwnd = attachedHwnd)
+                M_IMGUI_IMPL_WIN32_NAMESPACE::Detach(hwnd);
+        }
+        catch (...)
+        {
+        }
+    }
+
+    static int ReleasePendingReference(void *object)
+    {
+        Py_DECREF((PyObject *)object);
+        return 0;
+    }
+
+    // Hands the last reference to the object to Python's main thread; keeps the object alive if that cannot be scheduled.
+    static void DeferLastReference(py::object &self)
+    {
+        if (Py_REFCNT(self.ptr()) != 1)
+            return;
+        PyObject *object = self.release().ptr();
+        if (IsFinalizing() || Py_AddPendingCall(ReleasePendingReference, object) != 0)
+        {
+            fprintf(stderr, "[pyimgui] dx12 inbound: could not schedule the release of the last reference, keeping the object alive\n");
+            std::fflush(stderr);
+        }
+    }
+
+    static void ReleaseFallbackQueues(Dx12Inbound *instance)
+    {
+        for (std::atomic<ID3D12CommandQueue *> *slot : {&instance->fallbackQueueFromPresent, &instance->fallbackQueueAfterPresent})
+            if (ID3D12CommandQueue *queue = slot->exchange(nullptr))
+                queue->Release();
+    }
 
     static bool IsReadable(const void *address, size_t size, uintptr_t *regionEnd = nullptr)
     {
@@ -635,20 +710,26 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 
     long __fastcall hkPresentD3D12(IDXGISwapChain3 *pSwapChain, UINT SyncInterval, UINT Flags)
     {
-        Dx12Inbound *instance = Dx12Inbound::_instance;
-        if (instance == nullptr || (instance->pSwapChain != nullptr && instance->pSwapChain != pSwapChain))
-            return oPresentD3D12(pSwapChain, SyncInterval, Flags);
-        try
         {
-            if (!instance->isImGuiInitialized)
-                instance->InitImGui(pSwapChain);
-            instance->Update();
-        }
-        catch (const std::exception &e)
-        {
-            (void)e;
-            dbgPrint("Dx12Inbound::Update() exception: %s\n", e.what());
-            instance->Detach();
+            HookBody body;
+            Dx12Inbound *instance = hookInstance;
+            if (instance != nullptr && hooksEnabled && (instance->pSwapChain == nullptr || instance->pSwapChain == pSwapChain))
+            {
+                try
+                {
+                    if (!instance->isImGuiInitialized)
+                        instance->InitImGui(pSwapChain);
+                    instance->Update();
+                }
+                catch (const std::exception &e)
+                {
+                    DisableFromHook(e.what());
+                }
+                catch (...)
+                {
+                    DisableFromHook("unknown exception");
+                }
+            }
         }
         inGamePresent = true;
         long result = oPresentD3D12(pSwapChain, SyncInterval, Flags);
@@ -659,72 +740,144 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 
     void __fastcall hkExecuteCommandListsD3D12(ID3D12CommandQueue *dCommandQueue, UINT NumCommandLists, ID3D12CommandList *const *ppCommandLists)
     {
-        Dx12Inbound *instance = Dx12Inbound::_instance;
-        if (instance != nullptr && instance->queueFallback && !instance->isInLogic)
-            instance->OfferFallbackQueue(dCommandQueue, inGamePresent);
+        {
+            HookBody body;
+            Dx12Inbound *instance = hookInstance;
+            if (instance != nullptr && hooksEnabled && instance->queueFallback && !instance->isInLogic)
+                instance->OfferFallbackQueue(dCommandQueue, inGamePresent);
+        }
         oExecuteCommandListsD3D12(dCommandQueue, NumCommandLists, ppCommandLists);
     }
 
+    // While disabled, the resize hooks still release our back buffers but do not keep new ones.
     HRESULT __fastcall hkResizeBuffersD3D12(IDXGISwapChain3 *pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags)
     {
-        Dx12Inbound *instance = Dx12Inbound::_instance;
+        HookBody body;
+        Dx12Inbound *instance = hookInstance;
         if (resizeDepth > 0 || instance == nullptr || !instance->isImGuiInitialized || instance->pSwapChain != pSwapChain)
             return oResizeBuffersD3D12(pSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
         resizeDepth++;
         instance->BeforeResize();
         HRESULT hr = oResizeBuffersD3D12(pSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
         instance->AfterResize(nullptr, nullptr);
+        if (!hooksEnabled)
+            instance->CleanupRenderTargets();
         resizeDepth--;
         return hr;
     }
 
     HRESULT __fastcall hkResizeBuffers1D3D12(IDXGISwapChain3 *pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT Format, UINT SwapChainFlags, const UINT *pCreationNodeMask, IUnknown *const *ppPresentQueue)
     {
-        Dx12Inbound *instance = Dx12Inbound::_instance;
+        HookBody body;
+        Dx12Inbound *instance = hookInstance;
         if (resizeDepth > 0 || instance == nullptr || !instance->isImGuiInitialized || instance->pSwapChain != pSwapChain)
             return oResizeBuffers1D3D12(pSwapChain, BufferCount, Width, Height, Format, SwapChainFlags, pCreationNodeMask, ppPresentQueue);
         resizeDepth++;
         instance->BeforeResize();
         HRESULT hr = oResizeBuffers1D3D12(pSwapChain, BufferCount, Width, Height, Format, SwapChainFlags, pCreationNodeMask, ppPresentQueue);
         instance->AfterResize(pCreationNodeMask, SUCCEEDED(hr) ? ppPresentQueue : nullptr);
+        if (!hooksEnabled)
+            instance->CleanupRenderTargets();
         resizeDepth--;
         return hr;
     }
 
-    void Dx12Inbound::Attach()
+    Dx12Inbound::Dx12Inbound(std::optional<py::function> renderCallback) : Dx12Render(renderCallback)
     {
-        IMGUI_INBOUND_NAMESPACE::Init(IMGUI_INBOUND_NAMESPACE::D3D12);
-        oPresentD3D12 = (PresentD3D12)IMGUI_INBOUND_NAMESPACE::GetMethod(140);
-        oExecuteCommandListsD3D12 = (ExecuteCommandListsD3D12)IMGUI_INBOUND_NAMESPACE::GetMethod(54);
-        oResizeBuffersD3D12 = (ResizeBuffersD3D12)IMGUI_INBOUND_NAMESPACE::GetMethod(145);
-        PVOID *swapChain3Vtable = IMGUI_INBOUND_NAMESPACE::GetD3D12SwapChain3Vtable();
-        oResizeBuffers1D3D12 = swapChain3Vtable != nullptr ? (ResizeBuffers1D3D12)swapChain3Vtable[39] : nullptr;
-        PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oPresentD3D12, (PVOID)hkPresentD3D12);
-        PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oExecuteCommandListsD3D12, (PVOID)hkExecuteCommandListsD3D12);
-        PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oResizeBuffersD3D12, (PVOID)hkResizeBuffersD3D12);
-        if (oResizeBuffers1D3D12 != nullptr)
-            PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oResizeBuffers1D3D12, (PVOID)hkResizeBuffers1D3D12);
+        if (_instance != nullptr)
+            _throw_("Only one Dx12Inbound instance is allowed");
+        _instance = this;
+        hookInstance = this;
     }
 
+    Dx12Inbound::~Dx12Inbound()
+    {
+        hookInstance = nullptr;
+        try
+        {
+            this->Detach();
+        }
+        catch (...)
+        {
+        }
+        WaitForHooks();
+        bool gpuIdle = this->fence == nullptr || this->fenceEvent == nullptr || this->WaitForFence(this->fenceLastSignaledValue, this->fenceEvent, FENCE_TIMEOUT_MS);
+        this->CleanupRenderTargets();
+        delete[] this->backBuffers;
+        this->backBuffers = nullptr;
+        this->bufferCount = 0;
+        ReleaseFallbackQueues(this);
+        this->SetCommandQueue(nullptr);
+        // Leaks the objects the GPU may still use when the wait timed out; never releases the SRV heap.
+        if (!gpuIdle)
+        {
+            fprintf(stderr, "[pyimgui] dx12 inbound: GPU fence wait timed out on destroy, leaking command objects\n");
+            std::fflush(stderr);
+        }
+        else
+        {
+            for (FrameContext &frameCtx : this->frameContext)
+                if (frameCtx.CommandAllocator != nullptr)
+                    frameCtx.CommandAllocator->Release();
+            for (IUnknown *object : std::initializer_list<IUnknown *>{this->pd3dCommandList, this->pd3dRtvDescHeap, this->fence, this->pd3dDevice})
+                if (object != nullptr)
+                    object->Release();
+            for (HANDLE event : {this->fenceEvent, this->resizeFenceEvent})
+                if (event != nullptr)
+                    ::CloseHandle(event);
+        }
+        if (_instance == this)
+            _instance = nullptr;
+    }
+
+    // Installs each hook at most once; a later Attach only re-enables drawing and input.
+    void Dx12Inbound::Attach()
+    {
+        if (!presentHooked || !executeCommandListsHooked || !resizeBuffersHooked || !resizeBuffers1Done)
+        {
+            IMGUI_INBOUND_NAMESPACE::Init(IMGUI_INBOUND_NAMESPACE::D3D12);
+            if (!presentHooked)
+            {
+                oPresentD3D12 = (PresentD3D12)IMGUI_INBOUND_NAMESPACE::GetMethod(140);
+                PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oPresentD3D12, (PVOID)hkPresentD3D12);
+                presentHooked = true;
+            }
+            if (!executeCommandListsHooked)
+            {
+                oExecuteCommandListsD3D12 = (ExecuteCommandListsD3D12)IMGUI_INBOUND_NAMESPACE::GetMethod(54);
+                PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oExecuteCommandListsD3D12, (PVOID)hkExecuteCommandListsD3D12);
+                executeCommandListsHooked = true;
+            }
+            if (!resizeBuffersHooked)
+            {
+                oResizeBuffersD3D12 = (ResizeBuffersD3D12)IMGUI_INBOUND_NAMESPACE::GetMethod(145);
+                PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oResizeBuffersD3D12, (PVOID)hkResizeBuffersD3D12);
+                resizeBuffersHooked = true;
+            }
+            PVOID *swapChain3Vtable = IMGUI_INBOUND_NAMESPACE::GetD3D12SwapChain3Vtable();
+            if (!resizeBuffers1Done && swapChain3Vtable != nullptr)
+            {
+                oResizeBuffers1D3D12 = (ResizeBuffers1D3D12)swapChain3Vtable[39];
+                PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oResizeBuffers1D3D12, (PVOID)hkResizeBuffers1D3D12);
+            }
+            resizeBuffers1Done = true;
+        }
+        HWND hwnd = attachedHwnd;
+        if (this->isImGuiInitialized && hwnd != nullptr)
+        {
+            M_IMGUI_IMPL_WIN32_NAMESPACE::Attach(hwnd);
+            this->SetHwnd(hwnd);
+        }
+        hooksEnabled = true;
+    }
+
+    // Disables drawing and input; the hooks and originals stay installed.
     void Dx12Inbound::Detach()
     {
-        if (this->hwnd != nullptr)
-        {
-            M_IMGUI_IMPL_WIN32_NAMESPACE::Detach(this->hwnd);
-            this->hwnd = nullptr;
-        }
-        if (oPresentD3D12 != nullptr)
-            PYDETOURS_NAMESPACE::SimpleDetach((PVOID *)&oPresentD3D12, (PVOID)hkPresentD3D12);
-        if (oExecuteCommandListsD3D12 != nullptr)
-            PYDETOURS_NAMESPACE::SimpleDetach((PVOID *)&oExecuteCommandListsD3D12, (PVOID)hkExecuteCommandListsD3D12);
-        if (oResizeBuffersD3D12 != nullptr)
-            PYDETOURS_NAMESPACE::SimpleDetach((PVOID *)&oResizeBuffersD3D12, (PVOID)hkResizeBuffersD3D12);
-        if (oResizeBuffers1D3D12 != nullptr)
-            PYDETOURS_NAMESPACE::SimpleDetach((PVOID *)&oResizeBuffers1D3D12, (PVOID)hkResizeBuffers1D3D12);
-        oPresentD3D12 = nullptr;
-        oExecuteCommandListsD3D12 = nullptr;
-        oResizeBuffersD3D12 = nullptr;
-        oResizeBuffers1D3D12 = nullptr;
+        hooksEnabled = false;
+        if (HWND hwnd = attachedHwnd)
+            M_IMGUI_IMPL_WIN32_NAMESPACE::Detach(hwnd);
+        this->hwnd = nullptr;
     }
 
     void Dx12Inbound::InitImGui(IDXGISwapChain3 *pSwapChain)
@@ -748,7 +901,10 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             std::fflush(stderr);
         }
 
+        attachedHwnd = this->hwnd;
         M_IMGUI_IMPL_WIN32_NAMESPACE::Attach(this->hwnd);
+        if (!hooksEnabled || hookInstance != this)
+            M_IMGUI_IMPL_WIN32_NAMESPACE::Detach(this->hwnd);
 
         if (!this->CreateRenderTargets())
             _throw_("Failed to create render targets");
@@ -931,10 +1087,11 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             }
             std::fflush(stderr);
             this->queueFallback = false;
+            ReleaseFallbackQueues(this);
         }
         if (!this->CreateRenderTargets())
         {
-            fprintf(stderr, "[pyimgui] dx12 inbound: failed to recreate render targets after resize, drawing paused\n");
+            fprintf(stderr, "[pyimgui] dx12 inbound: failed to recreate render targets after resize, retrying each frame\n");
             std::fflush(stderr);
         }
     }
@@ -943,21 +1100,31 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
     {
         if (this->queueFallback)
         {
-            ID3D12CommandQueue *queue = this->fallbackQueueFromPresent.load();
-            if (queue == nullptr)
-                queue = this->fallbackQueueAfterPresent.load();
+            ID3D12CommandQueue *fromPresent = this->fallbackQueueFromPresent.load();
+            ID3D12CommandQueue *queue = fromPresent != nullptr ? fromPresent : this->fallbackQueueAfterPresent.load();
             if (queue != nullptr && queue != this->pd3dCommandQueue)
             {
                 this->SetCommandQueue(queue);
                 fprintf(stderr, "[pyimgui] dx12 inbound: present queue from ExecuteCommandLists fallback\n");
                 std::fflush(stderr);
             }
+            // Adopts a queue submitted inside Present for good and drops the slot references.
+            if (fromPresent != nullptr)
+            {
+                this->queueFallback = false;
+                ReleaseFallbackQueues(this);
+            }
         }
         if (!this->pd3dCommandQueue)
             return;
         UINT backBufferIdx = this->pSwapChain->GetCurrentBackBufferIndex();
         if (backBufferIdx >= this->bufferCount || this->backBuffers[backBufferIdx].MainRenderTargetResource == nullptr)
-            return;
+        {
+            // Re-acquires back buffers released while disabled or by a failed resize.
+            this->CleanupRenderTargets();
+            if (!this->CreateRenderTargets() || backBufferIdx >= this->bufferCount)
+                return;
+        }
         FrameContext &frameCtx = this->frameContext[this->frameIndex % NUM_FRAMES_IN_FLIGHT];
         if (!this->WaitForFence(frameCtx.FenceValue, this->fenceEvent, FENCE_TIMEOUT_MS))
         {
@@ -969,28 +1136,57 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             return;
         }
         // Runs on the game's render thread inside Present, which does not hold the GIL.
+        if (IsFinalizing())
+            return;
+        bool raised = false;
         {
             py::gil_scoped_acquire gil;
+            if (hookInstance != this)
+                return;
             py::object self = py::cast(this, py::return_value_policy::reference);
-            this->ProcessCallBeforeFrameOnce(self);
+            try
+            {
+                this->ProcessCallBeforeFrameOnce(self);
+            }
+            catch (std::exception &e)
+            {
+                fprintf(stderr, "[pyimgui] dx12 inbound CallBeforeFrameOnce raised:\n%s\n", e.what());
+                std::fflush(stderr);
+                raised = true;
+            }
+            DeferLastReference(self);
+        }
+        if (raised)
+        {
+            DisableFromHook("CallBeforeFrameOnce raised");
+            return;
         }
 
         ImGui_ImplDX12_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
-        try
+        if (IsFinalizing())
+            return;
         {
             py::gil_scoped_acquire gil;
+            if (hookInstance != this)
+                return;
             py::object self = py::cast(this, py::return_value_policy::reference);
-            this->ProcessRenderCallback(self);
+            try
+            {
+                this->ProcessRenderCallback(self);
+            }
+            catch (std::exception &e)
+            {
+                fprintf(stderr, "[pyimgui] dx12 inbound render callback raised, detaching:\n%s\n", e.what());
+                std::fflush(stderr);
+                raised = true;
+            }
+            DeferLastReference(self);
         }
-        catch (std::exception &e)
+        if (raised)
         {
-            // `e` may be error_already_set: what() and its destructor need the GIL.
-            py::gil_scoped_acquire gil;
-            fprintf(stderr, "[pyimgui] dx12 inbound render callback raised, detaching:\n%s\n", e.what());
-            std::fflush(stderr);
-            this->Detach();
+            DisableFromHook("render callback raised");
             return;
         }
 
@@ -1032,9 +1228,13 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 
     void Dx12Inbound::Update()
     {
+        struct LogicScope
+        {
+            bool &flag;
+            ~LogicScope() { flag = false; }
+        } logic{this->isInLogic};
         this->isInLogic = true;
         this->_Update();
-        this->isInLogic = false;
     }
 
     void pybind_setup_mImguiImpl_Dx12(pybind11::module_ m)

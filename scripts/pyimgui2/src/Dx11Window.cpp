@@ -3,6 +3,8 @@
 #include "./frontends/common/PyDetours.h"
 #include "./frontends/common/Win32Hook.h"
 
+#include <atomic>
+
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
@@ -265,6 +267,86 @@ START_M_IMGUI_IMPL_NAMESPACE
     typedef HRESULT(__stdcall *ResizeBuffers)(IDXGISwapChain *, UINT, UINT, UINT, DXGI_FORMAT, UINT);
     static ResizeBuffers oResizeBuffers = nullptr;
 
+    // Hooks stay installed for the process lifetime and reach the instance only through hookInstance.
+    static std::atomic<Dx11Inbound *> hookInstance{nullptr};
+    static std::atomic<bool> hooksEnabled{false};
+    static std::atomic<int> hooksInFlight{0};
+    static thread_local int hookBodyDepth = 0;
+    static std::atomic<HWND> attachedHwnd{nullptr};
+    static bool presentHooked = false;
+    static bool resizeHooked = false;
+
+    namespace
+    {
+        // Marks a hook body that may use hookInstance.
+        struct HookBody
+        {
+            HookBody() { hookBodyDepth++; hooksInFlight++; }
+            ~HookBody() { hooksInFlight--; hookBodyDepth--; }
+        };
+    }
+
+    static bool IsFinalizing()
+    {
+#if PY_VERSION_HEX >= 0x030D0000
+        return Py_IsFinalizing();
+#else
+        return _Py_IsFinalizing();
+#endif
+    }
+
+    // Waits until no other thread is inside a hook body, releasing the GIL and serving sent messages meanwhile.
+    static void WaitForHooks()
+    {
+        auto busy = []() { return hooksInFlight.load() != hookBodyDepth && !IsFinalizing(); };
+        if (!busy())
+            return;
+        std::optional<py::gil_scoped_release> release;
+        if (PyGILState_Check())
+            release.emplace();
+        MSG msg;
+        while (busy())
+        {
+            ::MsgWaitForMultipleObjects(0, nullptr, FALSE, 1, QS_SENDMESSAGE);
+            ::PeekMessage(&msg, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+        }
+    }
+
+    // Stops drawing and input after a failure inside a hook and reports it on stderr.
+    static void DisableFromHook(const char *reason)
+    {
+        hooksEnabled = false;
+        fprintf(stderr, "[pyimgui] dx11 inbound disabled: %s\n", reason);
+        std::fflush(stderr);
+        try
+        {
+            if (HWND hwnd = attachedHwnd)
+                M_IMGUI_IMPL_WIN32_NAMESPACE::Detach(hwnd);
+        }
+        catch (...)
+        {
+        }
+    }
+
+    static int ReleasePendingReference(void *object)
+    {
+        Py_DECREF((PyObject *)object);
+        return 0;
+    }
+
+    // Hands the last reference to the object to Python's main thread; keeps the object alive if that cannot be scheduled.
+    static void DeferLastReference(py::object &self)
+    {
+        if (Py_REFCNT(self.ptr()) != 1)
+            return;
+        PyObject *object = self.release().ptr();
+        if (IsFinalizing() || Py_AddPendingCall(ReleasePendingReference, object) != 0)
+        {
+            fprintf(stderr, "[pyimgui] dx11 inbound: could not schedule the release of the last reference, keeping the object alive\n");
+            std::fflush(stderr);
+        }
+    }
+
     HRESULT __stdcall hkResizeBuffers11(
         IDXGISwapChain *pSwapChain,
         UINT BufferCount,
@@ -273,27 +355,36 @@ START_M_IMGUI_IMPL_NAMESPACE
         DXGI_FORMAT NewFormat,
         UINT SwapChainFlags)
     {
-        if (Dx11Inbound::_instance != nullptr && Dx11Inbound::_instance->isImGuiInitialized)
-            Dx11Inbound::_instance->CleanupRenderTarget();
+        HookBody body;
+        Dx11Inbound *instance = hookInstance;
+        if (instance != nullptr && instance->isImGuiInitialized)
+            instance->CleanupRenderTarget();
         auto res = oResizeBuffers(pSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
-        if (Dx11Inbound::_instance != nullptr && Dx11Inbound::_instance->isImGuiInitialized)
-            Dx11Inbound::_instance->CreateRenderTarget();
+        if (instance != nullptr && instance->isImGuiInitialized)
+            instance->CreateRenderTarget();
         return res;
     }
 
     HRESULT __stdcall hkPresent11(IDXGISwapChain *pSwapChain, UINT SyncInterval, UINT Flags)
     {
-        if (Dx11Inbound::_instance != nullptr && !Dx11Inbound::_instance->isInLogic)
         {
-            auto instance = Dx11Inbound::_instance;
-            try
+            HookBody body;
+            Dx11Inbound *instance = hookInstance;
+            if (instance != nullptr && hooksEnabled && !instance->isInLogic)
             {
-                instance->InitImGui(pSwapChain);
-                instance->Update();
-            }
-            catch (...)
-            {
-                instance->Detach();
+                try
+                {
+                    instance->InitImGui(pSwapChain);
+                    instance->Update();
+                }
+                catch (const std::exception &e)
+                {
+                    DisableFromHook(e.what());
+                }
+                catch (...)
+                {
+                    DisableFromHook("unknown exception");
+                }
             }
         }
         return oPresent(pSwapChain, SyncInterval, Flags);
@@ -304,44 +395,69 @@ START_M_IMGUI_IMPL_NAMESPACE
         if (_instance != nullptr)
             _throw_("Only one instance of Dx11Inbound is allowed");
         _instance = this;
+        hookInstance = this;
     }
 
     Dx11Inbound::~Dx11Inbound()
     {
-        this->Detach();
+        hookInstance = nullptr;
+        try
+        {
+            this->Detach();
+        }
+        catch (...)
+        {
+        }
+        WaitForHooks();
+        this->CleanupRenderTarget();
+        if (this->pd3dDeviceContext != nullptr)
+        {
+            this->pd3dDeviceContext->Release();
+            this->pd3dDeviceContext = nullptr;
+        }
+        if (this->pd3dDevice != nullptr)
+        {
+            this->pd3dDevice->Release();
+            this->pd3dDevice = nullptr;
+        }
         _instance = nullptr;
     }
 
+    // Installs each hook at most once; a later Attach only re-enables drawing and input.
     void Dx11Inbound::Attach()
     {
-        IMGUI_INBOUND_NAMESPACE::Init(IMGUI_INBOUND_NAMESPACE::D3D11);
-        oPresent = (Present)IMGUI_INBOUND_NAMESPACE::GetMethod(8);
-        oResizeBuffers = (ResizeBuffers)IMGUI_INBOUND_NAMESPACE::GetMethod(13);
-        PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oPresent, (PVOID)hkPresent11);
-        PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oResizeBuffers, (PVOID)hkResizeBuffers11);
+        if (!presentHooked || !resizeHooked)
+        {
+            IMGUI_INBOUND_NAMESPACE::Init(IMGUI_INBOUND_NAMESPACE::D3D11);
+            if (!presentHooked)
+            {
+                oPresent = (Present)IMGUI_INBOUND_NAMESPACE::GetMethod(8);
+                PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oPresent, (PVOID)hkPresent11);
+                presentHooked = true;
+            }
+            if (!resizeHooked)
+            {
+                oResizeBuffers = (ResizeBuffers)IMGUI_INBOUND_NAMESPACE::GetMethod(13);
+                PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oResizeBuffers, (PVOID)hkResizeBuffers11);
+                resizeHooked = true;
+            }
+        }
+        HWND hwnd = attachedHwnd;
+        if (this->isImGuiInitialized && hwnd != nullptr)
+        {
+            M_IMGUI_IMPL_WIN32_NAMESPACE::Attach(hwnd);
+            this->SetHwnd(hwnd);
+        }
+        hooksEnabled = true;
     }
 
+    // Disables drawing and input; the hooks and originals stay installed.
     void Dx11Inbound::Detach()
     {
-        if (this->hwnd != nullptr)
-        {
-            M_IMGUI_IMPL_WIN32_NAMESPACE::Detach(this->hwnd);
-            this->hwnd = nullptr;
-        }
-        if (oPresent != nullptr)
-        {
-            auto originalPresent = (Present)IMGUI_INBOUND_NAMESPACE::GetMethod(8);
-            if (oPresent != originalPresent)
-                PYDETOURS_NAMESPACE::SimpleDetach((PVOID *)&oPresent, (PVOID)hkPresent11);
-            oPresent = nullptr;
-        }
-        if (oResizeBuffers != nullptr)
-        {
-            auto originalResizeBuffers = (ResizeBuffers)IMGUI_INBOUND_NAMESPACE::GetMethod(13);
-            if (oResizeBuffers != originalResizeBuffers)
-                PYDETOURS_NAMESPACE::SimpleDetach((PVOID *)&oResizeBuffers, (PVOID)hkResizeBuffers11);
-            oResizeBuffers = nullptr;
-        }
+        hooksEnabled = false;
+        if (HWND hwnd = attachedHwnd)
+            M_IMGUI_IMPL_WIN32_NAMESPACE::Detach(hwnd);
+        this->hwnd = nullptr;
     }
 
     void Dx11Inbound::InitImGui(IDXGISwapChain *pSwapChain)
@@ -359,7 +475,10 @@ START_M_IMGUI_IMPL_NAMESPACE
             _throwV_("Failed to get D3D11 device from swap chain: {}", hr);
         this->pd3dDevice->GetImmediateContext(&this->pd3dDeviceContext);
 
+        attachedHwnd = this->hwnd;
         M_IMGUI_IMPL_WIN32_NAMESPACE::Attach(this->hwnd);
+        if (!hooksEnabled || hookInstance != this)
+            M_IMGUI_IMPL_WIN32_NAMESPACE::Detach(this->hwnd);
         this->CreateRenderTarget();
         this->ctx = ImGui::CreateContext();
 
@@ -387,9 +506,13 @@ START_M_IMGUI_IMPL_NAMESPACE
 
     void Dx11Inbound::Update()
     {
+        struct LogicScope
+        {
+            bool &flag;
+            ~LogicScope() { flag = false; }
+        } logic{this->isInLogic};
         this->isInLogic = true;
         this->_Update();
-        this->isInLogic = false;
     }
 
     void Dx11Inbound::_Update()
@@ -406,38 +529,58 @@ START_M_IMGUI_IMPL_NAMESPACE
         // is a delayed NULL function-pointer call on the OTHER thread.
         // See the standalone `Dx11Window::Update` path above for the same
         // pattern done correctly.
+        if (IsFinalizing())
+            return;
+        bool raised = false;
         {
             py::gil_scoped_acquire gil;
+            if (hookInstance != this)
+                return;
             py::object self = py::cast(this, py::return_value_policy::reference);
-            this->ProcessCallBeforeFrameOnce(self);
+            try
+            {
+                this->ProcessCallBeforeFrameOnce(self);
+            }
+            catch (std::exception &e)
+            {
+                fprintf(stderr, "[pyimgui] dx11 inbound CallBeforeFrameOnce raised:\n%s\n", e.what());
+                std::fflush(stderr);
+                raised = true;
+            }
+            DeferLastReference(self);
+        }
+        if (raised)
+        {
+            DisableFromHook("CallBeforeFrameOnce raised");
+            return;
         }
 
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
-        try
+        if (IsFinalizing())
+            return;
         {
             py::gil_scoped_acquire gil;
+            if (hookInstance != this)
+                return;
             py::object self = py::cast(this, py::return_value_policy::reference);
-            this->ProcessRenderCallback(self);
+            try
+            {
+                this->ProcessRenderCallback(self);
+            }
+            catch (std::exception &e)
+            {
+                fprintf(stderr, "[pyimgui] dx11 inbound render callback raised, detaching:\n%s\n", e.what());
+                std::fflush(stderr);
+                raised = true;
+            }
+            DeferLastReference(self);
         }
-        catch (std::exception &e)
+        if (raised)
         {
-            // The exception may be `pybind11::error_already_set`, whose
-            // destructor decrefs Python objects and therefore needs the GIL.
-            // The inner gil_scoped_acquire was unwound before we landed here,
-            // so re-acquire for the duration of the catch body (covers
-            // `e.what()`, which may also touch Python, and the implicit
-            // destruction of `e` when this scope exits). Without this, the
-            // GIL-less decref on the C++ render thread races CPython's
-            // runtime state and crashes with RIP=0 on a NULL function-pointer
-            // call (typically several frames later, on whichever thread next
-            // touches the corrupted slot).
-            py::gil_scoped_acquire gil;
-            fprintf(stderr, "[pyimgui] dx11 inbound render callback raised, detaching:\n%s\n", e.what());
-            std::fflush(stderr);
-            this->Detach();
+            DisableFromHook("render callback raised");
             return;
         }
 
