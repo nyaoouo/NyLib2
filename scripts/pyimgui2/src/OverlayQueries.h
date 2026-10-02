@@ -68,10 +68,8 @@ START_OVERLAY_QUERIES_NAMESPACE
         }
     }
 
-    // Enumerates every display monitor in physical pixels (C14), ordered
-    // primary first then ascending (left, top, name); `index` is the list
-    // position. Throws std::system_error (GetLastError) if EnumDisplayMonitors
-    // fails.
+    // Enumerates display monitors in physical pixels, primary first then by (left, top, name).
+    // Throws std::system_error if EnumDisplayMonitors fails.
     inline std::vector<MonitorInfo> EnumerateMonitors()
     {
         ThreadDpiScope scope(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);

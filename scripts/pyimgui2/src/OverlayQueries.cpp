@@ -17,9 +17,7 @@ START_OVERLAY_QUERIES_NAMESPACE
             }
         }
 
-        // M4: AreDpiAwarenessContextsEqual must run first, since
-        // GetAwarenessFromDpiAwarenessContext reports PER_MONITOR_AWARE for
-        // both the v1 and v2 contexts.
+        // Checks per-monitor-v2 first; the awareness query reports v1 and v2 alike.
         std::string GetDpiAwarenessImpl()
         {
             DPI_AWARENESS_CONTEXT ctx = GetThreadDpiAwarenessContext();
