@@ -1,8 +1,10 @@
 """Package entry for nylib.ue.runtime: eager errors, every other name lazy."""
 import importlib
 
-from ..errors import UeError, SessionError, ReadOnlySessionError, CallsDisabledError, DumpMismatchError, \
-    UnverifiedOffsetsError, AmbiguousNameError, DetectionError, TargetError, MemoryReadError, MemoryWriteError
+from ..errors import UeError, MemoryReadError, MemoryWriteError, TargetError, PeFormatError, CaptureError, \
+    SnapshotError, SchemaError, DetectionError, AmbiguousTargetError, ProfileError, OutputRootError, \
+    SessionError, ReadOnlySessionError, CallsDisabledError, DumpMismatchError, UnverifiedOffsetsError, \
+    AmbiguousNameError, CallError, MarshalError
 
 _LAZY: dict[str, str] = {
     'Unreal': 'session',
