@@ -173,7 +173,7 @@ def unverified_gate(keys: Iterable[str], *, write: bool, allow_unverified: bool,
                 f'{len(gating)} offsets of this {source} are unverified, and write=True would write through them:\n'
                 + ''.join(f'  {k}\n' for k in gating)
                 + f'Check them with:  python -m nylib.ue probe {target}\n'
-                  f'Then pin them in a profile, attach with a reviewed snapshot (dump=\'latest\'), or pass allow_unverified=True.',
+                  f'Then pin them in a profile (a snapshot session needs a new dump made with it), or pass allow_unverified=True.',
                 keys=gating)
         logger.warning('write=True with %d unverified offsets of this %s (allow_unverified=True): %s', len(gating), source, ', '.join(gating))
     return gating
@@ -290,6 +290,8 @@ class Unreal:
             if dump is not None:
                 snap, ectx, dumped = cls._snapshot_engine(target, root, dump, snap, profile, opened, write, allow_unverified)
                 unverified = tuple(ectx.unverified())
+                if not dumped:
+                    unverified_gate(unverified, write=write, allow_unverified=allow_unverified, source='snapshot', target=info.exe)
             else:
                 ectx, unverified, probe_line = cls._live_engine(opened, profile, root, write, allow_unverified)
 
