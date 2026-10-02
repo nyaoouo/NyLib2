@@ -4,6 +4,52 @@
 #include <cstdio>
 #include <cwchar>
 
+// Probe-message counters (RE2/RE2-lite, unit 2-1): one per message class,
+// incremented from Window::WndProc for a tagged message. Exported from
+// every host EXE so an injected payload can read them with GetProcAddress
+// against its own process, next to the pre-existing g_dxtest_tick.
+extern "C" __declspec(dllexport) volatile LONG64 g_dxtest_buttons = 0;
+extern "C" __declspec(dllexport) volatile LONG64 g_dxtest_wheel = 0;
+extern "C" __declspec(dllexport) volatile LONG64 g_dxtest_keys = 0;
+extern "C" __declspec(dllexport) volatile LONG64 g_dxtest_setcursor = 0;
+
+namespace
+{
+    bool IsButtonMessage(UINT msg)
+    {
+        switch (msg)
+        {
+        case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
+        case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK:
+        case WM_MBUTTONDOWN: case WM_MBUTTONUP: case WM_MBUTTONDBLCLK:
+        case WM_XBUTTONDOWN: case WM_XBUTTONUP: case WM_XBUTTONDBLCLK:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    bool IsWheelMessage(UINT msg)
+    {
+        return msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL;
+    }
+
+    bool IsKeyboardMessage(UINT msg)
+    {
+        switch (msg)
+        {
+        case WM_KEYDOWN: case WM_KEYUP:
+        case WM_SYSKEYDOWN: case WM_SYSKEYUP:
+        case WM_CHAR: case WM_SYSCHAR:
+        case WM_DEADCHAR: case WM_SYSDEADCHAR:
+        case WM_UNICHAR:
+            return true;
+        default:
+            return false;
+        }
+    }
+}
+
 namespace dxtest
 {
     Window::Window(const wchar_t *class_name, const wchar_t *title, int width, int height)
@@ -61,6 +107,29 @@ namespace dxtest
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
         }
         auto self = reinterpret_cast<Window *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        // Probe messages (unit 2-1): counted and consumed without
+        // DefWindowProcW, so a tagged WM_SYSCHAR/WM_SYSKEYDOWN can never
+        // beep or enter menu mode; untagged real input is unaffected.
+        if (IsButtonMessage(msg) && LOWORD(lparam) == DXTEST_PROBE_TAG)
+        {
+            InterlockedIncrement64(&g_dxtest_buttons);
+            return 0;
+        }
+        if (IsWheelMessage(msg) && LOWORD(lparam) == DXTEST_PROBE_TAG)
+        {
+            InterlockedIncrement64(&g_dxtest_wheel);
+            return 0;
+        }
+        if (IsKeyboardMessage(msg) && LOWORD(lparam) == DXTEST_PROBE_TAG)
+        {
+            InterlockedIncrement64(&g_dxtest_keys);
+            return 0;
+        }
+        if (msg == WM_SETCURSOR && HIWORD(lparam) == DXTEST_PROBE_TAG)
+        {
+            InterlockedIncrement64(&g_dxtest_setcursor);
+            return 0;
+        }
         if (msg == WM_SIZE)
         {
             if (self != nullptr && wparam != SIZE_MINIMIZED)
