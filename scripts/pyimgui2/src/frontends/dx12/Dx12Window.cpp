@@ -553,77 +553,157 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
     }
 
     typedef long(__fastcall *PresentD3D12)(IDXGISwapChain3 *pSwapChain, UINT SyncInterval, UINT Flags);
-    typedef void(__fastcall *DrawInstancedD3D12)(ID3D12GraphicsCommandList *dCommandList, UINT VertexCountPerInstance, UINT InstanceCount, UINT StartVertexLocation, UINT StartInstanceLocation);
-    typedef void(__fastcall *DrawIndexedInstancedD3D12)(ID3D12GraphicsCommandList *dCommandList, UINT IndexCount, UINT InstanceCount, UINT StartIndex, INT BaseVertex);
-    typedef HRESULT(__fastcall *ExecuteCommandListsD3D12)(ID3D12CommandQueue *dCommandQueue, UINT NumCommandLists, ID3D12CommandList *const *ppCommandLists);
-    typedef HRESULT(__fastcall *SignalD3D12)(ID3D12CommandQueue *dCommandQueue, ID3D12Fence *dFence, UINT64 Value);
+    typedef void(__fastcall *ExecuteCommandListsD3D12)(ID3D12CommandQueue *dCommandQueue, UINT NumCommandLists, ID3D12CommandList *const *ppCommandLists);
+    typedef HRESULT(__fastcall *ResizeBuffersD3D12)(IDXGISwapChain3 *pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags);
+    typedef HRESULT(__fastcall *ResizeBuffers1D3D12)(IDXGISwapChain3 *pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT Format, UINT SwapChainFlags, const UINT *pCreationNodeMask, IUnknown *const *ppPresentQueue);
 
     static PresentD3D12 oPresentD3D12 = nullptr;
-    static DrawInstancedD3D12 oDrawInstancedD3D12 = nullptr;
-    static DrawIndexedInstancedD3D12 oDrawIndexedInstancedD3D12 = nullptr;
     static ExecuteCommandListsD3D12 oExecuteCommandListsD3D12 = nullptr;
-    static SignalD3D12 oSignalD3D12 = nullptr;
+    static ResizeBuffersD3D12 oResizeBuffersD3D12 = nullptr;
+    static ResizeBuffers1D3D12 oResizeBuffers1D3D12 = nullptr;
+
+    static thread_local bool inGamePresent = false;
+    static thread_local int resizeDepth = 0;
+    static std::atomic<bool> presentSeen{false};
+    static std::atomic<bool> fenceTimeoutReported{false};
+    static size_t const SWAP_CHAIN_SCAN_SIZE = 0x400;
+    static DWORD const FENCE_TIMEOUT_MS = 1000;
+
+    static bool IsReadable(const void *address, size_t size, uintptr_t *regionEnd = nullptr)
+    {
+        MEMORY_BASIC_INFORMATION mbi = {};
+        if (::VirtualQuery(address, &mbi, sizeof(mbi)) == 0 || mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0)
+            return false;
+        if ((mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) == 0)
+            return false;
+        uintptr_t end = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+        if (regionEnd != nullptr)
+            *regionEnd = end;
+        return (uintptr_t)address + size <= end;
+    }
+
+    static bool ReadPointer(uintptr_t address, void **value)
+    {
+        __try
+        {
+            *value = *(void **)address;
+            return true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
+    // Returns the swap chain's own DIRECT queue on pd3dDevice, AddRef'd, or nullptr unless exactly one candidate is found.
+    static ID3D12CommandQueue *FindSwapChainQueue(IDXGISwapChain *pSwapChain, void **queueVtable, ID3D12Device *pd3dDevice)
+    {
+        uintptr_t begin = (uintptr_t)pSwapChain;
+        uintptr_t end = 0;
+        if (queueVtable == nullptr || !IsReadable(pSwapChain, sizeof(void *), &end))
+            return nullptr;
+        if (end > begin + SWAP_CHAIN_SCAN_SIZE)
+            end = begin + SWAP_CHAIN_SCAN_SIZE;
+        ID3D12CommandQueue *found = nullptr;
+        for (uintptr_t slot = begin; slot + sizeof(void *) <= end; slot += sizeof(void *))
+        {
+            void *raw = nullptr;
+            void *vptr = nullptr;
+            if (!ReadPointer(slot, &raw))
+                return nullptr;
+            ID3D12CommandQueue *candidate = (ID3D12CommandQueue *)raw;
+            if (candidate == nullptr || candidate == found || ((uintptr_t)candidate & (sizeof(void *) - 1)) != 0)
+                continue;
+            if (!IsReadable(candidate, sizeof(void *)) || !ReadPointer((uintptr_t)candidate, &vptr) || vptr != (void *)queueVtable)
+                continue;
+            if (candidate->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT)
+                continue;
+            ID3D12Device *device = nullptr;
+            if (candidate->GetDevice(IID_PPV_ARGS(&device)) != S_OK)
+                continue;
+            device->Release();
+            if (device != pd3dDevice)
+                continue;
+            if (found != nullptr)
+                return nullptr;
+            found = candidate;
+        }
+        if (found != nullptr)
+            found->AddRef();
+        return found;
+    }
 
     long __fastcall hkPresentD3D12(IDXGISwapChain3 *pSwapChain, UINT SyncInterval, UINT Flags)
     {
-        if (Dx12Inbound::_instance != nullptr && (Dx12Inbound::_instance->pSwapChain == nullptr || Dx12Inbound::_instance->pSwapChain == pSwapChain))
+        Dx12Inbound *instance = Dx12Inbound::_instance;
+        if (instance == nullptr || (instance->pSwapChain != nullptr && instance->pSwapChain != pSwapChain))
+            return oPresentD3D12(pSwapChain, SyncInterval, Flags);
+        try
         {
-            try
-            {
-                if (!Dx12Inbound::_instance->isImGuiInitialized)
-                    Dx12Inbound::_instance->InitImGui(pSwapChain);
-                Dx12Inbound::_instance->Update();
-            }
-            catch (const std::exception &e)
-            {
-                (void)e;
-                dbgPrint("Dx12Inbound::Update() exception: %s\n", e.what());
-                Dx12Inbound::_instance->Detach();
-            }
+            if (!instance->isImGuiInitialized)
+                instance->InitImGui(pSwapChain);
+            instance->Update();
         }
-        return oPresentD3D12(pSwapChain, SyncInterval, Flags);
-    }
-
-    void __fastcall hkDrawInstancedD3D12(ID3D12GraphicsCommandList *dCommandList, UINT VertexCountPerInstance, UINT InstanceCount, UINT StartVertexLocation, UINT StartInstanceLocation)
-    {
-        oDrawInstancedD3D12(dCommandList, VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
-    }
-
-    void __fastcall hkDrawIndexedInstancedD3D12(ID3D12GraphicsCommandList *dCommandList, UINT IndexCount, UINT InstanceCount, UINT StartIndex, INT BaseVertex)
-    {
-        oDrawIndexedInstancedD3D12(dCommandList, IndexCount, InstanceCount, StartIndex, BaseVertex);
-    }
-
-    HRESULT __fastcall hkExecuteCommandListsD3D12(ID3D12CommandQueue *dCommandQueue, UINT NumCommandLists, ID3D12CommandList *const *ppCommandLists)
-    {
-        if (Dx12Inbound::_instance != nullptr && Dx12Inbound::_instance->pd3dCommandQueue == nullptr)
-            Dx12Inbound::_instance->pd3dCommandQueue = dCommandQueue;
-        return oExecuteCommandListsD3D12(dCommandQueue, NumCommandLists, ppCommandLists);
-    }
-
-    HRESULT __fastcall hkSignalD3D12(ID3D12CommandQueue *dCommandQueue, ID3D12Fence *dFence, UINT64 Value)
-    {
-        if (dCommandQueue != nullptr && Dx12Inbound::_instance != nullptr && Dx12Inbound::_instance->pd3dCommandQueue == dCommandQueue)
+        catch (const std::exception &e)
         {
-            Dx12Inbound::_instance->fence = dFence;
-            Dx12Inbound::_instance->fenceLastSignaledValue = Value;
+            (void)e;
+            dbgPrint("Dx12Inbound::Update() exception: %s\n", e.what());
+            instance->Detach();
         }
-        return oSignalD3D12(dCommandQueue, dFence, Value);
+        inGamePresent = true;
+        long result = oPresentD3D12(pSwapChain, SyncInterval, Flags);
+        inGamePresent = false;
+        presentSeen = true;
+        return result;
+    }
+
+    void __fastcall hkExecuteCommandListsD3D12(ID3D12CommandQueue *dCommandQueue, UINT NumCommandLists, ID3D12CommandList *const *ppCommandLists)
+    {
+        Dx12Inbound *instance = Dx12Inbound::_instance;
+        if (instance != nullptr && instance->queueFallback && !instance->isInLogic)
+            instance->OfferFallbackQueue(dCommandQueue, inGamePresent);
+        oExecuteCommandListsD3D12(dCommandQueue, NumCommandLists, ppCommandLists);
+    }
+
+    HRESULT __fastcall hkResizeBuffersD3D12(IDXGISwapChain3 *pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags)
+    {
+        Dx12Inbound *instance = Dx12Inbound::_instance;
+        if (resizeDepth > 0 || instance == nullptr || !instance->isImGuiInitialized || instance->pSwapChain != pSwapChain)
+            return oResizeBuffersD3D12(pSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
+        resizeDepth++;
+        instance->BeforeResize();
+        HRESULT hr = oResizeBuffersD3D12(pSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
+        instance->AfterResize(nullptr, nullptr);
+        resizeDepth--;
+        return hr;
+    }
+
+    HRESULT __fastcall hkResizeBuffers1D3D12(IDXGISwapChain3 *pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT Format, UINT SwapChainFlags, const UINT *pCreationNodeMask, IUnknown *const *ppPresentQueue)
+    {
+        Dx12Inbound *instance = Dx12Inbound::_instance;
+        if (resizeDepth > 0 || instance == nullptr || !instance->isImGuiInitialized || instance->pSwapChain != pSwapChain)
+            return oResizeBuffers1D3D12(pSwapChain, BufferCount, Width, Height, Format, SwapChainFlags, pCreationNodeMask, ppPresentQueue);
+        resizeDepth++;
+        instance->BeforeResize();
+        HRESULT hr = oResizeBuffers1D3D12(pSwapChain, BufferCount, Width, Height, Format, SwapChainFlags, pCreationNodeMask, ppPresentQueue);
+        instance->AfterResize(pCreationNodeMask, SUCCEEDED(hr) ? ppPresentQueue : nullptr);
+        resizeDepth--;
+        return hr;
     }
 
     void Dx12Inbound::Attach()
     {
         IMGUI_INBOUND_NAMESPACE::Init(IMGUI_INBOUND_NAMESPACE::D3D12);
         oPresentD3D12 = (PresentD3D12)IMGUI_INBOUND_NAMESPACE::GetMethod(140);
-        oDrawInstancedD3D12 = (DrawInstancedD3D12)IMGUI_INBOUND_NAMESPACE::GetMethod(84);
-        oDrawIndexedInstancedD3D12 = (DrawIndexedInstancedD3D12)IMGUI_INBOUND_NAMESPACE::GetMethod(85);
         oExecuteCommandListsD3D12 = (ExecuteCommandListsD3D12)IMGUI_INBOUND_NAMESPACE::GetMethod(54);
-        oSignalD3D12 = (SignalD3D12)IMGUI_INBOUND_NAMESPACE::GetMethod(58);
+        oResizeBuffersD3D12 = (ResizeBuffersD3D12)IMGUI_INBOUND_NAMESPACE::GetMethod(145);
+        PVOID *swapChain3Vtable = IMGUI_INBOUND_NAMESPACE::GetD3D12SwapChain3Vtable();
+        oResizeBuffers1D3D12 = swapChain3Vtable != nullptr ? (ResizeBuffers1D3D12)swapChain3Vtable[39] : nullptr;
         PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oPresentD3D12, (PVOID)hkPresentD3D12);
-        PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oDrawInstancedD3D12, (PVOID)hkDrawInstancedD3D12);
-        PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oDrawIndexedInstancedD3D12, (PVOID)hkDrawIndexedInstancedD3D12);
         PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oExecuteCommandListsD3D12, (PVOID)hkExecuteCommandListsD3D12);
-        PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oSignalD3D12, (PVOID)hkSignalD3D12);
+        PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oResizeBuffersD3D12, (PVOID)hkResizeBuffersD3D12);
+        if (oResizeBuffers1D3D12 != nullptr)
+            PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oResizeBuffers1D3D12, (PVOID)hkResizeBuffers1D3D12);
     }
 
     void Dx12Inbound::Detach()
@@ -635,19 +715,16 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         }
         if (oPresentD3D12 != nullptr)
             PYDETOURS_NAMESPACE::SimpleDetach((PVOID *)&oPresentD3D12, (PVOID)hkPresentD3D12);
-        if (oDrawInstancedD3D12 != nullptr)
-            PYDETOURS_NAMESPACE::SimpleDetach((PVOID *)&oDrawInstancedD3D12, (PVOID)hkDrawInstancedD3D12);
-        if (oDrawIndexedInstancedD3D12 != nullptr)
-            PYDETOURS_NAMESPACE::SimpleDetach((PVOID *)&oDrawIndexedInstancedD3D12, (PVOID)hkDrawIndexedInstancedD3D12);
         if (oExecuteCommandListsD3D12 != nullptr)
             PYDETOURS_NAMESPACE::SimpleDetach((PVOID *)&oExecuteCommandListsD3D12, (PVOID)hkExecuteCommandListsD3D12);
-        if (oSignalD3D12 != nullptr)
-            PYDETOURS_NAMESPACE::SimpleDetach((PVOID *)&oSignalD3D12, (PVOID)hkSignalD3D12);
+        if (oResizeBuffersD3D12 != nullptr)
+            PYDETOURS_NAMESPACE::SimpleDetach((PVOID *)&oResizeBuffersD3D12, (PVOID)hkResizeBuffersD3D12);
+        if (oResizeBuffers1D3D12 != nullptr)
+            PYDETOURS_NAMESPACE::SimpleDetach((PVOID *)&oResizeBuffers1D3D12, (PVOID)hkResizeBuffers1D3D12);
         oPresentD3D12 = nullptr;
-        oDrawInstancedD3D12 = nullptr;
-        oDrawIndexedInstancedD3D12 = nullptr;
         oExecuteCommandListsD3D12 = nullptr;
-        oSignalD3D12 = nullptr;
+        oResizeBuffersD3D12 = nullptr;
+        oResizeBuffers1D3D12 = nullptr;
     }
 
     void Dx12Inbound::InitImGui(IDXGISwapChain3 *pSwapChain)
@@ -662,29 +739,19 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         DXGI_SWAP_CHAIN_DESC sdesc = {};
         pSwapChain->GetDesc(&sdesc);
         this->SetHwnd(sdesc.OutputWindow);
-        this->bufferCount = sdesc.BufferCount;
-        this->frameContext = new FrameContext[this->bufferCount];
+
+        this->pd3dCommandQueue = FindSwapChainQueue(pSwapChain, (void **)IMGUI_INBOUND_NAMESPACE::GetD3D12QueueVtable(), this->pd3dDevice);
+        this->queueFallback = this->pd3dCommandQueue == nullptr;
+        if (!this->queueFallback)
+        {
+            fprintf(stderr, "[pyimgui] dx12 inbound: present queue from swap-chain scan\n");
+            std::fflush(stderr);
+        }
 
         M_IMGUI_IMPL_WIN32_NAMESPACE::Attach(this->hwnd);
 
-        D3D12_DESCRIPTOR_HEAP_DESC rtvDesc = {};
-        rtvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-        rtvDesc.NumDescriptors = this->bufferCount;
-        rtvDesc.NodeMask = 1;
-        if ((hr = this->pd3dDevice->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&this->pd3dRtvDescHeap))) != S_OK)
-            _throwV_("Failed to create RTV heap: {}", hr);
-
-        SIZE_T rtvDescriptorSize = this->pd3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = this->pd3dRtvDescHeap->GetCPUDescriptorHandleForHeapStart();
-        for (UINT i = 0; i < this->bufferCount; i++)
-        {
-            ID3D12Resource *backBuffer = nullptr;
-            this->frameContext[i].MainRenderTargetDescriptor = rtvHandle;
-            pSwapChain->GetBuffer(i, IID_PPV_ARGS(&backBuffer));
-            this->pd3dDevice->CreateRenderTargetView(backBuffer, nullptr, rtvHandle);
-            this->frameContext[i].MainRenderTargetResource = backBuffer;
-            rtvHandle.ptr += rtvDescriptorSize;
-        }
+        if (!this->CreateRenderTargets())
+            _throw_("Failed to create render targets");
 
         D3D12_DESCRIPTOR_HEAP_DESC srvDesc = {};
         srvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -693,11 +760,19 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         if ((hr = this->pd3dDevice->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&this->pd3dSrvDescHeap))) != S_OK)
             _throwV_("Failed to create SRV heap: {}", hr);
 
-        for (UINT i = 0; i < this->bufferCount; i++)
+        for (UINT i = 0; i < NUM_FRAMES_IN_FLIGHT; i++)
             if ((hr = this->pd3dDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&this->frameContext[i].CommandAllocator))) != S_OK)
                 _throwV_("Failed to create command allocator[{}]: {}", i, hr);
         if ((hr = this->pd3dDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, this->frameContext[0].CommandAllocator, nullptr, IID_PPV_ARGS(&this->pd3dCommandList))) != S_OK)
             _throwV_("Failed to create command list: {}", hr);
+        if ((hr = this->pd3dCommandList->Close()) != S_OK)
+            _throwV_("Failed to close command list: {}", hr);
+        if ((hr = this->pd3dDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&this->fence))) != S_OK)
+            _throwV_("Failed to create fence: {}", hr);
+        if ((this->fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr)) == nullptr)
+            _throwV_("Failed to create fence event: {}", GetLastError());
+        if ((this->resizeFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr)) == nullptr)
+            _throwV_("Failed to create resize fence event: {}", GetLastError());
 
         this->ctx = ImGui::CreateContext();
         ImGuiIO &io = ImGui::GetIO();
@@ -715,15 +790,184 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         }
 
         ImGui_ImplWin32_Init(this->hwnd);
-        ImGui_ImplDX12_Init(this->pd3dDevice, this->bufferCount, DXGI_FORMAT_R8G8B8A8_UNORM, this->pd3dSrvDescHeap, this->pd3dSrvDescHeap->GetCPUDescriptorHandleForHeapStart(), this->pd3dSrvDescHeap->GetGPUDescriptorHandleForHeapStart());
+        ImGui_ImplDX12_Init(this->pd3dDevice, NUM_FRAMES_IN_FLIGHT, DXGI_FORMAT_R8G8B8A8_UNORM, this->pd3dSrvDescHeap, this->pd3dSrvDescHeap->GetCPUDescriptorHandleForHeapStart(), this->pd3dSrvDescHeap->GetGPUDescriptorHandleForHeapStart());
         this->isImGuiInitialized = true;
-        dbgPrint("init dx12 inbound success\n");
+        dbgPrint("init dx12 inbound success, queue from %s\n", this->queueFallback ? "fallback" : "swap-chain scan");
+    }
+
+    // (Re)acquires the swap chain's back buffers and RTVs; rebuilds the RTV heap when BufferCount changed.
+    bool Dx12Inbound::CreateRenderTargets()
+    {
+        DXGI_SWAP_CHAIN_DESC sdesc = {};
+        if (this->pSwapChain->GetDesc(&sdesc) != S_OK || sdesc.BufferCount == 0)
+            return false;
+        if (this->pd3dRtvDescHeap == nullptr || sdesc.BufferCount != this->bufferCount)
+        {
+            this->CleanupRenderTargets();
+            if (this->pd3dRtvDescHeap != nullptr)
+            {
+                this->pd3dRtvDescHeap->Release();
+                this->pd3dRtvDescHeap = nullptr;
+            }
+            delete[] this->backBuffers;
+            this->backBuffers = nullptr;
+            this->bufferCount = 0;
+
+            D3D12_DESCRIPTOR_HEAP_DESC rtvDesc = {};
+            rtvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+            rtvDesc.NumDescriptors = sdesc.BufferCount;
+            rtvDesc.NodeMask = 1;
+            if (this->pd3dDevice->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&this->pd3dRtvDescHeap)) != S_OK)
+                return false;
+            this->backBuffers = new BackBuffer[sdesc.BufferCount];
+            this->bufferCount = sdesc.BufferCount;
+            SIZE_T rtvDescriptorSize = this->pd3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+            D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = this->pd3dRtvDescHeap->GetCPUDescriptorHandleForHeapStart();
+            for (UINT i = 0; i < this->bufferCount; i++)
+            {
+                this->backBuffers[i].MainRenderTargetDescriptor = rtvHandle;
+                rtvHandle.ptr += rtvDescriptorSize;
+            }
+        }
+        for (UINT i = 0; i < this->bufferCount; i++)
+        {
+            ID3D12Resource *backBuffer = nullptr;
+            if (this->pSwapChain->GetBuffer(i, IID_PPV_ARGS(&backBuffer)) != S_OK)
+            {
+                this->CleanupRenderTargets();
+                return false;
+            }
+            this->pd3dDevice->CreateRenderTargetView(backBuffer, nullptr, this->backBuffers[i].MainRenderTargetDescriptor);
+            this->backBuffers[i].MainRenderTargetResource = backBuffer;
+        }
+        return true;
+    }
+
+    void Dx12Inbound::CleanupRenderTargets()
+    {
+        for (UINT i = 0; i < this->bufferCount; i++)
+            if (this->backBuffers[i].MainRenderTargetResource != nullptr)
+            {
+                this->backBuffers[i].MainRenderTargetResource->Release();
+                this->backBuffers[i].MainRenderTargetResource = nullptr;
+            }
+    }
+
+    // Returns false when the GPU has not reached `value` within timeoutMs; each calling thread passes its own event.
+    bool Dx12Inbound::WaitForFence(UINT64 value, HANDLE event, DWORD timeoutMs)
+    {
+        if (value == 0 || this->fence->GetCompletedValue() >= value)
+            return true;
+        if (this->fence->SetEventOnCompletion(value, event) != S_OK)
+            return false;
+        ULONGLONG deadline = GetTickCount64() + timeoutMs;
+        while (this->fence->GetCompletedValue() < value)
+        {
+            ULONGLONG now = GetTickCount64();
+            if (now >= deadline)
+                return false;
+            WaitForSingleObject(event, (DWORD)(deadline - now));
+        }
+        return true;
+    }
+
+    void Dx12Inbound::SetCommandQueue(ID3D12CommandQueue *queue)
+    {
+        if (queue == this->pd3dCommandQueue)
+            return;
+        if (queue != nullptr)
+            queue->AddRef();
+        if (this->pd3dCommandQueue != nullptr)
+            this->pd3dCommandQueue->Release();
+        this->pd3dCommandQueue = queue;
+    }
+
+    // Records a DIRECT queue of our device: one submitted inside the game's Present, or the first one after a Present.
+    void Dx12Inbound::OfferFallbackQueue(ID3D12CommandQueue *queue, bool fromPresent)
+    {
+        std::atomic<ID3D12CommandQueue *> &slot = fromPresent ? this->fallbackQueueFromPresent : this->fallbackQueueAfterPresent;
+        if (slot.load() != nullptr || (!fromPresent && !presentSeen))
+            return;
+        if (queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT)
+            return;
+        ID3D12Device *device = nullptr;
+        if (queue->GetDevice(IID_PPV_ARGS(&device)) != S_OK)
+            return;
+        device->Release();
+        if (device != this->pd3dDevice)
+            return;
+        ID3D12CommandQueue *expected = nullptr;
+        queue->AddRef();
+        if (!slot.compare_exchange_strong(expected, queue))
+            queue->Release();
+    }
+
+    void Dx12Inbound::BeforeResize()
+    {
+        this->WaitForFence(this->fenceLastSignaledValue, this->resizeFenceEvent, FENCE_TIMEOUT_MS);
+        this->CleanupRenderTargets();
+    }
+
+    // Adopts ResizeBuffers1's present queue when it is one queue on node 0; otherwise stops drawing.
+    void Dx12Inbound::AfterResize(const UINT *pCreationNodeMask, IUnknown *const *ppPresentQueue)
+    {
+        if (ppPresentQueue != nullptr)
+        {
+            DXGI_SWAP_CHAIN_DESC sdesc = {};
+            bool supported = this->pSwapChain->GetDesc(&sdesc) == S_OK && sdesc.BufferCount > 0 && ppPresentQueue[0] != nullptr;
+            for (UINT i = 0; supported && i < sdesc.BufferCount; i++)
+                supported = ppPresentQueue[i] == ppPresentQueue[0] && (pCreationNodeMask == nullptr || pCreationNodeMask[i] <= 1);
+            ID3D12CommandQueue *queue = nullptr;
+            if (supported && ppPresentQueue[0]->QueryInterface(IID_PPV_ARGS(&queue)) == S_OK)
+            {
+                this->SetCommandQueue(queue);
+                queue->Release();
+                fprintf(stderr, "[pyimgui] dx12 inbound: present queue from ResizeBuffers1\n");
+            }
+            else
+            {
+                this->SetCommandQueue(nullptr);
+                fprintf(stderr, "[pyimgui] dx12 inbound: unsupported ResizeBuffers1 present queues or node masks, drawing disabled\n");
+            }
+            std::fflush(stderr);
+            this->queueFallback = false;
+        }
+        if (!this->CreateRenderTargets())
+        {
+            fprintf(stderr, "[pyimgui] dx12 inbound: failed to recreate render targets after resize, drawing paused\n");
+            std::fflush(stderr);
+        }
     }
 
     void Dx12Inbound::_Update()
     {
+        if (this->queueFallback)
+        {
+            ID3D12CommandQueue *queue = this->fallbackQueueFromPresent.load();
+            if (queue == nullptr)
+                queue = this->fallbackQueueAfterPresent.load();
+            if (queue != nullptr && queue != this->pd3dCommandQueue)
+            {
+                this->SetCommandQueue(queue);
+                fprintf(stderr, "[pyimgui] dx12 inbound: present queue from ExecuteCommandLists fallback\n");
+                std::fflush(stderr);
+            }
+        }
         if (!this->pd3dCommandQueue)
             return;
+        UINT backBufferIdx = this->pSwapChain->GetCurrentBackBufferIndex();
+        if (backBufferIdx >= this->bufferCount || this->backBuffers[backBufferIdx].MainRenderTargetResource == nullptr)
+            return;
+        FrameContext &frameCtx = this->frameContext[this->frameIndex % NUM_FRAMES_IN_FLIGHT];
+        if (!this->WaitForFence(frameCtx.FenceValue, this->fenceEvent, FENCE_TIMEOUT_MS))
+        {
+            if (!fenceTimeoutReported.exchange(true))
+            {
+                fprintf(stderr, "[pyimgui] dx12 inbound: GPU fence wait timed out, skipping frames\n");
+                std::fflush(stderr);
+            }
+            return;
+        }
         // Runs on the game's render thread inside Present, which does not hold the GIL.
         {
             py::gil_scoped_acquire gil;
@@ -750,18 +994,18 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             return;
         }
 
-        FrameContext &currentFrameContext = this->frameContext[this->pSwapChain->GetCurrentBackBufferIndex()];
-        currentFrameContext.CommandAllocator->Reset();
+        BackBuffer &backBuffer = this->backBuffers[backBufferIdx];
+        frameCtx.CommandAllocator->Reset();
         D3D12_RESOURCE_BARRIER barrier = {};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource = currentFrameContext.MainRenderTargetResource;
+        barrier.Transition.pResource = backBuffer.MainRenderTargetResource;
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
         barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
 
-        this->pd3dCommandList->Reset(currentFrameContext.CommandAllocator, nullptr);
+        this->pd3dCommandList->Reset(frameCtx.CommandAllocator, nullptr);
         this->pd3dCommandList->ResourceBarrier(1, &barrier);
-        this->pd3dCommandList->OMSetRenderTargets(1, &currentFrameContext.MainRenderTargetDescriptor, FALSE, nullptr);
+        this->pd3dCommandList->OMSetRenderTargets(1, &backBuffer.MainRenderTargetDescriptor, FALSE, nullptr);
         this->pd3dCommandList->SetDescriptorHeaps(1, &this->pd3dSrvDescHeap);
 
         ImGui::EndFrame();
@@ -773,6 +1017,11 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         this->pd3dCommandList->ResourceBarrier(1, &barrier);
         this->pd3dCommandList->Close();
         this->pd3dCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList *const *)&this->pd3dCommandList);
+        UINT64 fenceValue = this->fenceLastSignaledValue + 1;
+        this->pd3dCommandQueue->Signal(this->fence, fenceValue);
+        this->fenceLastSignaledValue = fenceValue;
+        frameCtx.FenceValue = fenceValue;
+        this->frameIndex++;
 
         if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
         {

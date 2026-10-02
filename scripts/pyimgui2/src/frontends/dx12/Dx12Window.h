@@ -3,6 +3,7 @@
 #include "../common/RenderBase.h"
 #include "../common/Win32Hook.h"
 
+#include <atomic>
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include "imgui_impl_win32.h"
@@ -90,17 +91,30 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         struct FrameContext
         {
             ID3D12CommandAllocator *CommandAllocator = nullptr;
+            UINT64 FenceValue = 0;
+        };
+
+        struct BackBuffer
+        {
             ID3D12Resource *MainRenderTargetResource = nullptr;
             D3D12_CPU_DESCRIPTOR_HANDLE MainRenderTargetDescriptor = {};
         };
 
+        static int const NUM_FRAMES_IN_FLIGHT = 3;
         static inline Dx12Inbound *_instance = nullptr;
         bool isImGuiInitialized = false;
         bool isInLogic = false;
         ID3D12Fence *fence = nullptr;
+        HANDLE fenceEvent = nullptr;
+        HANDLE resizeFenceEvent = nullptr;
         UINT64 fenceLastSignaledValue = 0;
+        FrameContext frameContext[NUM_FRAMES_IN_FLIGHT] = {};
+        UINT frameIndex = 0;
         UINT bufferCount = 0;
-        FrameContext *frameContext = nullptr;
+        BackBuffer *backBuffers = nullptr;
+        std::atomic<bool> queueFallback{false};
+        std::atomic<ID3D12CommandQueue *> fallbackQueueFromPresent{nullptr};
+        std::atomic<ID3D12CommandQueue *> fallbackQueueAfterPresent{nullptr};
 
         Dx12Inbound(std::optional<py::function> renderCallback = std::nullopt);
         ~Dx12Inbound();
@@ -108,6 +122,13 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         void Attach();
         void Detach();
         void InitImGui(IDXGISwapChain3 *pSwapChain);
+        bool CreateRenderTargets();
+        void CleanupRenderTargets();
+        bool WaitForFence(UINT64 value, HANDLE event, DWORD timeoutMs);
+        void SetCommandQueue(ID3D12CommandQueue *queue);
+        void OfferFallbackQueue(ID3D12CommandQueue *queue, bool fromPresent);
+        void BeforeResize();
+        void AfterResize(const UINT *pCreationNodeMask, IUnknown *const *ppPresentQueue);
         void Update();
         void _Update();
     };
