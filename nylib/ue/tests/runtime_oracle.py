@@ -7,6 +7,7 @@ import keyword
 import os
 import re
 
+from .. import model
 from ..names import make_name_valid
 
 _DEFINE_RE = re.compile(r'^#define\s+DUMPER7_ASSERTS_(\S+)')
@@ -14,6 +15,18 @@ _ALIGNOF_RE = re.compile(r'static_assert\(alignof\((\S+)\)\s*==\s*(0[xX][0-9A-Fa
 _SIZEOF_RE = re.compile(r'static_assert\(sizeof\((\S+)\)\s*==\s*(0[xX][0-9A-Fa-f]+)\s*,')
 _OFFSETOF_RE = re.compile(r'static_assert\(offsetof\((\S+?),\s*(\S+?)\)\s*==\s*(0[xX][0-9A-Fa-f]+)\s*,')
 _ENUM_RESERVED = ('name', 'value', 'mro')
+
+_D7_OBJECT_PATH = '/Script/CoreUObject.Object'
+_D7_MEMBER_ALIGN = {  # UEProperty::GetAlignment (StructManager.cpp :99-108, findings §1)
+    'ByteProperty': 1, 'Int8Property': 1, 'BoolProperty': 1, 'MulticastSparseDelegateProperty': 1,
+    'Int16Property': 2, 'UInt16Property': 2,
+    'IntProperty': 4, 'UInt32Property': 4, 'FloatProperty': 4, 'NameProperty': 4,
+    'DelegateProperty': 4, 'WeakObjectProperty': 4, 'LazyObjectProperty': 4,
+    'Int64Property': 8, 'UInt64Property': 8, 'DoubleProperty': 8, 'StrProperty': 8, 'TextProperty': 8,
+    'ObjectProperty': 8, 'ClassProperty': 8, 'SoftObjectProperty': 8, 'SoftClassProperty': 8,
+    'InterfaceProperty': 8, 'ArrayProperty': 8, 'SetProperty': 8, 'MapProperty': 8,
+    'FieldPathProperty': 8, 'MulticastInlineDelegateProperty': 8,
+}  # StructProperty, EnumProperty and OptionalProperty are handled by _d7_prop_align; anything else is 1.
 
 
 @dataclasses.dataclass(frozen=True)
@@ -65,6 +78,43 @@ def parse_assertions(path) -> dict:
                     cur_offsets[m.group(2)] = int(m.group(3), 16)
     flush()
     return records
+
+
+def _d7_prop_align(ptype, by_path: dict) -> int:
+    """One property's Dumper-7 member alignment (`_D7_MEMBER_ALIGN`, plus the three recursive kinds)."""
+    if ptype.kind == 'StructProperty':
+        sup = by_path.get(ptype.struct)
+        return sup.min_alignment if sup is not None else 1
+    if ptype.kind == 'EnumProperty':
+        return _d7_prop_align(ptype.underlying, by_path) if ptype.underlying is not None else 1
+    if ptype.kind == 'OptionalProperty':
+        return _d7_prop_align(ptype.value, by_path) if ptype.value is not None else 1
+    return _D7_MEMBER_ALIGN.get(ptype.kind, 1)
+
+
+def _d7_first(rec, by_path: dict) -> int:
+    """One record's own alignment before the super-chain maximum (StructManager.cpp :111-122)."""
+    hma = max([1] + [_d7_prop_align(p.type, by_path) for p in rec.properties])
+    if isinstance(rec, model.ClassRecord) and rec.super is not None and hma < 8:
+        return 8
+    return max(rec.min_alignment, hma)
+
+
+def d7_alignof(rec, by_path: dict) -> int:
+    """Dumper-7 ea0dab3's emitted alignof for a class/struct record (StructManager::InitAlignmentsAndNames).
+    `by_path` maps every candidate's path to its record; the walk over `rec` and its supers stops at a
+    missing super or a cycle, and `/Script/CoreUObject.Object` is forced to 8 (`:264`)."""
+    seen = set()
+    cur = rec
+    result = 0
+    while cur is not None and cur.path not in seen:
+        seen.add(cur.path)
+        if cur.path == _D7_OBJECT_PATH:
+            result = max(result, 8)
+            break
+        result = max(result, _d7_first(cur, by_path))
+        cur = by_path.get(cur.super) if cur.super is not None else None
+    return result
 
 
 @dataclasses.dataclass(frozen=True)

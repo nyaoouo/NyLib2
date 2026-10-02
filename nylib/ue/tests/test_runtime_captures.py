@@ -17,7 +17,9 @@ from .. import model
 from .. import runtime
 from .. import snapshot as snapshot_mod
 from .. import store
+from ..names import make_name_valid, strip_path
 from ... import ctype
+from . import port
 from . import real
 from . import runtime_oracle as ro
 
@@ -112,6 +114,7 @@ def _check_layouts(ues: dict, records: list, assertions: dict) -> dict:
     for kind, ue in ues.items():
         structs = ro.FloorCheck('O9.1 structs', floor=1000)
         members = ro.FloorCheck('O9.1 member pairs', floor=10000)
+        class_rule = 0
         for rec in candidates:
             oracle = assertions[rec.cpp_name]
             cls = ue.type(rec.path)
@@ -120,15 +123,32 @@ def _check_layouts(ues: dict, records: list, assertions: dict) -> dict:
                 continue
             align = max(rec.min_alignment, 1)
             stride = -(-rec.size // align) * align
-            ok = (oracle.alignof in (None, align)) and (oracle.sizeof in (None, stride))
-            structs.record(ok, f'{rec.cpp_name}: align {align} vs {oracle.alignof}, stride {stride} vs {oracle.sizeof}')
-            for prop in rec.properties:
-                offset = oracle.offsets.get(prop.name)
-                if offset is None:
-                    continue  # bitfields carry no offsetof; a renamed/unpaired member is not counted
+            d7 = ro.d7_alignof(rec, by_path)
+            if oracle.alignof is not None and oracle.alignof != d7:
+                ok = False  # model drift: Dumper-7's rule or our model of it changed
+            elif d7 == align:
+                ok = oracle.sizeof in (None, stride)
+            else:  # ea0dab3's class rule ignored MinAlignment; align must be the predicted exception
+                sup = by_path.get(rec.super)
+                ok = (isinstance(rec, model.ClassRecord) and align > d7 and align & (align - 1) == 0
+                      and (sup is None or align >= max(sup.min_alignment, 1))
+                      and (not rec.path.startswith('/Script/') or rec.size % align == 0)
+                      and oracle.sizeof in (None, -(-rec.size // d7) * d7))
+                class_rule += 1
+            structs.record(ok, f'{rec.cpp_name}: align {align} vs d7 {d7} (oracle {oracle.alignof}), '
+                                f'stride {stride} vs {oracle.sizeof}')
+            # ea0dab3 CollisionManager renames a same-struct name collision's second occurrence
+            # with a trailing _<n> (Struct::StringifyName); pair by name like port.py's dumpspace
+            # check does, so each property pairs with its own offsetof entry, in reflection order.
+            valid_name = make_name_valid(strip_path(rec.name))
+            pairs, _unpaired_o, _unpaired_u = port._ds_pair_by_name(
+                list(oracle.offsets.items()), rec.properties, key_of_our=lambda p: make_name_valid(p.name),
+                candidates_of_oracle=lambda n: port._ds_name_candidates(n, name_suffix=valid_name))
+            for _oname, offset, prop in pairs:
                 members.record(prop.offset == offset, f'{rec.cpp_name}.{prop.name}: {prop.offset:#x} vs {offset:#x}')
         problem = structs.problem() or members.problem()
-        results[kind] = _fail(problem) if problem else _ok(f'structs {structs.checked}, members {members.checked}')
+        results[kind] = _fail(problem) if problem else _ok(
+            f'structs {structs.checked} (class rule {class_rule}), members {members.checked}')
     return results
 
 
