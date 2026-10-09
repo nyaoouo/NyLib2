@@ -41,6 +41,7 @@ nylib/                       importable package
   pyimgui/                   stub package - native `.pyd` built by the user
   structs/                   PDB / DWARF struct helpers
   tkinter_/                  small tkinter extras
+  ue/                        Unreal Engine reflection: dumper, snapshots, runtime API
   utils/                     pip bootstrap, eventloop, threading, web, ...
   vmware_wp/                 VMware Workstation Pro backend (own README.md)
   winapi/                    typed ctypes for kernel32 / ntdll / user32 / ...
@@ -55,10 +56,12 @@ scripts/                     dev-only tools (NOT installed; not in the wheel)
   pyimgui/  pyimgui2/        build scripts for the `pyimgui` C extension
   sig_thief/                 signature thief (PE Authenticode)
   test_inject/               sample injection target
+  ue/                        Dumper-7 oracle build for nylib.ue's capture tests
   windows_driver_policy_manage/  PowerShell cross-cert driver-policy manager
 
 pyproject.toml               package metadata + PyInstaller entry point
 readme.md                    user-facing intro, feature map & examples
+docs/nylib/ue/               usage docs, English with `*.zh.md` reading copies
 license.txt                  GPL v3
 .agent-memory/               local-only notes for AI agents (git-ignored)
 ```
@@ -325,6 +328,47 @@ vr = Vmrun.from_config(VmwareConfig())
 vr.power(r"D:\vm\Win11\Win11.vmx", "start")
 ```
 
+### `nylib.ue`
+
+Unreal Engine (UE 4.25+ / UE5, Windows x64) reflection: dump a game's globals, offsets, types and
+objects into a versioned snapshot folder, then read, optionally write, and call UFunctions on its
+runtime objects from Python. Full usage docs: `docs/nylib/ue/index.md`.
+
+```python
+# needs a running game
+from nylib.ue import dump, Unreal
+
+result = dump('TRIANGLE_STRATEGY-Win64-Shipping.exe')  # writes .\ue_dumps\<game>\<timestamp>\
+with Unreal.attach('TRIANGLE_STRATEGY-Win64-Shipping.exe', dump=result.path) as ue:
+    print(ue.world())
+```
+
+- CLI: `python -m nylib.ue list|probe|dump|export|info` (see `docs/nylib/ue/dump.md`).
+- Read-only by default (`PROCESS_QUERY_INFORMATION | PROCESS_VM_READ`); writes need
+  `Unreal.attach(..., write=True)`; UFunction calls need `calls=`.
+- The dumper's own calls need `allow_calls=` / CLI `--allow-calls [append-string,game-info,text]`:
+  never from a profile, blocked while an unverified offset other than the two FText and the two
+  stem keys is present, what ran is listed in `meta.json`'s `remote_calls` and
+  `DumpResult.remote_calls`, a failing feature degrades to a warning, and a call can crash the
+  game. A calls-enabled attach resolves the two FText offsets first, so `write=True` then needs
+  no `allow_unverified=True` for them.
+- Output root: `out=` / `--out`, else env `NYLIB_UE_OUT`, else `.\ue_dumps` under the current
+  directory (internal/injected mode needs one set explicitly).
+- Snapshot folder: `meta.json`, `offsets.json`, `objects.jsonl`, `fields.jsonl`, `types.jsonl` and
+  `types.idx.json`, plus the exports - see `docs/nylib/ue/dump.md` and `nylib/ue/snapshot.py`.
+- `image` export (dump's default): the game's main module as a PE file whose ImageBase is the
+  runtime base, rebased in IDA to `meta.image.original_image_base` if wanted. A snapshot folder
+  holding it contains the game's code: do not share it.
+- Your own memory backend instead of a process handle: a private `_open_target=` factory on
+  `probe`/`dump`/`Unreal.attach` - see `docs/nylib/ue/dump.md#own-memory-backend`.
+- Tests: stdlib `unittest` in `nylib/ue/tests/` (gitignored, never committed), run with
+  `.\.venv\Scripts\python.exe -m unittest discover -s nylib/ue/tests -t .`. Real-data suites are
+  gated by `NYLIB_UE_CAPTURES`, `NYLIB_UE_EXES` and `NYLIB_UE_R0_ORACLE` (skipped when unset; a set
+  variable naming a missing path fails). Target memory only through `nylib.process` wrappers in
+  `nylib/ue/memory.py` - no `nylib.winapi`, no third-party imports (`nylib/ue/tests/test_hygiene.py`).
+- **WARNING:** `git clean -fdX` / `-fdx` deletes `ue_dumps/`, including captures under
+  `ue_dumps/_captures/`.
+
 ### `nylib.structs`, `nylib.tkinter_`, `nylib.__pyinstaller`
 
 - `structs/` - PDB-derived and ad-hoc binary struct definitions.
@@ -347,8 +391,10 @@ venv.
 | `scripts/breakpoint_demo/` | Manual smoke scripts for `nylib.winutils.breakpoint` (EXEC/WRITE/SOFT BPs, slot exhaustion, new-thread mgmt, debugger backend). Build the backend DLL first (see its README). |
 | `scripts/generate_bind/` | Standalone pybind11 generator used by pyimgui and Mono. |
 | `scripts/ida/` | IDA Pro plugins / loaders (e.g. `loader_hthh_nxo64.py`, `NySigWorker2.py`). Load these from inside IDA. |
+| `scripts/ida/ue_dumper_import.py` | IDAPython importer for `nylib.ue` snapshots: IDA 9.x, stdlib only. See `docs/nylib/ue/ida.md`. |
 | `scripts/sig_thief/` | Steal a valid Authenticode signature from one PE and apply it to another. |
 | `scripts/test_inject/` | Example client/host pair driving `nylib.winutils.python_loader`. |
+| `scripts/ue/` | `build_dumper7.py` builds the pinned Dumper-7 oracle DLL that `nylib.ue`'s capture tests compare with. Needs MSVC; dev only. |
 | `scripts/windows_driver_policy_manage/` | PowerShell (`manage.ps1` / `manage.bat`) to status/remove/restore the Windows cross-cert driver Code-Integrity policy so a cross-signed test driver can load. Run elevated; lowers security and needs a reboot. |
 | `scripts/setup_llvm_dev.py` | Bootstrap an LLVM dev environment via `nylib.winutils.ensure_env`. |
 | `scripts/gen_fa_icons.py` | Regenerate `nylib/imguiutils/icons/fa/{solid,regular}.py` from the upstream Font Awesome metadata. |
