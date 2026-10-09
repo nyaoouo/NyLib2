@@ -502,8 +502,8 @@ def check_append_string(e, transport, *, sample=APPEND_SAMPLE, capacity=APPEND_C
         return _finish('append-string', False, False, 'only FName::ToString was found; it reallocates its out string, so v1 does not call it', t0)
     try:
         names = select_append_sample(e, sample=sample, capacity=capacity)
-    except ValueError:
-        names = ()
+    except ValueError as exc:
+        return _finish('append-string', False, False, f'no names to sample: {exc}', t0)
     if not names:
         return _finish('append-string', False, False, 'no eligible object names to sample', t0)
     append = e.platform.get_module_base() + name_off.AppendNameToString
@@ -567,6 +567,9 @@ def check_append_string(e, transport, *, sample=APPEND_SAMPLE, capacity=APPEND_C
     blocks = ','.join(map(str, sorted({s.block for s in names})))
     wide = sum(any(ch > '\x7f' for ch in s.name) for s in names)
     detail = f'{agree}/{returned} names agree; blocks {blocks}; {wide} wide; {reallocated} reallocated; {len(names) - c.made} not called'
+    if failed is not None:
+        stop = names[returned]
+        detail += f'; stopped at {stop.slot} ({stop.name!r}): {failed}'
     if disagreements:
         slot, ours, theirs = disagreements[0]
         detail += f'; first disagreement {slot}: {ours!r} vs {theirs!r}'
