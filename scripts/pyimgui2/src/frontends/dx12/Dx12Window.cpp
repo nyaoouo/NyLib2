@@ -369,6 +369,13 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         this->fence = nullptr;
         this->fenceEvent = nullptr;
         this->pd3dDevice = nullptr;
+        // Reset synchronization state so a later Serve() does not wait on a stale fence value.
+        this->hSwapChainWaitableObject = nullptr;
+        for (UINT i = 0; i < NUM_FRAMES_IN_FLIGHT; i++)
+            this->frameContext[i].FenceValue = 0;
+        this->frameIndex = 0;
+        this->fenceLastSignaledValue = 0;
+        this->swapChainOccluded = false;
     }
 
     void Dx12Window::CreateRenderTarget()
