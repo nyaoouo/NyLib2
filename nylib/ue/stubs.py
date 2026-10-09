@@ -477,7 +477,10 @@ def _assign_local_names(by_chain: dict, names_of: dict, records_by_path: dict) -
                 for frec in rec.functions.values():
                     if frec.flags & EFunctionFlags.Delegate:
                         continue
-                    outputs = calls.layout(frec).outputs
+                    try:
+                        outputs = calls.layout(frec).outputs
+                    except ValueError:
+                        continue
                     if len(outputs) < 2:
                         continue
                     owner = _owner_path(frec)
