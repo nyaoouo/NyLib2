@@ -1,4 +1,5 @@
 #include "./OverlayCanvas.h"
+#include "./OverlayTarget.h"
 #include "../../OverlayQueries.h"
 
 #include <dcomp.h>
@@ -51,7 +52,7 @@ START_M_IMGUI_IMPL_NAMESPACE
             {
             public:
                 Canvas(RenderBase &self, Config &config, Renderer &renderer, const wchar_t *className)
-                    : self(self), config(config), renderer(renderer), className(className), instance(GetModuleHandleW(nullptr))
+                    : self(self), config(config), renderer(renderer), className(className), instance(GetModuleHandleW(nullptr)), tracker(self, config)
                 {
                 }
 
@@ -107,6 +108,8 @@ START_M_IMGUI_IMPL_NAMESPACE
                     {
                         this->CheckSignals();
                         int monitor = this->config.monitor.load();
+                        this->tracker.Step();
+                        ImGui::SetCurrentContext(this->ctx);
                         this->UpdatePlacement(monitor, first);
                         first = false;
                         this->ResizeSwapChain();
@@ -164,6 +167,7 @@ START_M_IMGUI_IMPL_NAMESPACE
                         ImGui::SetCurrentContext(this->saved);
                         this->contextSaved = false;
                     }
+                    this->tracker.Reset();
                 }
 
             private:
@@ -172,6 +176,7 @@ START_M_IMGUI_IMPL_NAMESPACE
                 Renderer &renderer;
                 const wchar_t *className;
                 HINSTANCE instance;
+                TargetTracker tracker;
 
                 ImGuiContext *saved = nullptr;
                 bool contextSaved = false;
