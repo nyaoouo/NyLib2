@@ -654,10 +654,7 @@ class Invoker:
             if kind in _OBJECT_KINDS and isinstance(value, int) and not isinstance(value, bool):
                 if value <= 0:
                     raise MarshalError(f'{plabel}: {value} is not an object address; pass None for a null object')
-                try:
-                    value = ctx.proxy(value)
-                except MemoryReadError as exc:
-                    raise MarshalError(f'{plabel}: no readable object at {value:#x}: {exc}') from exc
+                value = self._live_object(value, plabel)
             for op in codecs._plan(self._codec(t, size), ctx, address, value, plabel):
                 if callable(op):
                     raise MarshalError(f'{plabel}: {kind} values cannot be laid out in call memory in v1')
@@ -666,6 +663,21 @@ class Invoker:
                 else:
                     a, field_mask, bits = op
                     arena.write(a, bytes(((arena.peek(a, 1)[0] & ~field_mask & 0xFF) | bits,)))
+
+    def _live_object(self, address: int, plabel: str):
+        """The proxy of the object at address, which its GObjects slot must hold and which must not be being destroyed."""
+        ctx = self.ctx
+        e = ctx.e
+        try:
+            i = e.mem.i32(address + e.off.UObject.Index)
+            live = (0 <= i < e.objects.num() and e.objects.get_by_index(i).address == address
+                    and not e.mem.u32(address + e.off.UObject.Flags) & DESTROYED_FLAGS)
+            proxy = ctx.proxy(address) if live else None
+        except MemoryReadError as exc:
+            raise MarshalError(f'{plabel}: no readable object at {address:#x}: {exc}') from exc
+        if not live:
+            raise MarshalError(f'{plabel}: {address:#x} is not a live object')
+        return proxy
 
     def _text_bytes(self, value, size: int, plabel: str) -> bytes:
         ctx = self.ctx
