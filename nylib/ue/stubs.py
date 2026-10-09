@@ -42,14 +42,14 @@ _FIXED_IMPORTS = (
     "from nylib.ue.runtime.types import RawPointer as _RawPointer_, StructView as _StructView_, UObjectProxy as _UObjectProxy_",
 )
 _SUPPORT_MODULE_TEXT = """\
-from typing import Any as _Any_, Generic as _Generic_, Iterator as _Iterator_, TypeVar as _TypeVar_, overload as _overload_
+from typing import Any as _Any_, Generator as _Generator_, Generic as _Generic_, TypeVar as _TypeVar_, overload as _overload_
 from nylib.ue.runtime.codecs import LazyObjectPtr as _LazyObjectPtr_, SoftObjectPtr as _SoftObjectPtr_, WeakObjectPtr as _WeakObjectPtr_
 from nylib.ue.runtime.containers import FixedArrayValue as _FixedArrayValue_, TArrayValue as _TArrayValue_, TMapValue as _TMapValue_, TSetValue as _TSetValue_
 from nylib.ue.runtime.names import FNameValue as _FNameValue_
 
-_T_ = _TypeVar_('_T_')
-_K_ = _TypeVar_('_K_')
-_V_ = _TypeVar_('_V_')
+_T_ = _TypeVar_('_T_', covariant=True)
+_K_ = _TypeVar_('_K_', covariant=True)
+_V_ = _TypeVar_('_V_', covariant=True)
 _D_ = _TypeVar_('_D_')
 
 
@@ -62,7 +62,7 @@ class TArray(_TArrayValue_, _Generic_[_T_]):
     @_overload_
     def __getitem__(self, item: slice) -> list[_T_]: ...
     def __setitem__(self, item: int, value: _Any_) -> None: ...
-    def __iter__(self) -> _Iterator_[_T_]: ...
+    def __iter__(self) -> _Generator_[_T_, _Any_, None]: ...
     def to_list(self) -> list[_T_]: ...
 
 
@@ -72,24 +72,24 @@ class TFixedArray(_FixedArrayValue_, _Generic_[_T_]):
     @_overload_
     def __getitem__(self, item: slice) -> list[_T_]: ...
     def __setitem__(self, item: int, value: _Any_) -> None: ...
-    def __iter__(self) -> _Iterator_[_T_]: ...
+    def __iter__(self) -> _Generator_[_T_, _Any_, None]: ...
     def to_list(self) -> list[_T_]: ...
 
 
 class TSet(_TSetValue_, _Generic_[_T_]):
-    def __iter__(self) -> _Iterator_[_T_]: ...
+    def __iter__(self) -> _Generator_[_T_, _Any_, None]: ...
     def to_list(self) -> list[_T_]: ...
 
 
 class TMap(_TMapValue_, _Generic_[_K_, _V_]):
-    def __iter__(self) -> _Iterator_[_K_]: ...
+    def __iter__(self) -> _Generator_[_K_, _Any_, None]: ...
     def keys(self) -> list[_K_]: ...
     def values(self) -> list[_V_]: ...
     def items(self) -> list[tuple[_K_, _V_]]: ...
     def __getitem__(self, key: _Any_) -> _V_: ...
     def __setitem__(self, key: _Any_, value: _Any_) -> None: ...
     @_overload_
-    def get(self, key: _Any_) -> _V_ | None: ...
+    def get(self, key: _Any_, default: None = None) -> _V_ | None: ...
     @_overload_
     def get(self, key: _Any_, default: _D_) -> _V_ | _D_: ...
 
@@ -1021,13 +1021,17 @@ def _value_class_lines(rec: StructRecord, ctx, records_by_path: dict) -> list[st
         lines.append('    ...')
         return lines
     usable_pairs = [(f, m) for f, m in zip(fields, members) if _usable(f)]
-    if not usable_pairs:
-        lines.append('    ...')
-        return lines
     for f, m in usable_pairs:
         lines.append(f'    {f}: {_out_expr(m, ctx, records_by_path)}')
-    params = ', '.join(f'{f}: {_out_expr(m, ctx, records_by_path)} = ...' for f, m in usable_pairs)
-    lines.append(f'    def _replace(self, *, {params}) -> {name}: ...')
+    lines.append(f'    _fields: {ctx.builtin("tuple")}[{ctx.builtin("str")}, ...]')
+    lines.append(f'    def _asdict(self) -> {ctx.builtin("dict")}[{ctx.builtin("str")}, _Any_]: ...')
+    lines.append(f'    @{ctx.builtin("classmethod")}')
+    lines.append(f'    def _make(cls, iterable: _Any_) -> {name}: ...')
+    if usable_pairs:
+        params = ', '.join(f'{f}: {_out_expr(m, ctx, records_by_path)} = ...' for f, m in usable_pairs)
+        lines.append(f'    def _replace(self, *, {params}) -> {name}: ...')
+    else:
+        lines.append(f'    def _replace(self) -> {name}: ...')
     return lines
 
 
@@ -1059,7 +1063,7 @@ def _result_class_lines(frec: FunctionRecord, rec, ctx, records_by_path: dict) -
         for f, p in zip(fields, outputs):
             if _usable(f):
                 any_usable = True
-                lines.append('    @property')
+                lines.append(f'    @{ctx.builtin("property")}')
                 lines.append(f'    def {f}(self) -> {_out_expr(p, ctx, records_by_path)}: ...')
         if not any_usable:
             lines.append('    ...')
