@@ -20,11 +20,10 @@ The details are in the code and its docstrings; these pages only show how to use
 
 ```python
 # needs a running game
-from nylib.ue import pipeline
-from nylib.ue.runtime import Unreal
+from nylib.ue import dump, Unreal
 
 exe = 'TRIANGLE_STRATEGY-Win64-Shipping.exe'
-result = pipeline.dump(exe)                      # writes .\ue_dumps\<game>\<timestamp>\
+result = dump(exe)                               # writes .\ue_dumps\<game>\<timestamp>\
 print(result.path, result.counts)
 
 with Unreal.attach(exe, dump=result.path) as ue:  # read-only session, types from the snapshot
@@ -43,6 +42,10 @@ The snapshot stays usable without the game: [load it](dump.md#load-a-snapshot), 
 - A call runs `ProcessEvent` on a thread that is not the game thread. It races the game thread and its garbage collector and can crash the game or corrupt its state.
 - Latent functions (those taking an `FLatentActionInfo`) are refused.
 - Offsets the dumper could not verify block writes and calls; the error lists them and how to fix them.
+- A profile's hooks are Python code that the dumper runs (inside the game in internal mode): use only profiles you trust.
+- A call can leave memory in the game: what the engine allocates for out parameters, and the call's own memory when it times out or is interrupted.
+- Ctrl+C during a remote-thread call can crash the game.
+- Injecting Python into a game that already loaded the same `python3XY.dll` crashes it. A missing `python_loader.dll` is built on first use, which needs MSVC and, when it is missing, downloads and installs Visual Studio Build Tools; build it once beforehand with `python -m nylib.winutils.python_loader build`.
 
 ## Tested with
 

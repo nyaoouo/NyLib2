@@ -7,7 +7,7 @@ Every snippet on this page needs a running game.
 ## Attach
 
 ```python
-from nylib.ue.runtime import Unreal
+from nylib.ue import Unreal
 
 ue = Unreal.attach('TRIANGLE_STRATEGY-Win64-Shipping.exe', dump='latest')
 print(ue)          # <Unreal external pid 1234 TRIANGLE_STRATEGY-Win64-Shipping.exe types=snapshot read-only>
@@ -19,6 +19,7 @@ ue.close()         # or: with Unreal.attach(...) as ue:
 - `dump='auto'`: the same, but dumps first when no snapshot matches.
 - `dump=r'<snapshot folder>'`: that snapshot; it must match the running build.
 - Inside the game (a script injected with `python -m nylib.winutils.python_loader inject --process <exe> --script <file>`): `Unreal.attach_current(...)` with the same arguments; `dump='latest'` and `'auto'` need `out=` or `NYLIB_UE_OUT`.
+- Your own memory backend instead of a process handle: [Own memory backend](dump.md#own-memory-backend).
 
 ## Find objects
 
@@ -34,6 +35,8 @@ ue.component(pc.Pawn, '/Script/Engine.SceneComponent')   # first component of th
 ue.enum('/Script/Engine.ENetRole').ROLE_Authority      # an IntEnum
 ue.refresh()                                           # re-read the object list after objects came and went
 ```
+
+With type checking on, the checker does not know a found object's members (the lookups return the base object type); generate stubs and use `typing.cast`, see [stubs.md](stubs.md).
 
 ## Read
 

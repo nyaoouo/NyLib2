@@ -6,22 +6,22 @@
 
 ```python
 # needs a running game
-from nylib.ue import pipeline
+from nylib.ue import probe, dump
 
-report = pipeline.probe('TRIANGLE_STRATEGY-Win64-Shipping.exe')   # finds globals and offsets, writes nothing
+report = probe('TRIANGLE_STRATEGY-Win64-Shipping.exe')   # finds globals and offsets, writes nothing
 print(report.ok, report.stem)
 for v in report.values:
     print(v.name, v.value, v.how, 'UNVERIFIED' if v.unverified else '')
 
-result = pipeline.dump('TRIANGLE_STRATEGY-Win64-Shipping.exe', out=r'D:\ue_dumps')
+result = dump('TRIANGLE_STRATEGY-Win64-Shipping.exe', out=r'D:\ue_dumps')
 print(result.path)            # D:\ue_dumps\TRIANGLE_STRATEGY\20261002-024137
 print(result.counts, result.unverified, result.warnings, result.export_paths)
 ```
 
 - Target: an exe name (`.exe` may be left out), a PID (`int`), or `None` for the current process (inside the game). Two processes with the same name raise `AmbiguousTargetError`; pass the PID.
-- `pipeline.list_targets()` lists the running processes that look like UE games.
+- `nylib.ue.pipeline.list_targets()` lists the running processes that look like UE games.
 - Output: `<out>/<GameName>/<YYYYmmdd-HHMMSS>/`. The root is `out=`, else the environment variable `NYLIB_UE_OUT`, else `.\ue_dumps` under the current directory. Inside the game there is no default: pass `out=` or set `NYLIB_UE_OUT`.
-- Profiles: a TOML file in `<out>/profiles/` whose `[match] exe` is the target is used automatically (or pass `profile=`); `pipeline.write_profile(report)` writes one that pins GObjects and GNames for this build. A profile can never enable calls.
+- Profiles: a TOML file in `<out>/profiles/` whose `[match] exe` is the target is used automatically (or pass `profile=`); `nylib.ue.pipeline.write_profile(report)` writes one that pins GObjects and GNames for this build. A profile can never enable calls.
 
 ## Exports
 
@@ -36,7 +36,9 @@ print(result.counts, result.unverified, result.warnings, result.export_paths)
 
 ```python
 # needs a running game; each call can crash the game
-result = pipeline.dump('TRIANGLE_STRATEGY-Win64-Shipping.exe', allow_calls=('text', 'game-info', 'append-string'))
+from nylib.ue import probe, dump
+
+result = dump('TRIANGLE_STRATEGY-Win64-Shipping.exe', allow_calls=('text', 'game-info', 'append-string'))
 for r in result.remote_calls:
     print(r.feature, r.ran, r.ok, r.detail)
 ```
@@ -49,9 +51,9 @@ for r in result.remote_calls:
 ## Load a snapshot
 
 ```python
-from nylib.ue.snapshot import Snapshot
+from nylib.ue import load_snapshot
 
-with Snapshot.load(r'ue_dumps\TRIANGLE_STRATEGY\20261002-024137') as snap:
+with load_snapshot(r'ue_dumps\TRIANGLE_STRATEGY\20261002-024137') as snap:
     print(snap.stem, len(snap.objects), snap.meta['counts'])
     actor = snap.type('/Script/Engine.Actor')                      # ClassRecord
     print(actor.cpp_name, actor.super, hex(actor.size))
@@ -76,3 +78,24 @@ python -m nylib.ue info <snapshot>
 ```
 
 `list`, `probe` and `dump` need a running game. `--allow-calls` without a value means all three. `--json` (all but `export`) prints machine-readable output. Logs go to `<out>/_logs/<command>.log` unless `--log-file` is given. Exit codes: 0 ok, 1 error, 2 usage, 3 detection failed, 4 cannot open the target or it exited, 130 interrupted.
+
+## Own memory backend
+
+A private `_open_target=` factory lets `probe`, `dump` and `Unreal.attach` use your own `nylib.process.Process`-like object (`read`, `write`, `iter_memory_region`, `virtual_query`, `enum_ldr_data`, `process_id`, `still_alive`) instead of opening the target themselves:
+
+```python
+# needs a running game
+from nylib.process import Process
+from nylib.ue import memory, pipeline, probe
+
+proc = Process.from_name('TRIANGLE_STRATEGY-Win64-Shipping.exe')   # your own handle
+
+def factory(target, *, write, remote_calls, cache_bytes):
+    source = memory.ProcessSource(proc, max_cache_bytes=cache_bytes or pipeline.CACHE_CAP_EXTERNAL)
+    return pipeline.OpenedTarget(source, pipeline.target_info(source, mode='external', pid=proc.process_id),
+                                 process=proc, check_alive=proc.still_alive)
+
+report = probe(proc.process_id, _open_target=factory)
+```
+
+No `closer=`, so you keep your handle; `OpenedTarget.close()` closes it only if you pass one. A `nylib.ctype` accessor becomes a `memory.MemorySource` subclass instead (`_read`, `_readable_ranges`, `regions`, `modules`); the keyword is private and may change.

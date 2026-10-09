@@ -9,38 +9,41 @@
 
 本页的每个代码片段都需要一个正在运行的游戏。
 
-<!-- dt:section id="attach-0" hash="653e50a5a034" -->
-## 附加(Attach)
+<!-- dt:section id="attach-0" hash="f76362eae5c9" -->
+## 附加（Attach）
 
 ```python
-from nylib.ue.runtime import Unreal
+from nylib.ue import Unreal
 
 ue = Unreal.attach('TRIANGLE_STRATEGY-Win64-Shipping.exe', dump='latest')
 print(ue)          # <Unreal external pid 1234 TRIANGLE_STRATEGY-Win64-Shipping.exe types=snapshot read-only>
 ue.close()         # or: with Unreal.attach(...) as ue:
 ```
 
-- `dump=None`(默认):立即探测游戏,并在首次使用时从中读取类型。
-- `dump='latest'`:输出根目录下(见 [Dump](dump.md))由该构建生成的最新快照;若没有则抛出 `DumpMismatchError`。
-- `dump='auto'`:与上面相同,但当没有匹配的快照时会先执行一次 dump。
-- `dump=r'<snapshot folder>'`:使用该快照;它必须与正在运行的构建匹配。
-- 在游戏内部(通过 `python -m nylib.winutils.python_loader inject --process <exe> --script <file>` 注入的脚本):使用参数相同的 `Unreal.attach_current(...)`;`dump='latest'` 和 `'auto'` 需要 `out=` 或 `NYLIB_UE_OUT`。
+- `dump=None`（默认）：现在探测游戏，并在首次使用时从其中读取类型。
+- `dump='latest'`：输出根目录下（见 [Dump](dump.md)）由该构建生成的最新快照；若没有匹配的快照则抛出 `DumpMismatchError`。
+- `dump='auto'`：与上面相同，但如果没有匹配的快照会先执行 dump。
+- `dump=r'<snapshot folder>'`：使用该快照；它必须与正在运行的构建匹配。
+- 在游戏内部（通过 `python -m nylib.winutils.python_loader inject --process <exe> --script <file>` 注入的脚本）：使用 `Unreal.attach_current(...)`，参数相同；`dump='latest'` 和 `'auto'` 需要 `out=` 或 `NYLIB_UE_OUT`。
+- 使用你自己的内存后端而不是进程句柄：[Own memory backend](dump.md#own-memory-backend)。
 
-<!-- dt:section id="find-objects-0" hash="eac64f9559be" -->
+<!-- dt:section id="find-objects-0" hash="e697870e5288" -->
 ## 查找对象
 
 ```python
 world = ue.world()                                     # GWorld
-pc = ue.local_player_controller()                      # world -> game instance -> 第一个本地玩家
-ue.find('/Script/Engine.Default__KismetSystemLibrary')   # 按完整路径查找,未找到则为 None
-ue.find_class('GameEngine')                            # 短名称或路径;多个匹配时抛出 AmbiguousNameError 并列出匹配项
-ue.objects_of('/Script/Engine.GameEngine')             # 该类及其子类的实例,不包含默认对象
-ue.search('*PlayerController*')                        # 对对象名称进行 glob 匹配;class_= 可缩小范围
-ue.cdo('/Script/Engine.KismetSystemLibrary')           # 该类的 class default object
-ue.component(pc.Pawn, '/Script/Engine.SceneComponent')   # 该 actor 拥有的该类的第一个组件
-ue.enum('/Script/Engine.ENetRole').ROLE_Authority      # 一个 IntEnum
-ue.refresh()                                           # 在对象产生或销毁后重新读取对象列表
+pc = ue.local_player_controller()                      # world -> game instance -> first local player
+ue.find('/Script/Engine.Default__KismetSystemLibrary')   # by full path, or None
+ue.find_class('GameEngine')                            # short name or path; AmbiguousNameError lists matches
+ue.objects_of('/Script/Engine.GameEngine')             # instances of a class and its subclasses, no default objects
+ue.search('*PlayerController*')                        # glob over object names; class_= narrows it
+ue.cdo('/Script/Engine.KismetSystemLibrary')           # the class default object
+ue.component(pc.Pawn, '/Script/Engine.SceneComponent')   # first component of that class owned by an actor
+ue.enum('/Script/Engine.ENetRole').ROLE_Authority      # an IntEnum
+ue.refresh()                                           # re-read the object list after objects came and went
 ```
+
+启用类型检查时，检查器并不知道查找到的对象的成员（查找结果返回的是基础对象类型）；请生成 stub 并使用 `typing.cast`，参见 [stubs.md](stubs.md)。
 
 <!-- dt:section id="read-0" hash="fe783bb257f6" -->
 ## 读取

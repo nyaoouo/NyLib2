@@ -22,16 +22,15 @@
 - Python 3.11 或更新版本(`pyproject.toml`);nylib.ue 已在 3.12 和 3.14 下测试过。它不需要任何第三方包。
 - 从本仓库安装 nylib:`pip install -e .`(参见 readme)。
 
-<!-- dt:section id="quick-start-0" hash="a2e57ed94a0f" -->
+<!-- dt:section id="quick-start-0" hash="75b948bf744e" -->
 ## 快速开始
 
 ```python
 # needs a running game
-from nylib.ue import pipeline
-from nylib.ue.runtime import Unreal
+from nylib.ue import dump, Unreal
 
 exe = 'TRIANGLE_STRATEGY-Win64-Shipping.exe'
-result = pipeline.dump(exe)                      # writes .\ue_dumps\<game>\<timestamp>\
+result = dump(exe)                               # writes .\ue_dumps\<game>\<timestamp>\
 print(result.path, result.counts)
 
 with Unreal.attach(exe, dump=result.path) as ue:  # read-only session, types from the snapshot
@@ -40,17 +39,21 @@ with Unreal.attach(exe, dump=result.path) as ue:  # read-only session, types fro
     print(ue.local_player_controller().Pawn)
 ```
 
-快照在没有游戏的情况下依然可用:[加载它](dump.md#load-a-snapshot)、将其导入 [IDA](ida.md)、或由它生成 [stubs](stubs.md)。
+快照在没有游戏运行的情况下依然可用：[加载它](dump.md#load-a-snapshot)、将其导入 [IDA](ida.md)，或用它生成 [stubs](stubs.md)。
 
-<!-- dt:section id="safety-0" hash="be25d986bdfe" -->
+<!-- dt:section id="safety-0" hash="35996b607970" -->
 ## 安全性
 
-- 默认是只读的。dumper 和默认会话以只读权限打开游戏,并且绝不在其中运行代码。
-- 写入需要在 `Unreal.attach` 上设置 `write=True`。它们会直接写入游戏的内存。
-- UFunction 调用需要在 `Unreal.attach` 上设置 `calls=`(游戏外部用 `'remote-thread'`,游戏内部用 `'any-thread'`)。dumper 自身的调用需要 `allow_calls=`(CLI:`--allow-calls`)。
-- 调用会在一个不是游戏线程的线程上运行 `ProcessEvent`。它与游戏线程及其垃圾回收器存在竞争,可能导致游戏崩溃或状态损坏。
-- 延迟函数(带有 `FLatentActionInfo` 参数的函数)会被拒绝。
-- dumper 无法验证的偏移量会阻止写入和调用;错误信息会列出它们以及修复方法。
+- 读取是默认行为。dumper 和默认会话打开游戏时只拥有读取权限,从不在游戏中执行代码。
+- 写入需要在 `Unreal.attach` 上设置 `write=True`。写入会直接作用于游戏的内存。
+- UFunction 调用需要在 `Unreal.attach` 上设置 `calls=`(游戏外用 `'remote-thread'`,游戏内用 `'any-thread'`)。dumper 自身的调用需要 `allow_calls=`(CLI 为 `--allow-calls`)。
+- 调用会在非游戏线程上运行 `ProcessEvent`。它会与游戏线程及其垃圾回收器产生竞争,可能导致游戏崩溃或状态损坏。
+- 潜在函数(接受 `FLatentActionInfo` 的函数)会被拒绝。
+- dumper 无法验证的偏移量会阻止写入和调用;错误信息会列出这些偏移量以及修复方法。
+- Profile 的 hooks 是 dumper 运行的 Python 代码(在内部模式下在游戏内运行):只使用你信任的 profile。
+- 调用可能会在游戏中留下内存:引擎为输出参数分配的内存,以及调用超时或被中断时其自身占用的内存。
+- 在 remote-thread 调用期间按 Ctrl+C 可能导致游戏崩溃。
+- 向已经加载了相同 `python3XY.dll` 的游戏注入 Python 会使其崩溃。缺失的 `python_loader.dll` 会在首次使用时构建,这需要 MSVC,且当 MSVC 缺失时会下载并安装 Visual Studio Build Tools;可以提前用 `python -m nylib.winutils.python_loader build` 构建一次。
 
 <!-- dt:section id="tested-with-0" hash="3b50822537c5" -->
 ## 已测试环境
