@@ -536,18 +536,24 @@ def check_append_string(e, transport, *, sample=APPEND_SAMPLE, capacity=APPEND_C
                     break
                 returned += 1
             agree, reallocated, disagreements = 0, 0, []
-            for s, (this, buf, hdr) in zip(names[:returned], slots):
-                data, num, mx = struct.unpack('<Qii', arena.read(hdr, 16))
-                if data != buf or mx != capacity or num > capacity:
-                    reallocated += 1
-                    continue
-                text = '' if num == 0 else arena.read(buf, (num - 1) * 2).decode('utf-16-le', 'surrogatepass')
-                if (text.casefold() == s.name.casefold()) if fold else text == s.name:
-                    agree += 1
-                else:
-                    disagreements.append((s.slot, s.name, text))
-            if reallocated:
-                c.keep = f'AppendString reallocated {reallocated} of our out strings'
+            checked = returned + (failed is not None and getattr(failed, 'state', None) == 'finished')  # a stopping call that ran
+            try:
+                for i, (s, (this, buf, hdr)) in enumerate(zip(names[:checked], slots)):
+                    data, num, mx = struct.unpack('<Qii', arena.read(hdr, 16))
+                    if data != buf or mx != capacity or not 0 <= num <= capacity:
+                        reallocated += 1
+                        c.keep = f'AppendString reallocated {reallocated} of our out strings'
+                        continue
+                    if i == returned:  # the stopping call's text is never compared
+                        continue
+                    text = '' if num == 0 else arena.read(buf, (num - 1) * 2).decode('utf-16-le', 'surrogatepass')
+                    if (text.casefold() == s.name.casefold()) if fold else text == s.name:
+                        agree += 1
+                    else:
+                        disagreements.append((s.slot, s.name, text))
+            except BaseException as exc:
+                c.keep = c.keep or f'an AppendString out string could not be checked ({type(exc).__name__}), so it may have been reallocated'
+                raise
         except CallError as exc:
             if getattr(exc, 'exited', None):
                 raise
