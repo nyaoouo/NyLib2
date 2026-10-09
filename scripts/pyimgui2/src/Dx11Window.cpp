@@ -659,12 +659,12 @@ START_M_IMGUI_IMPL_NAMESPACE
             .def_static("CreateDeviceObjects", []() { return ImGui_ImplDX11_CreateDeviceObjects(); })
             .def("CreateTexture", &Dx11Render::CreateTexture, py::arg("filename"), py::return_value_policy::take_ownership);
 
-        py::class_<Dx11Window, Dx11Render>(m, "Dx11Window", py::dynamic_attr(), py::module_local())
-            .def(py::init<std::optional<py::function>>(), py::arg("renderCallback") = py::none())
+        py::class_<Dx11Window, Dx11Render> dx11Window(m, "Dx11Window", py::dynamic_attr(), py::module_local());
+        dx11Window.def(py::init<std::optional<py::function>>(), py::arg("renderCallback") = py::none())
             .def_readwrite("ClearColor", &Dx11Window::ClearColor)
             .def("InvalidateDeviceObjects", [](Dx11Window &) { ImGui_ImplDX11_InvalidateDeviceObjects(); })
-            .def("CreateDeviceObjects", [](Dx11Window &) { return ImGui_ImplDX11_CreateDeviceObjects(); })
-            .def("Serve", &Dx11Window::Serve, py::call_guard<py::gil_scoped_release>());
+            .def("CreateDeviceObjects", [](Dx11Window &) { return ImGui_ImplDX11_CreateDeviceObjects(); });
+        Overlay::BindMembers(dx11Window);
 
         py::class_<Dx11Inbound, Dx11Render>(m, "Dx11Inbound", py::dynamic_attr(), py::module_local())
             .def(py::init<std::optional<py::function>>(), py::arg("renderCallback") = py::none())
