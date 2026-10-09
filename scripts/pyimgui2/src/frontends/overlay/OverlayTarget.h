@@ -14,10 +14,11 @@ START_M_IMGUI_IMPL_NAMESPACE
         {
             Monitor,
             Searching,
-            Tracking
+            Tracking,
+            Hidden
         };
 
-        // The Serve thread's side of overlayTarget for one Serve() call: resolution, loss and the found/lost callbacks.
+        // The Serve thread's side of overlayTarget for one Serve() call: resolution, loss, presentability and the found/lost callbacks.
         class TargetTracker
         {
         public:
@@ -50,7 +51,9 @@ START_M_IMGUI_IMPL_NAMESPACE
             DWORD pid = 0;
 
             bool TakeAssignment();
+            bool Tracked() const;
             bool StillTracked() const;
+            bool Presentable() const;
             void Lose();
             bool Resolve();
             uintptr_t CallFinder();

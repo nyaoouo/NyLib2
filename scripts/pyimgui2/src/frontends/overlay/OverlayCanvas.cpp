@@ -110,12 +110,16 @@ START_M_IMGUI_IMPL_NAMESPACE
                         this->tracker.Step();
                         ImGui::SetCurrentContext(this->ctx);
                         this->UpdatePlacement(monitor);
+                        if (this->tracker.State() == TargetState::Hidden)
+                        {
+                            // The callback keeps running at most every 50 ms; nothing is resized or presented.
+                            this->ProduceFrame();
+                            ImGui::Render();
+                            Sleep(50);
+                            continue;
+                        }
                         this->ResizeSwapChain();
-                        this->BeginFrame();
-                        this->FeedMouse();
-                        ClearViewportsFlag();
-                        ImGui::NewFrame();
-                        this->CallRender();
+                        this->ProduceFrame();
                         this->Present();
                     }
                 }
@@ -305,9 +309,11 @@ START_M_IMGUI_IMPL_NAMESPACE
                 // The canvas half of the lifecycle step: placement, visibility, then z-order.
                 void UpdatePlacement(int monitor)
                 {
-                    this->Place(monitor);
-                    this->Show();
-                    // Z-order: every visible state is topmost, which Place and Show already insert at.
+                    bool visible = this->tracker.State() != TargetState::Hidden;
+                    if (visible)
+                        this->Place(monitor);
+                    this->SetVisible(visible);
+                    // Z-order: every visible state is topmost, which Place and SetVisible already insert at.
                 }
 
                 // The target's client rect while tracking, else the monitor's; skipped when the target cannot be read.
@@ -327,12 +333,15 @@ START_M_IMGUI_IMPL_NAMESPACE
                     SetWindowPos(this->canvas, HWND_TOPMOST, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, SWP_NOACTIVATE);
                 }
 
-                void Show()
+                void SetVisible(bool visible)
                 {
-                    if (this->shown)
+                    if (visible == this->shown)
                         return;
-                    SetWindowPos(this->canvas, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-                    this->shown = true;
+                    if (visible)
+                        SetWindowPos(this->canvas, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                    else
+                        SetWindowPos(this->canvas, nullptr, 0, 0, 0, 0, SWP_HIDEWINDOW | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER);
+                    this->shown = visible;
                 }
 
                 void ResizeSwapChain()
@@ -360,6 +369,16 @@ START_M_IMGUI_IMPL_NAMESPACE
                     ImGui::SetCurrentContext(this->ctx);
                     this->renderer.NewFrame();
                     ImGui_ImplWin32_NewFrame();
+                }
+
+                // BeginFrame through the render callback.
+                void ProduceFrame()
+                {
+                    this->BeginFrame();
+                    this->FeedMouse();
+                    ClearViewportsFlag();
+                    ImGui::NewFrame();
+                    this->CallRender();
                 }
 
                 // Feeds the cursor even when the canvas is neither foreground nor under the cursor.

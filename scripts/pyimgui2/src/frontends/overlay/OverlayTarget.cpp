@@ -1,5 +1,6 @@
 #include "./OverlayTarget.h"
 
+#include <dwmapi.h>
 #include <utility>
 
 START_M_IMGUI_IMPL_NAMESPACE
@@ -20,11 +21,13 @@ START_M_IMGUI_IMPL_NAMESPACE
             bool lost = false;
             if (this->config.targetGeneration.load() != this->seenGeneration)
                 lost = this->TakeAssignment();
-            if (!lost && this->state == TargetState::Tracking && !this->StillTracked())
+            if (!lost && this->Tracked() && !this->StillTracked())
                 lost = true;
             if (lost)
                 this->Lose();
             bool found = !lost && this->state == TargetState::Searching && this->Resolve();
+            if (!lost && this->Tracked())
+                this->state = this->Presentable() ? TargetState::Tracking : TargetState::Hidden;
             if (lost)
                 this->FireCallback(this->config.targetLostCallback, this->config.targetLostArgc, "targetLostCallback");
             if (found)
@@ -78,7 +81,7 @@ START_M_IMGUI_IMPL_NAMESPACE
             }
             bool same = this->kind == previousKind && (this->kind == TargetKind::Fixed ? this->bits == previousBits : this->snapshot == previous);
             Py_XDECREF(previous);
-            if (this->state == TargetState::Tracking)
+            if (this->Tracked())
             {
                 if (same)
                     return false;
@@ -90,10 +93,38 @@ START_M_IMGUI_IMPL_NAMESPACE
             return false;
         }
 
+        bool TargetTracker::Tracked() const
+        {
+            return this->state == TargetState::Tracking || this->state == TargetState::Hidden;
+        }
+
         bool TargetTracker::StillTracked() const
         {
             DWORD owner = 0;
             return IsWindow(this->hwnd) && GetWindowThreadProcessId(this->hwnd, &owner) != 0 && owner == this->pid;
+        }
+
+        // No window from the target up to its root is iconic, the target is visible, the root is not cloaked
+        // and the client area is not empty.
+        bool TargetTracker::Presentable() const
+        {
+            HWND root = GetAncestor(this->hwnd, GA_ROOT);
+            if (root == nullptr)
+                return false;
+            for (HWND window = this->hwnd; window != nullptr; window = GetAncestor(window, GA_PARENT))
+            {
+                if (IsIconic(window))
+                    return false;
+                if (window == root)
+                    break;
+            }
+            if (!IsWindowVisible(this->hwnd))
+                return false;
+            DWORD cloaked = 0;
+            if (SUCCEEDED(DwmGetWindowAttribute(root, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked != 0)
+                return false;
+            RECT client{};
+            return GetClientRect(this->hwnd, &client) && client.right > client.left && client.bottom > client.top;
         }
 
         void TargetTracker::Lose()
