@@ -371,9 +371,9 @@ class Invoker:
         else:
             reason = f'its state is unknown ({exc})'
         text = f'{label}: {reason}; {n:#x} bytes of call memory stay in the game, with any memory the engine allocated'
-        if self._policy() == 'remote-thread':
-            text += " and the call's code block"
-        if state != 'finished':
+        if state == 'unknown':
+            if self._policy() == 'remote-thread':
+                text += " and the call's code block"
             text += ', and the call may still be running'
         _log.warning(text)
 
