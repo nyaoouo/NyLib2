@@ -472,7 +472,7 @@ def _owner_cpp_name(owner_path: str, record, records_by_path: dict) -> str:
     return make_name_valid(owner_path.rpartition('.')[2])
 
 
-def _assign_local_names(by_chain: dict, names_of: dict, records_by_path: dict) -> None:
+def _assign_local_names(by_chain: dict, names_of: dict, records_by_path: dict, predefined) -> None:
     """Assign local stub names (types, value classes, result classes) for every module, in emission order."""
     for mod in by_chain.values():
         names = names_of[mod.modpath]
@@ -480,18 +480,17 @@ def _assign_local_names(by_chain: dict, names_of: dict, records_by_path: dict) -
 
         def claim(base: str) -> str:
             name, n = base, 2
-            while name.casefold() in used:
+            while name in used:
                 name = f'{base}_{n}'
                 n += 1
-            used.add(name.casefold())
+            used.add(name)
             return name
 
         order = _emission_order(mod.types)
         for rec in order:
             if isinstance(rec, ClassRecord):
-                for frec in rec.functions.values():
-                    if frec.flags & EFunctionFlags.Delegate:
-                        continue
+                _, _, functions = _declare_record(rec, predefined)
+                for _attr, frec in functions:
                     try:
                         outputs = calls.layout(frec).outputs
                     except ValueError:
@@ -750,19 +749,6 @@ def _is_refused_arg(p: PropertyRecord, ctx, records_by_path: dict) -> bool:
     return _arg_expr(p, ctx, records_by_path) == '_Never_'
 
 
-def _own_taken(rec, predefined_name: str | None) -> set[str]:
-    """Names this record's OWN body binds (properties, functions including delegates, the predefined member)."""
-    taken: set[str] = set()
-    for p in rec.properties:
-        taken.update(member_names(p.name))
-    if isinstance(rec, ClassRecord):
-        for f in rec.functions.values():
-            taken.update(member_names(f.name))
-    if predefined_name is not None:
-        taken.add(predefined_name)
-    return taken
-
-
 # --------------------------------------------------------------------------- predefined members
 
 
@@ -789,6 +775,48 @@ def _declared_predefined(rec, predefined) -> tuple[str, int, str] | None:
     if name in own_names:
         return None
     return name, value, key
+
+
+def _declare_record(rec, predefined) -> tuple[list, tuple[str, int, str] | None, list]:
+    """(declared properties, declared predefined member, declared functions) rec's body actually binds,
+    in body order (RT6's own binding order): each wins the first usable name member_names gives it that
+    no earlier member already bound. A delegate signature is never declared, but still reserves its names,
+    as does a member whose names are all taken, so a later member cannot reuse them either."""
+    taken: set[str] = set()
+    properties: list[tuple[str, PropertyRecord]] = []
+    for p in rec.properties:
+        names = member_names(p.name)
+        n = next((x for x in names if usable(x) and x not in taken), None)
+        if n is not None:
+            properties.append((n, p))
+        taken.update(names)
+    declared_pre = None
+    pre = _declared_predefined(rec, predefined)
+    if pre is not None:
+        pname, pvalue, pkey = pre
+        declared_pre = (pname, pvalue, pkey)
+        taken.add(pname)
+    functions: list[tuple[str, FunctionRecord]] = []
+    if isinstance(rec, ClassRecord):
+        for f in rec.functions.values():
+            names = member_names(f.name)
+            if f.flags & EFunctionFlags.Delegate:
+                taken.update(names)
+                continue
+            attr = next((x for x in names if usable(x) and x not in taken), None)
+            if attr is not None:
+                functions.append((attr, f))
+            taken.update(names)
+    return properties, declared_pre, functions
+
+
+def _own_taken(declared) -> set[str]:
+    """The exact names rec's body's own lines bind (the class-scope alias rule, ## Module text)."""
+    properties, declared_pre, functions = declared
+    names = {n for n, _ in properties} | {a for a, _ in functions}
+    if declared_pre is not None:
+        names.add(declared_pre[0])
+    return names
 
 
 # --------------------------------------------------------------------------- classes, structs, enums
@@ -914,12 +942,7 @@ def _member_comment(p: PropertyRecord, get_expr: str) -> str:
     return base + suffix
 
 
-def _own_predefined_name(rec, predefined) -> str | None:
-    hit = _declared_predefined(rec, predefined)
-    return hit[0] if hit is not None else None
-
-
-def _type_block(rec, ctx, records_by_path: dict, predefined) -> list[str]:
+def _type_block(rec, ctx, records_by_path: dict, declared) -> list[str]:
     header = _class_header(rec, ctx)
     if isinstance(rec, EnumRecord):
         return [header] + _enum_body(rec)
@@ -928,33 +951,17 @@ def _type_block(rec, ctx, records_by_path: dict, predefined) -> list[str]:
         members = _flat_members(rec.path, records_by_path)
         if members == []:
             header = header + '  # no reflected members: passed as zero bytes'
+    properties, declared_pre, functions = declared
     member_lines: list[tuple[str, str]] = []
-    taken: set[str] = set()
-    for p in rec.properties:
-        names = member_names(p.name)
-        n = next((x for x in names if usable(x) and x not in taken), None)
-        if n is not None:
-            get = _get_expr(p, ctx, records_by_path)
-            member_lines.append((f'    {n}: {get}', _member_comment(p, get)))
-        taken.update(names)
-    pre = _declared_predefined(rec, predefined)
-    if pre is not None:
-        pname, pvalue, pkey = pre
+    for n, p in properties:
+        get = _get_expr(p, ctx, records_by_path)
+        member_lines.append((f'    {n}: {get}', _member_comment(p, get)))
+    if declared_pre is not None:
+        pname, pvalue, pkey = declared_pre
         expr = _predefined_type_expr(rec.path, ctx)
         member_lines.append((f'    {pname}: {expr}', f'0x{pvalue:X}, not reflected ({pkey})'))
-        taken.add(pname)
     aligned = _comment_column(member_lines)
-    func_lines = []
-    if is_class:
-        for frec in rec.functions.values():
-            names = member_names(frec.name)
-            if frec.flags & EFunctionFlags.Delegate:
-                taken.update(names)
-                continue
-            attr = next((x for x in names if usable(x) and x not in taken), None)
-            if attr is not None:
-                func_lines.append(_signature_line(attr, frec, ctx, records_by_path))
-            taken.update(names)
+    func_lines = [_signature_line(attr, frec, ctx, records_by_path) for attr, frec in functions]
     body = aligned + func_lines
     if not body:
         body = ['    ...']
@@ -1038,10 +1045,9 @@ def _result_class_lines(frec: FunctionRecord, rec, ctx, records_by_path: dict) -
 # --------------------------------------------------------------------------- module assembly
 
 
-def _module_declared_functions(rec: ClassRecord):
-    for frec in rec.functions.values():
-        if frec.flags & EFunctionFlags.Delegate:
-            continue
+def _module_declared_functions(declared):
+    _, _, functions = declared
+    for _attr, frec in functions:
         try:
             n = len(calls.layout(frec).outputs)
         except ValueError:
@@ -1056,15 +1062,13 @@ def _collect_module_refs(mod, records_by_path: dict, predefined, written: dict) 
         _class_header(rec, ctx)
         if isinstance(rec, EnumRecord):
             continue
-        for p in rec.properties:
+        properties, declared_pre, functions = _declare_record(rec, predefined)
+        for _n, p in properties:
             _get_expr(p, ctx, records_by_path)
-        pre = _declared_predefined(rec, predefined)
-        if pre is not None:
+        if declared_pre is not None:
             _predefined_type_expr(rec.path, ctx)
         if isinstance(rec, ClassRecord):
-            for frec in rec.functions.values():
-                if frec.flags & EFunctionFlags.Delegate:
-                    continue
+            for _attr, frec in functions:
                 try:
                     lay = calls.layout(frec)
                 except ValueError:
@@ -1082,14 +1086,14 @@ def _collect_module_refs(mod, records_by_path: dict, predefined, written: dict) 
 
 
 def _assign_imports(mod, names: _Names, refs: set, written: dict, by_chain: dict, names_of: dict) -> None:
-    used = {n.casefold() for n in names.local.values()}
+    used = set(names.local.values())
 
     def claim(base: str) -> str:
         name, n = base, 2
-        while name.casefold() in used:
+        while name in used:
             name = f'{base}_{n}'
             n += 1
-        used.add(name.casefold())
+        used.add(name)
         return name
 
     for n in SUPPORT_NAMES:
@@ -1126,21 +1130,23 @@ def _render_module(mod, header_text: str, written: dict, names_of: dict, by_chai
     order = _emission_order(mod.types)
     for rec in order:
         if isinstance(rec, ClassRecord):
-            for frec in _module_declared_functions(rec):
+            declared = _declare_record(rec, predefined)
+            for frec in _module_declared_functions(declared):
                 fields, outputs = _result_fields(frec, rec, records_by_path)
                 ctx.own_taken = set(fields)
                 blocks.append(_result_class_lines(frec, rec, ctx, records_by_path))
-            ctx.own_taken = _own_taken(rec, _own_predefined_name(rec, predefined))
-            blocks.append(_type_block(rec, ctx, records_by_path, predefined))
+            ctx.own_taken = _own_taken(declared)
+            blocks.append(_type_block(rec, ctx, records_by_path, declared))
         elif isinstance(rec, StructRecord):
-            ctx.own_taken = _own_taken(rec, _own_predefined_name(rec, predefined))
-            blocks.append(_type_block(rec, ctx, records_by_path, predefined))
+            declared = _declare_record(rec, predefined)
+            ctx.own_taken = _own_taken(declared)
+            blocks.append(_type_block(rec, ctx, records_by_path, declared))
             fields, _members = _value_fields(rec, records_by_path)
             ctx.own_taken = set(fields) if fields else set()
             blocks.append(_value_class_lines(rec, ctx, records_by_path))
         else:
             ctx.own_taken = set()
-            blocks.append(_type_block(rec, ctx, records_by_path, predefined))
+            blocks.append(_type_block(rec, ctx, records_by_path, None))
     if names.aliases_needed:
         parts.append('\n'.join(f'_{n}_ = {n}' for n in sorted(names.aliases_needed)))
     body_text = '\n\n\n'.join('\n'.join(b) for b in blocks)
@@ -1339,7 +1345,7 @@ def _write_stubs_impl(records: list, source_text: str, skipped: int, predefined,
     for r in records:
         by_package[r.package].types.append(r)
     names_of = {mod.modpath: _Names(mod.modpath, mod.folder) for mod in by_chain.values()}
-    _assign_local_names(by_chain, names_of, records_by_path)
+    _assign_local_names(by_chain, names_of, records_by_path, predefined)
     written: dict[str, tuple] = {}
     for mod in by_chain.values():
         names = names_of[mod.modpath]
