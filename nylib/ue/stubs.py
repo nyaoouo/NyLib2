@@ -1237,8 +1237,10 @@ def _clean(out: str, written_norm: set) -> int:
     removed = 0
     failures: list[str] = []
     out_norm = os.path.normcase(os.path.abspath(out))
-    for dirpath, dirnames, filenames in os.walk(out, topdown=False):
-        for fn in list(filenames):
+    emptied: set[str] = set()
+    for dirpath, dirnames, filenames in os.walk(out):
+        dirnames[:] = [d for d in dirnames if not _is_link(os.path.join(dirpath, d))]  # top-down, so links are never entered
+        for fn in filenames:
             fp = os.path.join(dirpath, fn)
             if _is_link(fp) or not fn.endswith('.pyi'):
                 continue
@@ -1249,15 +1251,21 @@ def _clean(out: str, written_norm: set) -> int:
             try:
                 os.remove(fp)
                 removed += 1
+                emptied.add(os.path.abspath(dirpath))
             except OSError:
                 failures.append(fp)
-        if os.path.normcase(os.path.abspath(dirpath)) == out_norm:
-            continue
-        try:
-            if not os.listdir(dirpath):
-                os.rmdir(dirpath)
-        except OSError:
-            failures.append(dirpath)
+    gone: set[str] = set()
+    for folder in sorted(emptied, key=len, reverse=True):
+        while os.path.normcase(folder) != out_norm and folder not in gone:
+            try:
+                if os.listdir(folder):
+                    break
+                os.rmdir(folder)
+            except OSError:
+                failures.append(folder)
+                break
+            gone.add(folder)
+            folder = os.path.dirname(folder)
     if failures:
         _log.warning('%d stale files or folders could not be removed (first: %s)', len(failures), failures[0])
     return removed
