@@ -24,19 +24,104 @@ class PdbInfo:
     is_pe32_plus: bool     # True for PE32+ (x64), False for PE32 (x86)
 
 
+@dataclass(frozen=True)
+class SectionHeader:
+    name: str              # latin-1, NUL-stripped, <= 8 bytes
+    virtual_address: int
+    virtual_size: int
+    characteristics: int
+    raw_size: int = 0
+    raw_pointer: int = 0
+
+
+@dataclass(frozen=True)
+class ImageInfo:
+    machine: int           # COFF Machine
+    time_date_stamp: int
+    image_base: int
+    size_of_image: int
+    is_pe32_plus: bool
+    sections: tuple[SectionHeader, ...]
+
+
 def _read_at(data: bytes, off: int, fmt: str):
     return struct.unpack_from(fmt, data, off)
 
 
-def _rva_to_offset(rva: int, sections: list[tuple[int, int, int, int]]) -> int | None:
-    """Map an RVA to a file offset using the section table.
-
-    sections: list of (virtual_address, virtual_size, raw_offset, raw_size).
-    """
-    for va, vs, raw_off, raw_sz in sections:
-        if va <= rva < va + max(vs, raw_sz):
-            return raw_off + (rva - va)
+def _rva_to_offset(rva: int, sections) -> int | None:
+    """Map an RVA to a file offset using the section table."""
+    for s in sections:
+        if s.virtual_address <= rva < s.virtual_address + max(s.virtual_size, s.raw_size):
+            return s.raw_pointer + (rva - s.virtual_address)
     return None
+
+
+def _parse_coff_and_optional_header(data: bytes):
+    """Shared COFF + Optional Header parse (no section table, no debug directory).
+
+    Returns (machine, time_date_stamp, image_base, size_of_image, is_pe32_plus,
+    num_rva, data_dir_off, sect_off, num_sections).
+    """
+    (e_lfanew,) = _read_at(data, 0x3C, '<I')
+    if data[e_lfanew:e_lfanew + 4] != b'PE\x00\x00':
+        raise ValueError(f'PE signature missing at {e_lfanew:#x}')
+
+    # COFF file header: 20 bytes after "PE\0\0"
+    coff_off = e_lfanew + 4
+    (machine, num_sections, time_date_stamp, _psym, _nsym, size_of_opt_hdr, _chars) = _read_at(
+        data, coff_off, '<HHIIIHH')
+    opt_off = coff_off + 20
+
+    (magic,) = _read_at(data, opt_off, '<H')
+    if magic == 0x20B:
+        is_pe32_plus = True
+    elif magic == 0x10B:
+        is_pe32_plus = False
+    else:
+        raise ValueError(f'unknown OptionalHeader magic {magic:#x}')
+
+    if is_pe32_plus:
+        # PE32+: ImageBase at +24 (u64); SizeOfImage at +56 (u32);
+        # NumberOfRvaAndSizes at +108; DataDirectory starts at +112.
+        (image_base,) = _read_at(data, opt_off + 24, '<Q')
+        (size_of_image,) = _read_at(data, opt_off + 56, '<I')
+        (num_rva,) = _read_at(data, opt_off + 108, '<I')
+        data_dir_off = opt_off + 112
+    else:
+        # PE32: ImageBase at +28 (u32); SizeOfImage at +56 (u32);
+        # NumberOfRvaAndSizes at +92; DataDirectory starts at +96.
+        (image_base,) = _read_at(data, opt_off + 28, '<I')
+        (size_of_image,) = _read_at(data, opt_off + 56, '<I')
+        (num_rva,) = _read_at(data, opt_off + 92, '<I')
+        data_dir_off = opt_off + 96
+
+    sect_off = opt_off + size_of_opt_hdr
+    return (machine, time_date_stamp, image_base, size_of_image, is_pe32_plus,
+            num_rva, data_dir_off, sect_off, num_sections)
+
+
+def _parse_sections(data: bytes, sect_off: int, num_sections: int, full: bool = True) -> list[SectionHeader]:
+    """Parse the section table.
+
+    ``full=False`` reads only the bytes master's ``read_debug_info`` ever read
+    (``vs, va, raw_sz, raw_off`` at ``+8``), to keep that path's struct.error
+    offsets/messages unchanged; name and characteristics come back empty/0.
+    """
+    sections = []
+    for i in range(num_sections):
+        so = sect_off + i * 40
+        # Name(8), VirtualSize, VirtualAddress, SizeOfRawData, PointerToRawData, ...
+        if full:
+            (name_raw,) = _read_at(data, so, '<8s')
+            vs, va, raw_sz, raw_off = _read_at(data, so + 8, '<IIII')
+            (chars,) = _read_at(data, so + 36, '<I')
+            name = name_raw.split(b'\0', 1)[0].decode('latin-1')
+        else:
+            vs, va, raw_sz, raw_off = _read_at(data, so + 8, '<IIII')
+            name, chars = '', 0
+        sections.append(SectionHeader(name=name, virtual_address=va, virtual_size=vs,
+                                       characteristics=chars, raw_size=raw_sz, raw_pointer=raw_off))
+    return sections
 
 
 def _basename(raw_name: str) -> str:
@@ -83,38 +168,8 @@ def read_debug_info(pe_path) -> PdbInfo:
 
 
 def _parse_debug_info(data: bytes) -> PdbInfo:
-    (e_lfanew,) = _read_at(data, 0x3C, '<I')
-    if data[e_lfanew:e_lfanew + 4] != b'PE\x00\x00':
-        raise ValueError(f'PE signature missing at {e_lfanew:#x}')
-
-    # COFF file header: 20 bytes after "PE\0\0"
-    coff_off = e_lfanew + 4
-    (machine, num_sections, _tds, _psym, _nsym, size_of_opt_hdr, _chars) = _read_at(
-        data, coff_off, '<HHIIIHH')
-    opt_off = coff_off + 20
-
-    (magic,) = _read_at(data, opt_off, '<H')
-    if magic == 0x20B:
-        is_pe32_plus = True
-    elif magic == 0x10B:
-        is_pe32_plus = False
-    else:
-        raise ValueError(f'unknown OptionalHeader magic {magic:#x}')
-
-    if is_pe32_plus:
-        # PE32+: ImageBase at +24 (u64); SizeOfImage at +56 (u32);
-        # NumberOfRvaAndSizes at +108; DataDirectory starts at +112.
-        (image_base,) = _read_at(data, opt_off + 24, '<Q')
-        (size_of_image,) = _read_at(data, opt_off + 56, '<I')
-        (num_rva,) = _read_at(data, opt_off + 108, '<I')
-        data_dir_off = opt_off + 112
-    else:
-        # PE32: ImageBase at +28 (u32); SizeOfImage at +56 (u32);
-        # NumberOfRvaAndSizes at +92; DataDirectory starts at +96.
-        (image_base,) = _read_at(data, opt_off + 28, '<I')
-        (size_of_image,) = _read_at(data, opt_off + 56, '<I')
-        (num_rva,) = _read_at(data, opt_off + 92, '<I')
-        data_dir_off = opt_off + 96
+    (_machine, _tds, image_base, size_of_image, is_pe32_plus,
+     num_rva, data_dir_off, sect_off, num_sections) = _parse_coff_and_optional_header(data)
 
     if num_rva <= IMAGE_DIRECTORY_ENTRY_DEBUG:
         raise ValueError('PE has no Debug Directory')
@@ -124,14 +179,8 @@ def _parse_debug_info(data: bytes) -> PdbInfo:
     if dbg_rva == 0 or dbg_size == 0:
         raise ValueError('empty Debug Directory')
 
-    # Section table follows the optional header.
-    sect_off = opt_off + size_of_opt_hdr
-    sections = []
-    for i in range(num_sections):
-        so = sect_off + i * 40
-        # Name(8), VirtualSize, VirtualAddress, SizeOfRawData, PointerToRawData, ...
-        vs, va, raw_sz, raw_off = _read_at(data, so + 8, '<IIII')
-        sections.append((va, vs, raw_off, raw_sz))
+    # Section table follows the optional header; master never read name/characteristics here.
+    sections = _parse_sections(data, sect_off, num_sections, full=False)
 
     dbg_off = _rva_to_offset(dbg_rva, sections)
     if dbg_off is None:
@@ -181,6 +230,28 @@ def _parse_debug_info(data: bytes) -> PdbInfo:
         )
 
     raise ValueError('no CodeView (RSDS) debug entry found')
+
+
+def read_image_info(pe_path) -> ImageInfo:
+    """Parse ``pe_path`` and return its COFF machine/base and section layout.
+
+    Unlike ``read_debug_info``, no Debug Directory or RSDS entry is required.
+    """
+    p = Path(pe_path)
+    data = p.read_bytes()
+
+    if len(data) < 0x40 or data[:2] != b'MZ':
+        raise ValueError(f'not a PE image: {p}')
+
+    try:
+        (machine, time_date_stamp, image_base, size_of_image, is_pe32_plus,
+         _num_rva, _data_dir_off, sect_off, num_sections) = _parse_coff_and_optional_header(data)
+        sections = _parse_sections(data, sect_off, num_sections)
+    except struct.error as e:
+        raise ValueError(f'malformed PE headers in {p}: {e}') from e
+
+    return ImageInfo(machine=machine, time_date_stamp=time_date_stamp, image_base=image_base,
+                      size_of_image=size_of_image, is_pe32_plus=is_pe32_plus, sections=tuple(sections))
 
 
 def read_load_address(pe_path) -> int:
