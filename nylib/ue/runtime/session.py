@@ -344,14 +344,15 @@ class Unreal:
             if calls is not None:
                 ctx.invoker = Invoker(ctx, _calls.open_transport(calls, opened.process))
                 if calls == 'remote-thread':
-                    _info.info("calls='remote-thread': each UFunction call runs ProcessEvent on a new thread in the game "
-                               "(CreateRemoteThread), not the game thread, so it races the game thread and its garbage collector; its "
-                               "parameters are reserved there; engine-allocated out values are not freed; UE skips some calls without "
-                               'a sign, so zero outputs can mean "not run"')
+                    _info.warning("calls='remote-thread': each UFunction call runs ProcessEvent on a new thread in the game "
+                                  "(CreateRemoteThread), not the game thread, so it races the game thread and its garbage collector and "
+                                  "can crash or corrupt the game; its parameters are reserved there; engine-allocated out values are not "
+                                  'freed; UE skips some calls without a sign, so zero outputs can mean "not run"')
                 else:
-                    _info.info("calls='any-thread': UFunction calls run ProcessEvent on the calling thread, not the game thread, so "
-                               "they race the game thread and its garbage collector; engine-allocated out values are not freed; UE "
-                               'skips some calls without a sign, so zero outputs can mean "not run"')
+                    _info.warning("calls='any-thread': UFunction calls run ProcessEvent on the calling thread, not the game thread, so "
+                                  "they race the game thread and its garbage collector and can crash or corrupt the game; "
+                                  "engine-allocated out values are not freed; UE skips some calls without a sign, so zero outputs can "
+                                  'mean "not run"')
 
             if snap is not None:
                 _info.info('snapshot %s matches the running build (pe %s / %s)', os.path.basename(snap.path), hexs(info.pe_timestamp),
