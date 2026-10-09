@@ -37,6 +37,7 @@ _OBJECT_KINDS = frozenset({'ObjectProperty', 'ClassProperty', 'WeakObjectPropert
 _NET_KINDS = (('NetServer', EFunctionFlags.NetServer), ('NetClient', EFunctionFlags.NetClient), ('NetMulticast', EFunctionFlags.NetMulticast))
 _ASCII_FOLD = str.maketrans('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
 _STRUCT_CHAIN_BOUND = 256
+_LATENT_INFO = '/Script/Engine.LatentActionInfo'
 
 
 def _fold(text: str) -> str:
@@ -298,6 +299,10 @@ class Invoker:
         label = _label(fn)
         if fn.flags & EFunctionFlags.Delegate:
             raise self._refusal(label, f'{label} is a delegate signature, not a callable function', 'delegate')
+        if any(p.type.kind == 'StructProperty' and p.type.struct == _LATENT_INFO and calls.param_role(p) != 'local' for p in fn.params):
+            raise self._refusal(label, f'{label} is a latent function (it takes an FLatentActionInfo): the game keeps pointers into its call '
+                                       f'memory after it returns and writes through them later, so v1 cannot call it; nothing was called',
+                                'latent')
         bound = self.bind(obj, fn, args, kwargs)
         self.check(fn)
         receiver, address = self.resolve(obj, fn)
