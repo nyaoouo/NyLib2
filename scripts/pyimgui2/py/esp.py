@@ -1,4 +1,4 @@
-"""World-to-screen projection for ESP overlays drawn with ImGui."""
+"""World-to-screen projection and drawing helpers for ESP overlays drawn with ImGui."""
 import collections.abc
 import math
 import operator
@@ -9,6 +9,8 @@ from . import imgui
 __all__ = [
     'Convention', 'UE', 'Unity', 'Camera', 'Rgba',
     'get_canvas_draw_list', 'get_canvas_rect', 'world_to_screen', 'project_bounds',
+    'add_corner_box', 'add_health_bar', 'add_text_outlined', 'add_line_3d', 'add_lines_3d',
+    'add_box_3d', 'add_circle_3d', 'add_bones',
 ]
 
 _FLT_MAX = 3.4028234663852886e38
@@ -21,6 +23,7 @@ _NAN3 = (math.nan, math.nan, math.nan)
 _MISSING = object()
 _PLAIN_SEQ = (tuple, list)
 _NOT_POINTS = (str, bytes, bytearray, collections.abc.Mapping)
+_OUTLINE_OFFSETS = ((-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0))
 
 
 def _is_ndarray(value):
@@ -299,7 +302,10 @@ class Camera:
 
     @staticmethod
     def from_matrix(view_proj, convention: Convention = UE, view_rect=None) -> 'Camera':
-        """Camera from a 4x4 view-projection matrix given as 16 numbers in memory order."""
+        """Camera from a 4x4 view-projection matrix given as 16 numbers in memory order.
+
+        The convention's forward/right/up still set the world axes of add_box_3d's yaw and add_circle_3d's plane.
+        """
         m = _read_matrix16(view_proj)
         _check_convention(convention)
         pos, size, wmin = _read_view_rect(view_rect, 1e-6)
@@ -431,3 +437,187 @@ def project_bounds(cam: Camera, origin, extent) -> 'tuple[imgui.ImVec2, imgui.Im
         return None
     xs, ys = [pt[0] for pt in pts], [pt[1] for pt in pts]
     return imgui.ImVec2(min(xs), min(ys)), imgui.ImVec2(max(xs), max(ys))
+
+
+def _read_style(value, name):
+    v = float(value)
+    if not _in_range(v):
+        raise ValueError(f'{name} must be finite and within float32 range, got {v}')
+    return v
+
+
+def _read_pair(value, kind):
+    try:
+        n = None if isinstance(value, _NOT_POINTS) else len(value)
+    except TypeError:
+        n = None
+    if n == 2:
+        try:
+            return value[0], value[1]
+        except TypeError:
+            pass
+    got = type(value).__name__ if n is None else f'{n} items'
+    raise ValueError(f'{kind} must be a sequence of 2 items, got {got}')
+
+
+def _read_box2(pmin, pmax):
+    """Normalized (x0, y0, x1, y1) of two corners, or None when one is not finite or beyond float32."""
+    (ax, ay), (bx, by) = _read_vec2(pmin), _read_vec2(pmax)
+    if not all(_in_range(v) for v in (ax, ay, bx, by)):
+        return None
+    return min(ax, bx), min(ay, by), max(ax, bx), max(ay, by)
+
+
+def add_corner_box(dl, pmin, pmax, col: int, thickness: float = 1.0, length: float = 0.25) -> None:
+    """Draw the corners of a 2D box as inward arms of length (clamped to [0, 0.5]) times each side."""
+    col = _read_col(col)
+    thickness = _read_style(thickness, 'thickness')
+    length = min(max(_read_style(length, 'length'), 0.0), 0.5)
+    box = _read_box2(pmin, pmax)
+    if box is None or length == 0.0:
+        return
+    x0, y0, x1, y1 = box
+    dx, dy = (x1 - x0) * length, (y1 - y0) * length
+    for x, y, sx, sy in ((x0, y0, 1, 1), (x1, y0, -1, 1), (x0, y1, 1, -1), (x1, y1, -1, -1)):
+        dl.AddLine(imgui.ImVec2(x, y), imgui.ImVec2(x + sx * dx, y), col, thickness)
+        dl.AddLine(imgui.ImVec2(x, y), imgui.ImVec2(x, y + sy * dy), col, thickness)
+
+
+def add_health_bar(dl, pmin, pmax, fraction: float, width: float = 3.0) -> None:
+    """Draw a vertical bar 2 px left of a 2D box, filled bottom-up from red (empty) to green (full)."""
+    width = _read_style(width, 'width')
+    if not width > 0.0:
+        raise ValueError(f'width must be positive, got {width}')
+    f = float(fraction)
+    f = 0.0 if math.isnan(f) else min(max(f, 0.0), 1.0)
+    box = _read_box2(pmin, pmax)
+    if box is None:
+        return
+    x0, y0, _, y1 = box
+    left, right = x0 - 2.0 - width, x0 - 2.0
+    dl.AddRectFilled(imgui.ImVec2(left, y0), imgui.ImVec2(right, y1), Rgba(0, 0, 0, 160))
+    if f > 0.0:
+        fill = Rgba(int(255 * (1 - f) + 0.5), int(255 * f + 0.5), 0)
+        dl.AddRectFilled(imgui.ImVec2(left, y1 - (y1 - y0) * f), imgui.ImVec2(right, y1), fill)
+
+
+def _text_size(text):
+    if imgui.GetCurrentContext() is None or imgui.GetFont() is None:
+        raise RuntimeError('measuring text needs a current ImGui context and font (after the first NewFrame)')
+    return imgui.CalcTextSize(text)
+
+
+def add_text_outlined(dl, pos, col: int, text: str, outline: 'int | None' = 0xFF000000, pivot=(0.0, 0.0)) -> None:
+    """Draw text with a 1 px outline so that pos lands at pivot, given as fractions of the text size.
+
+    A non-zero pivot measures the text, which needs a current context after its first NewFrame.
+    """
+    col = _read_col(col)
+    if outline is not None:
+        outline = _read_col(outline, 'outline')
+    if not isinstance(text, str):
+        raise TypeError(f'text must be a str, got {type(text).__name__}')
+    px, py = _read_vec2(pivot)
+    if not (_in_range(px) and _in_range(py)):
+        raise ValueError(f'pivot must be finite and within float32 range, got {(px, py)}')
+    x, y = _read_vec2(pos)
+    if not text:
+        return
+    if px != 0.0 or py != 0.0:
+        size = _text_size(text)
+        x, y = x - size.x * px, y - size.y * py
+    if not (_in_range(x) and _in_range(y)):
+        return
+    if outline is not None:
+        for ox, oy in _OUTLINE_OFFSETS:
+            dl.AddText(imgui.ImVec2(x + ox, y + oy), outline, text)
+    dl.AddText(imgui.ImVec2(x, y), col, text)
+
+
+def _line_style(cam, col, thickness):
+    _check_camera(cam)
+    return _read_col(col), _read_style(thickness, 'thickness')
+
+
+def _draw_segment(dl, wmin, ha, hb, col, thickness):
+    s = _project_segment(wmin, ha, hb)
+    if s is not None:
+        dl.AddLine(imgui.ImVec2(*s[0]), imgui.ImVec2(*s[1]), col, thickness)
+
+
+def add_line_3d(dl, cam: Camera, a, b, col: int, thickness: float = 1.0) -> None:
+    """Draw the part of world segment a-b in front of the camera."""
+    col, thickness = _line_style(cam, col, thickness)
+    ha, hb = cam._homogeneous(*_read_vec3(a)), cam._homogeneous(*_read_vec3(b))
+    _draw_segment(dl, cam._wmin, ha, hb, col, thickness)
+
+
+def add_lines_3d(dl, cam: Camera, segments, col: int, thickness: float = 1.0) -> None:
+    """Draw each (a, b) world segment as add_line_3d.
+
+    A malformed segment raises when reached; the segments before it stay drawn.
+    """
+    col, thickness = _line_style(cam, col, thickness)
+    h, wmin = cam._homogeneous, cam._wmin
+    for seg in segments:
+        a, b = _read_pair(seg, 'segment')
+        _draw_segment(dl, wmin, h(*_read_vec3(a)), h(*_read_vec3(b)), col, thickness)
+
+
+def add_box_3d(dl, cam: Camera, origin, extent, col: int, thickness: float = 1.0, yaw: float = 0.0) -> None:
+    """Draw the 12 edges of the box origin +- extent, turned yaw degrees about the convention's up axis."""
+    col, thickness = _line_style(cam, col, thickness)
+    o = _read_vec3(origin)
+    ext = _read_vec3(extent)
+    yaw = float(yaw)
+    if not math.isfinite(yaw):
+        return
+    f0, r0, u0 = cam._convention._basis
+    cos, sin = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
+    hs = []
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            for sz in (-1, 1):
+                v = (sx * ext[0], sy * ext[1], sz * ext[2])
+                a = v[0] * f0[0] + v[1] * f0[1] + v[2] * f0[2]
+                b = v[0] * r0[0] + v[1] * r0[1] + v[2] * r0[2]
+                c = v[0] * u0[0] + v[1] * u0[1] + v[2] * u0[2]
+                d = _combine(a * cos - b * sin, a * sin + b * cos, c, f0, r0, u0)
+                hs.append(cam._homogeneous(o[0] + d[0], o[1] + d[1], o[2] + d[2]))
+    for i in range(8):
+        for bit in (4, 2, 1):
+            if i | bit != i:
+                _draw_segment(dl, cam._wmin, hs[i], hs[i | bit], col, thickness)
+
+
+def add_circle_3d(dl, cam: Camera, center, radius: float, col: int, segments: int = 32,
+                  thickness: float = 1.0) -> None:
+    """Draw a circle as segments edges about center, in the plane of the convention's forward and right axes."""
+    col, thickness = _line_style(cam, col, thickness)
+    n = operator.index(segments)
+    if n < 3:
+        raise ValueError(f'segments must be >= 3, got {n}')
+    cx, cy, cz = _read_vec3(center)
+    rho = abs(float(radius))
+    if not (math.isfinite(rho) and rho > 0.0):
+        return
+    basis = cam._convention._basis
+    hs = []
+    for i in range(n):
+        t = 2 * math.pi * i / n
+        d = _combine(math.cos(t), math.sin(t), 0.0, *basis)
+        hs.append(cam._homogeneous(cx + rho * d[0], cy + rho * d[1], cz + rho * d[2]))
+    for i in range(n):
+        _draw_segment(dl, cam._wmin, hs[i], hs[(i + 1) % n], col, thickness)
+
+
+def add_bones(dl, cam: Camera, joints, pairs, col: int, thickness: float = 1.0) -> None:
+    """Draw joints[k1]-joints[k2] as add_line_3d for each (k1, k2) in pairs.
+
+    A malformed pair or a failed joint lookup raises when reached; the bones before it stay drawn.
+    """
+    col, thickness = _line_style(cam, col, thickness)
+    h, wmin = cam._homogeneous, cam._wmin
+    for pair in pairs:
+        k1, k2 = _read_pair(pair, 'bone pair')
+        _draw_segment(dl, wmin, h(*_read_vec3(joints[k1])), h(*_read_vec3(joints[k2])), col, thickness)
