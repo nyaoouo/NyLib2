@@ -691,7 +691,7 @@ def _type_expr(mode: str, t, ctx, records_by_path: dict | None = None) -> str:
         return f'{s} | {tup} | {ctx.builtin("dict")}[{ctx.builtin("str")}, _Any_]'
     if kind == 'ArrayProperty':
         if t.inner is None:
-            return '_Any_'
+            return '_Never_' if mode == 'arg' else '_Any_'
         if mode == 'get':
             return f'{ctx.support("TArray")}[{_type_expr("get", t.inner, ctx, records_by_path)}]'
         if mode == 'out':
@@ -701,7 +701,7 @@ def _type_expr(mode: str, t, ctx, records_by_path: dict | None = None) -> str:
         return f'_Sequence_[{a}] | {ctx.support("TArray")}[{g}]'
     if kind == 'SetProperty':
         if t.element is None:
-            return '_Any_'
+            return '_Never_' if mode == 'arg' else '_Any_'
         if mode == 'get':
             return f'{ctx.support("TSet")}[{_type_expr("get", t.element, ctx, records_by_path)}]'
         if mode == 'out':
@@ -711,7 +711,7 @@ def _type_expr(mode: str, t, ctx, records_by_path: dict | None = None) -> str:
         return f'_Collection_[{a}] | {ctx.support("TSet")}[{g}]'
     if kind == 'MapProperty':
         if t.key is None or t.value is None:
-            return '_Any_'
+            return '_Never_' if mode == 'arg' else '_Any_'
         if mode == 'get':
             return f'{ctx.support("TMap")}[{_type_expr("get", t.key, ctx, records_by_path)}, {_type_expr("get", t.value, ctx, records_by_path)}]'
         if mode == 'out':
@@ -719,7 +719,7 @@ def _type_expr(mode: str, t, ctx, records_by_path: dict | None = None) -> str:
         ka, va = _type_expr('arg', t.key, ctx, records_by_path), _type_expr('arg', t.value, ctx, records_by_path)
         kg, vg = _type_expr('get', t.key, ctx, records_by_path), _type_expr('get', t.value, ctx, records_by_path)
         return f'_Mapping_[{ka}, {va}] | {ctx.support("TMap")}[{kg}, {vg}]'
-    return '_Any_'  # OptionalProperty, unknown
+    return '_Never_' if mode == 'arg' else '_Any_'  # OptionalProperty, unknown
 
 
 def _get_expr(p: PropertyRecord, ctx, records_by_path: dict) -> str:
@@ -747,6 +747,19 @@ def _arg_expr(p: PropertyRecord, ctx, records_by_path: dict, ref: bool = False) 
 
 def _is_refused_arg(p: PropertyRecord, ctx, records_by_path: dict) -> bool:
     return _arg_expr(p, ctx, records_by_path) == '_Never_'
+
+
+def _holds_text(t, records_by_path: dict, depth: int = 0) -> bool:
+    """Whether t is a TextProperty, or a written struct holding one through struct members only (RT10's
+    Invoker._holds_text): bind refuses such a ref input left out, encode refuses any value for it."""
+    if t.kind == 'TextProperty':
+        return True
+    if t.kind != 'StructProperty' or t.struct is None or depth > 32:
+        return False
+    flat = _flat_members(t.struct, records_by_path)
+    if flat is None:
+        return False
+    return any(_holds_text(m.type, records_by_path, depth + 1) for m in flat)
 
 
 # --------------------------------------------------------------------------- predefined members
@@ -903,6 +916,9 @@ def _signature_line(attr: str, frec: FunctionRecord, ctx, records_by_path: dict)
     if any(p.type.kind == 'StructProperty' and p.type.struct == '/Script/Engine.LatentActionInfo' and calls.param_role(p) != 'local'
            for p in frec.params):
         comments.append('refused in v1: latent function')
+    ref_text = next((p for p in lay.inputs if calls.param_role(p) == 'ref' and _holds_text(p.type, records_by_path)), None)
+    if ref_text is not None:
+        comments.append(f'refused in v1: ref input {ref_text.name!r} holds an FText')
     for p in lay.outputs:
         if _output_unreadable(p.type, records_by_path):
             comments.append(f'refused in v1: output {p.name!r} cannot be read')
