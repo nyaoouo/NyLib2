@@ -31,6 +31,19 @@ PYBIND11_MODULE(_ny_pdb, m) {
         .def_property_readonly("offset", &DiaSymbol::offset)
         .def_property_readonly("sym_index_id", &DiaSymbol::sym_index_id)
         .def_property_readonly("type", &DiaSymbol::type)
+        .def_property_readonly("is_function", &DiaSymbol::is_function,
+                               "PublicSymbol only: True iff DIA flags the public as a function "
+                               "(always False on Function symbols).")
+        .def_property_readonly("is_code", &DiaSymbol::is_code,
+                               "PublicSymbol only: True iff DIA flags the public as code "
+                               "(always False on Function symbols).")
+        .def_property_readonly("data_kind", &DiaSymbol::data_kind,
+                               "DataKind for a Data symbol; None otherwise.")
+        .def_property_readonly("is_static", &DiaSymbol::is_static,
+                               "Function symbols only: True iff file-static "
+                               "(always False on Data; use data_kind).")
+        .def_property_readonly("location_type", &DiaSymbol::location_type,
+                               "LocationType value; LocIsNull (0) unless available.")
         .def("__repr__", [](const DiaSymbol& s){
             return "<Symbol " + s.tag() + " '" + s.name() + "' rva=0x" +
                    [&]{ char b[16]; std::snprintf(b, sizeof(b), "%x", s.rva()); return std::string(b); }() + ">";
@@ -39,7 +52,8 @@ PYBIND11_MODULE(_ny_pdb, m) {
     member_cls
         .def_property_readonly("name", &DiaMember::name)
         .def_property_readonly("offset", &DiaMember::offset,
-                               "Byte offset for UDT fields; -1 for statics/enums.")
+                               "Byte offset of a data field, bitfield storage unit or "
+                               "non-virtual base class; -1 otherwise.")
         .def_property_readonly("bit_offset", &DiaMember::bit_offset,
                                "Bit offset for bitfields; -1 otherwise.")
         .def_property_readonly("bit_length", &DiaMember::bit_length,
@@ -49,6 +63,8 @@ PYBIND11_MODULE(_ny_pdb, m) {
         .def_property_readonly("type", &DiaMember::type)
         .def_property_readonly("tag_id", &DiaMember::tag_id)
         .def_property_readonly("tag", &DiaMember::tag)
+        .def_property_readonly("access", &DiaMember::access,
+                               "CV_access_e (1 private / 2 protected / 3 public); 0 unless available.")
         .def("__repr__", [](const DiaMember& m){
             return "<Member '" + m.name() + "' @ " +
                    std::to_string(m.offset()) + ">";
@@ -64,12 +80,24 @@ PYBIND11_MODULE(_ny_pdb, m) {
         .def_property_readonly("base_kind", &DiaType::base_kind,
                                "BasicType value for a basetype; None otherwise.")
         .def_property_readonly("sym_index_id", &DiaType::sym_index_id)
+        .def_property_readonly("udt_kind", &DiaType::udt_kind,
+                               "UdtKind (0 struct/1 class/2 union/3 interface) for a UDT; None otherwise.")
+        .def_property_readonly("is_const", &DiaType::is_const, "True iff this type is const-qualified.")
+        .def_property_readonly("is_volatile", &DiaType::is_volatile, "True iff this type is volatile-qualified.")
+        .def_property_readonly("is_unaligned", &DiaType::is_unaligned, "True iff this type is unaligned-qualified.")
+        .def_property_readonly("is_reference", &DiaType::is_reference, "True iff this type is a reference.")
+        .def_property_readonly("is_rvalue_reference", &DiaType::is_rvalue_reference,
+                               "True iff this type is an rvalue reference.")
+        .def_property_readonly("calling_convention", &DiaType::calling_convention,
+                               "CV_call_e for a FunctionType; None otherwise.")
         .def("members", &DiaType::members,
              "Iterate ALL children (UDT fields, enum constants, bases, methods, statics).")
         .def("fields", &DiaType::fields,
              "Instance data members only (excludes bases/methods/statics).")
         .def("base_type", &DiaType::base_type,
              "Underlying type for Typedef/Pointer/Array; None otherwise.")
+        .def("class_parent", &DiaType::class_parent,
+             "Enclosing class for a member type (e.g. a pointer-to-member); None otherwise.")
         .def("__repr__", [](const DiaType& t){
             return "<Type " + t.tag() + " '" + t.name() + "' size=" +
                    std::to_string(t.size()) + ">";

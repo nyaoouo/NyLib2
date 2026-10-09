@@ -189,7 +189,7 @@ LONG get_offset_(IDiaSymbol* s) {
 
 DWORD get_locationtype_(IDiaSymbol* s) {
     DWORD v = LocIsNull;
-    if (s) s->get_locationType(&v);
+    if (s && s->get_locationType(&v) != S_OK) v = LocIsNull;
     return v;
 }
 
@@ -257,6 +257,30 @@ std::optional<DiaType> DiaSymbol::type() const {
     return DiaType{owner, std::move(t)};
 }
 
+bool DiaSymbol::is_function() const {
+    BOOL b = FALSE;
+    return sym && sym->get_function(&b) == S_OK && b;
+}
+
+bool DiaSymbol::is_code() const {
+    BOOL b = FALSE;
+    return sym && sym->get_code(&b) == S_OK && b;
+}
+
+std::optional<DWORD> DiaSymbol::data_kind() const {
+    if (tag_id() != SymTagData) return std::nullopt;
+    DWORD k = DataIsUnknown;
+    if (sym && SUCCEEDED(sym->get_dataKind(&k))) return k;
+    return std::nullopt;
+}
+
+bool DiaSymbol::is_static() const {
+    BOOL b = FALSE;
+    return sym && sym->get_isStatic(&b) == S_OK && b;
+}
+
+DWORD DiaSymbol::location_type() const { return get_locationtype_(sym); }
+
 ULONGLONG DiaSymbol::va(bool require_load_addr) const {
     ULONGLONG va = 0;
     if (sym) sym->get_virtualAddress(&va);
@@ -275,13 +299,23 @@ DWORD DiaMember::tag_id() const { return get_tag_(sym); }
 std::string DiaMember::tag() const { return sym_tag_name(tag_id()); }
 
 LONG DiaMember::offset() const {
-    // For UDT members with LocIsThisRel this is the byte offset from the
-    // enclosing this pointer. LocIsBitField members share that same
-    // storage-unit byte offset. Static members / enums use other location
-    // types - report -1 as "no meaningful byte offset".
+    // Byte offset of a field, bitfield unit or non-virtual base; -1 otherwise.
+    if (tag_id() == SymTagBaseClass) {
+        BOOL is_virtual = FALSE;
+        if (sym && sym->get_virtualBaseClass(&is_virtual) == S_OK && is_virtual) return -1;
+        LONG v = 0;
+        if (sym && sym->get_offset(&v) == S_OK) return v;
+        return -1;
+    }
     DWORD loc = get_locationtype_(sym);
     if (loc == LocIsThisRel || loc == LocIsBitField) return get_offset_(sym);
     return -1;
+}
+
+DWORD DiaMember::access() const {
+    DWORD v = 0;
+    if (sym && sym->get_access(&v) == S_OK) return v;
+    return 0;
 }
 
 LONG DiaMember::bit_offset() const {
@@ -395,6 +429,51 @@ std::vector<DiaMember> DiaType::fields() const {
 std::optional<DiaType> DiaType::base_type() const {
     CComPtr<IDiaSymbol> t;
     if (FAILED(sym->get_type(&t)) || !t) return std::nullopt;
+    return DiaType{owner, std::move(t)};
+}
+
+std::optional<DWORD> DiaType::udt_kind() const {
+    if (tag_id() != SymTagUDT) return std::nullopt;
+    DWORD k = 0;
+    if (sym && SUCCEEDED(sym->get_udtKind(&k))) return k;
+    return std::nullopt;
+}
+
+bool DiaType::is_const() const {
+    BOOL b = FALSE;
+    return sym && sym->get_constType(&b) == S_OK && b;
+}
+
+bool DiaType::is_volatile() const {
+    BOOL b = FALSE;
+    return sym && sym->get_volatileType(&b) == S_OK && b;
+}
+
+bool DiaType::is_unaligned() const {
+    BOOL b = FALSE;
+    return sym && sym->get_unalignedType(&b) == S_OK && b;
+}
+
+bool DiaType::is_reference() const {
+    BOOL b = FALSE;
+    return sym && sym->get_reference(&b) == S_OK && b;
+}
+
+bool DiaType::is_rvalue_reference() const {
+    BOOL b = FALSE;
+    return sym && sym->get_RValueReference(&b) == S_OK && b;
+}
+
+std::optional<DWORD> DiaType::calling_convention() const {
+    if (tag_id() != SymTagFunctionType) return std::nullopt;
+    DWORD cc = 0;
+    if (sym && SUCCEEDED(sym->get_callingConvention(&cc))) return cc;
+    return std::nullopt;
+}
+
+std::optional<DiaType> DiaType::class_parent() const {
+    CComPtr<IDiaSymbol> t;
+    if (!sym || sym->get_classParent(&t) != S_OK || !t) return std::nullopt;
     return DiaType{owner, std::move(t)};
 }
 

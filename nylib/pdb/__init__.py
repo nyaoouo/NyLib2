@@ -21,6 +21,12 @@ Usage::
 
     # non-msdl server, e.g. Mozilla builds - opt in explicitly, never the default:
     sess = Session.from_pe(pe_path, symsrv_url=symbol_server.MOZILLA_SYMBOLS)
+
+    # PDB -> JSON model -> PDB (writer and model are pure Python; export needs the extension):
+    from nylib.pdb import export, model, writer
+    res = export.export_pdb('C:/out/app.pdb')         # res.model, res.dropped
+    res.model.save('C:/out/app.json'); m = model.PdbModel.load('C:/out/app.json')
+    writer.write_pdb(m, pe_path='C:/out/app.exe')     # binds to the PE's RSDS; writes beside it
 """
 import enum
 import importlib
