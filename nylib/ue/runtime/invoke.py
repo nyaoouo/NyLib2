@@ -49,7 +49,10 @@ def _align(value: int, alignment: int) -> int:
 
 
 def _owner_path(fn) -> str:
-    return fn.path.rpartition(':')[0]
+    """The path of the class listing fn (fn.path without ':' + fn.name), or '' when fn.path does not end with it."""
+    if not fn.name or not fn.path.endswith(':' + fn.name):
+        return ''
+    return fn.path[:-(len(fn.name) + 1)]
 
 
 def _label(fn) -> str:
