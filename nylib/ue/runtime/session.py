@@ -235,11 +235,26 @@ def _pre_gate(keys, *, write, calls, allow_unverified, source, target) -> bool:
     return True
 
 
+def _policy_warning(calls: str) -> None:
+    """The calls session's crash-risk WARNING, logged once per session before its first call."""
+    if calls == 'remote-thread':
+        _info.warning("calls='remote-thread': each UFunction call runs ProcessEvent on a new thread in the game "
+                      "(CreateRemoteThread), not the game thread, so it races the game thread and its garbage collector and "
+                      "can crash or corrupt the game; its parameters are reserved there; engine-allocated out values are not "
+                      'freed; UE skips some calls without a sign, so zero outputs can mean "not run"')
+    else:
+        _info.warning("calls='any-thread': UFunction calls run ProcessEvent on the calling thread, not the game thread, so "
+                      "they race the game thread and its garbage collector and can crash or corrupt the game; "
+                      "engine-allocated out values are not freed; UE skips some calls without a sign, so zero outputs can "
+                      'mean "not run"')
+
+
 def _text_call(keys, engine, opened, *, function, write, calls, allow_unverified, source, target) -> tuple:
     """Resolve the FText offsets with one Conv_StringToText call, then gate the keys still unverified; returns (keys, transport)."""
     transport = text_call = None
     if engine.off.InSDK.ProcessEvent.PEIndex > 0:
         transport = _calls.open_transport(calls, opened.process)
+        _policy_warning(calls)
         r = _remote_calls.resolve_text_offsets(engine, transport, function=function)
         text_call = None if r.ok else r.detail
     after = tuple(k for k in keys if not (k in _TEXT_KEYS and engine.provenance.get(k, '').startswith(_KNOWN_LABELS)))
@@ -392,16 +407,8 @@ class Unreal:
 
             if calls is not None:
                 ctx.invoker = Invoker(ctx, transport or _calls.open_transport(calls, opened.process))
-                if calls == 'remote-thread':
-                    _info.warning("calls='remote-thread': each UFunction call runs ProcessEvent on a new thread in the game "
-                                  "(CreateRemoteThread), not the game thread, so it races the game thread and its garbage collector and "
-                                  "can crash or corrupt the game; its parameters are reserved there; engine-allocated out values are not "
-                                  'freed; UE skips some calls without a sign, so zero outputs can mean "not run"')
-                else:
-                    _info.warning("calls='any-thread': UFunction calls run ProcessEvent on the calling thread, not the game thread, so "
-                                  "they race the game thread and its garbage collector and can crash or corrupt the game; "
-                                  "engine-allocated out values are not freed; UE skips some calls without a sign, so zero outputs can "
-                                  'mean "not run"')
+                if transport is None:  # else _text_call logged it before the attach-time call
+                    _policy_warning(calls)
 
             if snap is not None:
                 _info.info('snapshot %s matches the running build (pe %s / %s)', os.path.basename(snap.path), hexs(info.pe_timestamp),
