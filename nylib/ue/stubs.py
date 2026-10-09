@@ -214,9 +214,19 @@ def _predefined_live(ctx):
     return get
 
 
-def _records_of_live(ctx) -> tuple[list, int]:
+def _records_of_live(ctx) -> tuple[list, int, str | None, str | None]:
+    """(records, skipped, first_skip_sample, last_skip_sample); samples are None while skipped is 0."""
     table = ctx.index.table()
     emitted, records, skipped = set(), [], 0
+    first_skip: str | None = None
+    last_skip: str | None = None
+
+    def note(path, index, reason):
+        nonlocal first_skip, last_skip
+        sample = f'{path}: {reason}' if path is not None else f'object {index}: {reason}'
+        if first_skip is None:
+            first_skip = sample
+        last_skip = sample
     try:
         for rec in table:
             if rec.flags & EObjectFlags.ClassDefaultObject:
@@ -226,6 +236,7 @@ def _records_of_live(ctx) -> tuple[list, int]:
                 cf = ctx.index.cast_flags(cls)
             except MemoryReadError:
                 skipped += 1
+                note(None, rec.index, 'class not readable')
                 continue
             if cf & _CF.Class:
                 want = 'class'
@@ -241,9 +252,11 @@ def _records_of_live(ctx) -> tuple[list, int]:
                 path = table.path(rec.index)
             except ValueError:
                 skipped += 1
+                note(None, rec.index, 'path not readable')
                 continue
             if path in emitted:
                 skipped += 1
+                note(path, rec.index, 'a second object of this path')
                 continue
             if ctx.closed:
                 raise SessionError('the session was closed during write_stubs')
@@ -251,9 +264,11 @@ def _records_of_live(ctx) -> tuple[list, int]:
                 record = ctx.types.type(path, rec.address)
             except MemoryReadError:
                 skipped += 1
+                note(path, rec.index, 'type not readable')
                 continue
             if record is None or record.kind != want:
                 skipped += 1
+                note(path, rec.index, f'not a{"n" if want == "enum" else ""} {want}')
                 continue
             emitted.add(path)
             records.append(record)
@@ -265,24 +280,25 @@ def _records_of_live(ctx) -> tuple[list, int]:
         if ctx.closed:
             raise SessionError('the session was closed during write_stubs') from exc
         raise
-    return records, skipped
+    return records, skipped, first_skip, last_skip
 
 
 def _load_source(source):
-    """(records, source_text, skipped, predefined(path), close()) for a snapshot folder, Snapshot or Unreal session."""
+    """(records, source_text, skipped, predefined(path), close(), (first_skip, last_skip)) for a snapshot
+    folder, Snapshot or Unreal session."""
     from .runtime.session import Unreal  # lazy: write_stubs never makes nylib.ue.stubs import pipeline
     if isinstance(source, Unreal):
         if source._ctx.closed:
             raise SessionError('the session is closed')
         if source.types == 'snapshot':
             return _load_source(source.snapshot)
-        records, skipped = _records_of_live(source._ctx)
+        records, skipped, first_skip, last_skip = _records_of_live(source._ctx)
         text = f'live types of {source.exe} (pe {hexs(source.target.pe_timestamp)} / {hexs(source.target.size_of_image)})'
-        return records, text, skipped, _predefined_live(source._ctx), (lambda: None)
+        return records, text, skipped, _predefined_live(source._ctx), (lambda: None), (first_skip, last_skip)
     if isinstance(source, Snapshot):
         records = _records_of_snapshot(source)
         text = _snapshot_source_text(source)
-        return records, text, 0, _predefined_snapshot(source), (lambda: None)
+        return records, text, 0, _predefined_snapshot(source), (lambda: None), (None, None)
     if isinstance(source, (str, os.PathLike)) and not isinstance(source, bool):
         path = _path_str(source, 'source')
         snap = Snapshot.load(path)
@@ -293,7 +309,7 @@ def _load_source(source):
         except BaseException:
             snap.close()
             raise
-        return records, text, 0, predefined, snap.close
+        return records, text, 0, predefined, snap.close, (None, None)
     raise TypeError(f'source must be a snapshot folder, a Snapshot or an Unreal session, got {type(source).__name__}')
 
 
@@ -1296,7 +1312,7 @@ def write_stubs(source, out_dir) -> StubReport:
     import time
     t0 = time.perf_counter()
     out, _name = _check_out_dir(out_dir)
-    records, source_text, skipped, predefined, close = _load_source(source)
+    records, source_text, skipped, predefined, close, (first_skip, last_skip) = _load_source(source)
     try:
         report = _write_stubs_impl(records, source_text, skipped, predefined, out)
     finally:
@@ -1305,7 +1321,7 @@ def write_stubs(source, out_dir) -> StubReport:
     _log.info('wrote %d stub files (%d types) from %s to %s in %.1f s; removed %d stale files',
                report.files, report.types, report.source, report.out_dir, seconds, report.removed)
     if skipped > 0:
-        _log.warning('%d type objects were not written', skipped)
+        _log.warning('%d type objects were not written (first: %s; last: %s)', skipped, first_skip, last_skip)
     return report
 
 
