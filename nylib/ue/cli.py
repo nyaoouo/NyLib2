@@ -670,11 +670,11 @@ def _cmd_dump(args, _open_target=None) -> int:
     def body(logger):
         cli_logger = logging.getLogger('nylib.ue.cli')
         try:
-            from . import pipeline  # lazy import: cli avoids pipeline at module load
+            from . import pipeline, remote_calls  # lazy import: cli avoids pipeline at module load
             dump_exports = pipeline.DEFAULT_DUMP_EXPORTS if exports is None else exports
             allow_calls_kwargs = {'allow_calls': features} if args.allow_calls is not None else {}
             result = pipeline.dump(_target_arg(args.target), profile=args.profile, out=args.out, exports=dump_exports,
-                                    progress=_make_dump_progress(_package_version(), features or ()),
+                                    progress=_make_dump_progress(_package_version(), remote_calls.parse_features(features)),
                                     _open_target=_open_target, **allow_calls_kwargs)
         except Exception as e:
             return _finish_error(e, args.json, target=args.target, log_file=log_file, logger=logger)
