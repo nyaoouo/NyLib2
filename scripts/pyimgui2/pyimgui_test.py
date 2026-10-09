@@ -301,6 +301,93 @@ class DemoState:
                         imgui.CloseCurrentPopup()
 
 
+class OverlayDemo:
+    def __init__(self, frontend, auto_close_frames=0):
+        self.frontend = frontend
+        self.auto_close_frames = auto_close_frames
+        self.frames = 0
+        self.is_init = False
+        self.font = None
+        self.font_error = ''
+
+    def do_init(self):
+        try:
+            import pyimgui.win32_font as wf
+            self.font = wf.AutoInstall(size_pixels=16.0)
+        except Exception as exc:
+            self.font_error = repr(exc)
+
+    def __call__(self, wnd):
+        import pyimgui
+        import pyimgui.imgui as imgui
+        import pyimgui.imgui.ctx as imgui_ctx
+        import pyimgui.esp as esp
+
+        self.frames += 1
+        if not self.is_init:
+            self.is_init = True
+            return wnd.CallBeforeFrameOnce(self.do_init)
+
+        self.draw_controls(imgui, imgui_ctx, wnd, pyimgui)
+        self.draw_esp_sample(imgui, esp)
+
+        if self.auto_close_frames and self.frames >= self.auto_close_frames:
+            wnd.Close()
+
+    def draw_controls(self, imgui, imgui_ctx, wnd, pyimgui):
+        imgui.SetNextWindowBgAlpha(0.6)
+        with imgui_ctx.Begin('Overlay Controls') as (show, _):
+            if not show:
+                return
+            size = imgui.GetMainViewport().Size
+            imgui.Text(f'fps: {imgui.GetIO().Framerate:.1f}')
+            imgui.Text(f'frame: {self.frames}')
+            imgui.Text(f'overlayMonitor: {wnd.overlayMonitor}')
+            imgui.Text(f'canvas size: {size.x:.0f}x{size.y:.0f}')
+            imgui.Text(f'dpi awareness: {pyimgui.GetDpiAwareness()}')
+            if self.font_error:
+                imgui.Text(f'font error: {self.font_error}')
+            if imgui.Button('Close'):
+                wnd.Close()
+
+    def draw_esp_sample(self, imgui, esp):
+        dl = esp.get_canvas_draw_list()
+        pmin, size = esp.get_canvas_rect()
+        centre = imgui.ImVec2(pmin.x + size.x / 2, pmin.y + size.y / 2)
+        half = 12
+        col = esp.Rgba(0, 255, 0, 255)
+        dl.AddLine(imgui.ImVec2(centre.x - half, centre.y), imgui.ImVec2(centre.x + half, centre.y), col)
+        dl.AddLine(imgui.ImVec2(centre.x, centre.y - half), imgui.ImVec2(centre.x, centre.y + half), col)
+        box_half = half * 2
+        esp.add_corner_box(dl, imgui.ImVec2(centre.x - box_half, centre.y - box_half), imgui.ImVec2(centre.x + box_half, centre.y + box_half), col)
+        esp.add_text_outlined(dl, imgui.ImVec2(centre.x, centre.y + box_half + 4), col, 'overlay esp sample', pivot=(0.5, 0.0))
+
+
+def overlay_capable_frontends():
+    result = []
+    for frontend in FRONTENDS:
+        module, window_name = load_frontend(frontend)
+        if hasattr(getattr(module, window_name), 'overlay'):
+            result.append(frontend)
+    return result
+
+
+def test_overlay(frontend='dx11', monitor=0, auto_close_frames=None):
+    module, window_name = load_frontend(frontend)
+    window_cls = getattr(module, window_name)
+    if not hasattr(window_cls, 'overlay'):
+        raise SystemExit(f'overlay mode is not available on {frontend}')
+
+    if auto_close_frames is None:
+        auto_close_frames = int(os.environ.get('PYIMGUI_TEST_AUTO_CLOSE_FRAMES', '0') or 0)
+    wnd = window_cls(OverlayDemo(frontend, auto_close_frames=auto_close_frames))
+    wnd.overlay = True
+    wnd.overlayMonitor = monitor
+    wnd.title = f'pyimgui2 {frontend} overlay demo'
+    wnd.Serve()
+    return wnd
+
+
 def test(frontend='dx11', auto_close_frames=None):
     import pyimgui
 
@@ -328,7 +415,22 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--frontend', choices=(*FRONTENDS.keys(), 'all'), default=os.environ.get('PYIMGUI_TEST_FRONTEND', 'dx11'))
     parser.add_argument('--auto-close-frames', type=int, default=None)
+    parser.add_argument('--overlay', action='store_true')
+    parser.add_argument('--monitor', type=int, default=0)
     args = parser.parse_args()
+
+    if args.overlay:
+        if args.frontend == 'all':
+            auto_close_frames = args.auto_close_frames
+            if auto_close_frames is None:
+                auto_close_frames = int(os.environ.get('PYIMGUI_TEST_AUTO_CLOSE_FRAMES', '120') or 120)
+            frontends = overlay_capable_frontends()
+            print(f'overlay-capable frontends: {frontends}')
+            for frontend in frontends:
+                test_overlay(frontend, monitor=args.monitor, auto_close_frames=auto_close_frames)
+        else:
+            test_overlay(args.frontend, monitor=args.monitor, auto_close_frames=args.auto_close_frames)
+        return
 
     if args.frontend == 'all':
         auto_close_frames = args.auto_close_frames
