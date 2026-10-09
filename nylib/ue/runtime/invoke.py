@@ -827,6 +827,9 @@ class Invoker:
         if kind == 'MulticastInlineDelegateProperty':
             self._bounded(codecs._array_header(v, address + size - 0x10, plabel)[1], plabel)
             return self._codec(t, size).get(v, address, plabel).bindings()
+        if kind == 'FieldPathProperty':
+            off = 0x1C if ctx.e.property_sizes.FieldPathProperty > 0x20 else 0x10
+            self._bounded(codecs._array_header(v, address + off, plabel)[1], plabel)
         return self._codec(t, size).get(v, address, plabel)
 
     @staticmethod
