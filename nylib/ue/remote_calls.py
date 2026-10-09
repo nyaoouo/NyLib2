@@ -26,7 +26,7 @@ LABEL_TEXT = 'auto: Off::InSDK::Text::InitTextOffsets (ProcessEvent call)'
 LABEL_GAME_NAME = 'auto: KismetSystemLibrary::GetGameName (ProcessEvent call)'
 LABEL_GAME_VERSION = 'auto: KismetSystemLibrary::GetEngineVersion (ProcessEvent call)'
 APPEND_CAPACITY = 1024  # wchar_t slots of each out FString
-APPEND_SAMPLE = 256  # names the stride pass takes
+APPEND_SAMPLE = 256  # names the stride pass takes at most (one per window)
 APPEND_WIDE_FLOOR = 16  # wide (non-ASCII) names added when the game has them
 APPEND_FLOOR_SCAN = 1 << 16  # slots each floor scan visits at most
 MAX_FALLBACK_READ = 1 << 24  # bytes one strict fallback read may ask for
@@ -362,7 +362,6 @@ def detect_game_info(ectx, transport, *, timeout=calls.DEFAULT_TIMEOUT) -> Featu
     if pe_index <= 0:
         return _finish('game-info', False, False, 'ProcessEvent was not found', t0)
     c = _Calls('game-info', transport, timeout)
-    c.where = 'called through ProcessEvent on KismetSystemLibrary'
     texts = []
     try:
         try:
