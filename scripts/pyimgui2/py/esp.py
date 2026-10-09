@@ -552,12 +552,36 @@ def add_line_3d(dl, cam: Camera, a, b, col: int, thickness: float = 1.0) -> None
     _draw_segment(dl, cam._wmin, ha, hb, col, thickness)
 
 
+def _lines_np(dl, cam, arr, col, thickness):
+    """Vectorized add_lines_3d for a real (N, 2, 3) ndarray, with the same float64 math as the scalar path."""
+    np = sys.modules['numpy']
+    arr = np.asarray(arr, dtype=np.float64)
+    wmin = cam._wmin
+    with np.errstate(all='ignore'):
+        x, y, w = cam._homogeneous(arr[:, :, 0], arr[:, :, 1], arr[:, :, 2])
+        vis = (wmin <= w) & (w < math.inf)
+        sx, sy = x / w, y / w
+        xa, ya, wa, xb, yb, wb = x[:, 0], y[:, 0], w[:, 0], x[:, 1], y[:, 1], w[:, 1]
+        t = (wmin - wa) / (wb - wa)
+        qx, qy = (xa + t * (xb - xa)) / wmin, (ya + t * (yb - ya)) / wmin
+        va, vb = vis[:, 0], vis[:, 1]
+        pts = np.stack((np.where(va, sx[:, 0], qx), np.where(va, sy[:, 0], qy),
+                        np.where(vb, sx[:, 1], qx), np.where(vb, sy[:, 1], qy)), axis=1)
+        keep = (va | vb) & (np.abs(pts) <= _FLT_MAX).all(axis=1)
+    for x1, y1, x2, y2 in pts[keep].tolist():
+        dl.AddLine(imgui.ImVec2(x1, y1), imgui.ImVec2(x2, y2), col, thickness)
+
+
 def add_lines_3d(dl, cam: Camera, segments, col: int, thickness: float = 1.0) -> None:
     """Draw each (a, b) world segment as add_line_3d.
 
     A malformed segment raises when reached; the segments before it stay drawn.
     """
     col, thickness = _line_style(cam, col, thickness)
+    if (_is_ndarray(segments) and segments.ndim == 3 and segments.shape[1:] == (2, 3)
+            and segments.dtype.kind in 'biuf'):
+        _lines_np(dl, cam, segments, col, thickness)
+        return
     h, wmin = cam._homogeneous, cam._wmin
     for seg in segments:
         a, b = _read_pair(seg, 'segment')
