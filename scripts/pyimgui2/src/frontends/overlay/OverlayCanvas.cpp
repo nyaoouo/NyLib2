@@ -2,6 +2,7 @@
 #include "../../OverlayQueries.h"
 
 #include <dcomp.h>
+#include <optional>
 #include <unordered_set>
 
 #include "imgui_impl_win32.h"
@@ -244,7 +245,7 @@ START_M_IMGUI_IMPL_NAMESPACE
                     PySys_WriteStderr("%s", line.c_str());
                 }
 
-                // The physical rect of monitor `index` in GetMonitors() order; out of range falls back to the primary.
+                // The rect of monitor `index` in GetMonitors() order, in the thread's current DPI context; out of range falls back to the primary.
                 RECT PlacementRect(int index)
                 {
                     auto monitors = OVERLAY_QUERIES_NAMESPACE::EnumerateMonitors();
@@ -256,9 +257,17 @@ START_M_IMGUI_IMPL_NAMESPACE
                         index = 0;
                     }
                     const auto &monitor = monitors[index];
-                    LONG left = (LONG)monitor.pos.x;
-                    LONG top = (LONG)monitor.pos.y;
-                    return RECT{left, top, left + (LONG)monitor.size.x, top + (LONG)monitor.size.y};
+                    POINT centre{(LONG)(monitor.pos.x + monitor.size.x / 2), (LONG)(monitor.pos.y + monitor.size.y / 2)};
+                    HMONITOR hmon = nullptr;
+                    {
+                        OVERLAY_QUERIES_NAMESPACE::ThreadDpiScope physical(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+                        hmon = MonitorFromPoint(centre, MONITOR_DEFAULTTONEAREST);
+                    }
+                    MONITORINFO info{};
+                    info.cbSize = sizeof(info);
+                    if (!GetMonitorInfoW(hmon, &info))
+                        _throwV_("GetMonitorInfoW failed: {}", GetLastError());
+                    return info.rcMonitor;
                 }
 
                 bool PumpMessages()
@@ -350,7 +359,9 @@ START_M_IMGUI_IMPL_NAMESPACE
 
         void Serve(RenderBase &self, Config &config, Renderer &renderer, const wchar_t *className)
         {
-            OVERLAY_QUERIES_NAMESPACE::ThreadDpiScope dpiScope(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            std::optional<OVERLAY_QUERIES_NAMESPACE::ThreadDpiScope> dpiScope;
+            if (config.dpiAware.load())
+                dpiScope.emplace(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
             Canvas canvas(self, config, renderer, className);
             try
             {
