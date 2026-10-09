@@ -596,6 +596,11 @@ class Unreal:
             return ctx.factory.enum_for(path)
         return None
 
+    def write_stubs(self, out_dir) -> 'StubReport':
+        """Write .pyi stubs of this session's types into out_dir (nylib.ue.stubs.write_stubs)."""
+        from ..stubs import write_stubs
+        return write_stubs(self, out_dir)
+
     @property
     def call_timeout(self) -> float | None:
         """Seconds a remote-thread call waits before `CallError(timed_out=True)`; None waits forever; ignored by any-thread."""
