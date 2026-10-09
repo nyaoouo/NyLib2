@@ -9,6 +9,7 @@ from typing import Iterable
 
 from .. import calls as _calls
 from .. import pipeline, profiles, store
+from .. import remote_calls as _remote_calls
 from ..engine.accessor import view
 from ..engine.context import EngineContext
 from ..engine.unreal import UEClass
@@ -143,9 +144,9 @@ class RuntimeContext:
         if all(e.provenance.get(k, '').startswith(_KNOWN_LABELS) for k in _TEXT_KEYS):
             return e.off.InSDK.Text.TextDatOffset, e.off.InSDK.Text.InTextDataStringOffset
         raise DetectionError('Off::InSDK::Text::InitTextOffsets',
-                             'the FText layout is unknown in this session: TextDatOffset and InTextDataStringOffset need a ProcessEvent '
-                             'call, which v1 does not make; pin both in a profile ([offsets] "Off.InSDK.Text.TextDatOffset" and '
-                             '"Off.InSDK.Text.InTextDataStringOffset")')
+                             'the FText layout is unknown in this session: TextDatOffset and InTextDataStringOffset need one ProcessEvent '
+                             'call; attach with calls= (the session makes it at attach), attach to a snapshot dumped with --allow-calls text, '
+                             'or pin both in a profile ([offsets] "Off.InSDK.Text.TextDatOffset" and "Off.InSDK.Text.InTextDataStringOffset")')
 
     def check_write(self, label: str) -> None:
         if self.closed:
@@ -173,12 +174,15 @@ class RuntimeContext:
 
 
 def unverified_gate(keys: Iterable[str], *, write: bool, allow_unverified: bool, source: str = 'probe',
-                    target: str = '<exe>', calls: str | None = None) -> tuple[str, ...]:
-    """D13 ([93] = D: CALL_EXEMPT keys do not gate calls): refuse unverified offsets unless allow_unverified; returns the keys."""
+                    target: str = '<exe>', calls: str | None = None, text_call: str | None = None) -> tuple[str, ...]:
+    """D13 ([93] = D: CALL_EXEMPT keys do not gate calls): refuse unverified offsets unless allow_unverified; returns the keys.
+    text_call: why the attach-time Conv_StringToText call left the FText offsets unresolved, when it was made."""
     if not isinstance(source, str) or not isinstance(target, str):
         raise TypeError('source and target must be str')
     if calls is not None and not isinstance(calls, str):
         raise TypeError(f'calls must be None or a str, got {type(calls).__name__}')
+    if text_call is not None and not isinstance(text_call, str):
+        raise TypeError(f'text_call must be None or a str, got {type(text_call).__name__}')
     try:
         all_keys = tuple(keys)
     except TypeError:
@@ -199,14 +203,45 @@ def unverified_gate(keys: Iterable[str], *, write: bool, allow_unverified: bool,
         else:
             what, who = f'calls={calls!r} would call through them', f'calls={calls!r}'
         if not allow_unverified:
+            remedy = ''
+            if any(k in _TEXT_KEYS for k in gating):
+                if calls is None:
+                    remedy = ("\nOr resolve the two FText offsets with one ProcessEvent call: attach with calls='remote-thread' (inside the game, "
+                              "Unreal.attach_current(calls='any-thread')), or attach to a snapshot dumped with --allow-calls text.")
+                elif text_call is not None:
+                    remedy = f'\nThe attach-time Conv_StringToText call did not resolve them ({text_call}); see the WARNING above.'
             raise UnverifiedOffsetsError(
                 f'{len(gating)} offsets of this {source} are unverified, and {what}:\n'
                 + ''.join(f'  {k}\n' for k in gating)
                 + f'Check them with:  python -m nylib.ue probe {target}\n'
-                  f'Then pin them in a profile (a snapshot session needs a new dump made with it), or pass allow_unverified=True.',
+                  f'Then pin them in a profile (a snapshot session needs a new dump made with it), or pass allow_unverified=True.'
+                + remedy,
                 keys=gating)
         logger.warning('%s with %d unverified offsets of this %s (allow_unverified=True): %s', who, len(gating), source, ', '.join(gating))
     return all_keys
+
+
+def _pre_gate(keys, *, write, calls, allow_unverified, source, target) -> bool:
+    """Gate every key but the FText ones and return True when an attach-time text call is due; else gate all keys, return False."""
+    if not (calls is not None and any(k in _TEXT_KEYS for k in keys)):
+        unverified_gate(keys, write=write, allow_unverified=allow_unverified, source=source, target=target, calls=calls)
+        return False
+    if not allow_unverified:
+        unverified_gate([k for k in keys if k not in _TEXT_KEYS], write=write, allow_unverified=False, source=source, target=target,
+                        calls=calls)
+    return True
+
+
+def _text_call(keys, engine, opened, *, function, write, calls, allow_unverified, source, target) -> tuple:
+    """Resolve the FText offsets with one Conv_StringToText call, then gate the keys still unverified; returns (keys, transport)."""
+    transport = text_call = None
+    if engine.off.InSDK.ProcessEvent.PEIndex > 0:
+        transport = _calls.open_transport(calls, opened.process)
+        r = _remote_calls.resolve_text_offsets(engine, transport, function=function)
+        text_call = None if r.ok else r.detail
+    after = tuple(k for k in keys if not (k in _TEXT_KEYS and engine.provenance.get(k, '').startswith(_KNOWN_LABELS)))
+    return unverified_gate(after, write=write, allow_unverified=allow_unverified, source=source, target=target, calls=calls,
+                           text_call=text_call), transport
 
 
 def _check_path_arg(value, name: str) -> str:
@@ -317,24 +352,35 @@ class Unreal:
                 profile = profiles.load_profile(profile)
             opened = (open_target or pipeline.open_target)(target, write=write, remote_calls=(calls == 'remote-thread'), cache_bytes=None)
             info = opened.info
+            ctx = None
             if dump is not None:
-                snap, ectx, dumped = cls._snapshot_engine(target, root, dump, snap, profile, opened, write, calls, allow_unverified)
-                unverified = tuple(ectx.unverified())
+                snap, ectx, dumped, attempt = cls._snapshot_engine(target, root, dump, snap, profile, opened, write, calls, allow_unverified)
+                keys = tuple(ectx.unverified())
                 if not dumped:
-                    unverified_gate(unverified, write=write, allow_unverified=allow_unverified, source='snapshot', target=info.exe,
-                                     calls=calls)
+                    attempt = _pre_gate(keys, write=write, calls=calls, allow_unverified=allow_unverified, source='snapshot', target=info.exe)
+                if attempt:
+                    ctx = RuntimeContext(ectx.engine, write=write, calls=calls, mode=info.mode)
+                    ctx.names = NameDecoder(ctx.e, ctx.lock)
+                    ctx.index = ObjectIndex(ctx.e, ctx.names.decode, ctx.lock)
+                    function = ctx.index.find(_remote_calls.CONV_STRING_TO_TEXT) or 0
+                    unverified, transport = _text_call(keys, ectx.engine, opened, function=function, write=write, calls=calls,
+                                                       allow_unverified=allow_unverified, source='dump' if dumped else 'snapshot',
+                                                       target=info.exe)
+                else:
+                    unverified, transport = keys, None
             else:
-                ectx, unverified, probe_line = cls._live_engine(opened, profile, root, write, calls, allow_unverified)
+                ectx, unverified, probe_line, transport = cls._live_engine(opened, profile, root, write, calls, allow_unverified)
 
             if calls is not None and ectx.engine.off.InSDK.ProcessEvent.PEIndex <= 0:
                 raise DetectionError('Off::InSDK::ProcessEvent::InitPE',
                                      'ProcessEvent was not found on this target, so UFunction calls cannot be made; pin its vtable '
                                      'index in a profile ([globals] process_event = { index = <n> })')
 
-            ctx = RuntimeContext(ectx.engine, write=write, calls=calls, mode=info.mode)
-            e, lock = ctx.e, ctx.lock
-            ctx.names = NameDecoder(e, lock)
-            ctx.index = index = ObjectIndex(e, ctx.names.decode, lock)
+            if ctx is None:
+                ctx = RuntimeContext(ectx.engine, write=write, calls=calls, mode=info.mode)
+                ctx.names = NameDecoder(ctx.e, ctx.lock)
+                ctx.index = ObjectIndex(ctx.e, ctx.names.decode, ctx.lock)
+            e, lock, index = ctx.e, ctx.lock, ctx.index
             live = LiveTypeSource(e, index.find, lambda name: next(iter(index.classes_named(name)), None), lock)
             ctx.types = SnapshotTypeSource(snap, live, lock) if snap is not None else live
             ctx.acc = RuntimeAccessor(e.mem)
@@ -342,7 +388,7 @@ class Unreal:
             ctx.factory = ClassFactory(ctx)
 
             if calls is not None:
-                ctx.invoker = Invoker(ctx, _calls.open_transport(calls, opened.process))
+                ctx.invoker = Invoker(ctx, transport or _calls.open_transport(calls, opened.process))
                 if calls == 'remote-thread':
                     _info.warning("calls='remote-thread': each UFunction call runs ProcessEvent on a new thread in the game "
                                   "(CreateRemoteThread), not the game thread, so it races the game thread and its garbage collector and "
@@ -389,7 +435,7 @@ class Unreal:
         info = opened.info
         exe, ts, size = info.exe, info.pe_timestamp, info.size_of_image
         out_part = f' --out {root}' if root is not None else ''
-        dumped = False
+        dumped = attempt = False
         loaded = None
         if dump in ('latest', 'auto'):
             refs = [r for r in store.find_snapshots(root, exe=exe, pe_timestamp=ts, size_of_image=size) if _schema_major(r) == SCHEMA_MAJOR]
@@ -409,7 +455,7 @@ class Unreal:
                 _info.info('no snapshot for build %s; running the dumper (%s)', hexs(ts), info.mode)
                 shared = pipeline.OpenedTarget(opened.source, opened.info, opened.process, opened.check_alive, None)
                 res = pipeline.dump(target, profile=profile, out=root, _open_target=lambda *a, **k: shared)
-                unverified_gate(res.unverified, write=write, allow_unverified=allow_unverified, source='dump', target=exe, calls=calls)
+                attempt = _pre_gate(res.unverified, write=write, calls=calls, allow_unverified=allow_unverified, source='dump', target=exe)
                 snap = loaded = Snapshot.load(res.path)
                 dumped = True
         else:
@@ -437,7 +483,7 @@ class Unreal:
             if loaded is not None:
                 loaded.close()
             raise
-        return snap, ectx, dumped
+        return snap, ectx, dumped, attempt
 
     @staticmethod
     def _live_engine(opened, profile, root, write, calls, allow_unverified):
@@ -449,14 +495,19 @@ class Unreal:
             hook = report.context.engine.objects.DecryptionLambdaStr
             raise DetectionError('Unreal.attach', f'runtime sessions cannot use a GObjects decryption hook in v1 (the probe used {hook}); '
                                                   f'dump the game instead')
-        unverified = unverified_gate(report.unverified, write=write, allow_unverified=allow_unverified, target=opened.info.exe, calls=calls)
+        exe = opened.info.exe
+        if _pre_gate(report.unverified, write=write, calls=calls, allow_unverified=allow_unverified, source='probe', target=exe):
+            unverified, transport = _text_call(report.unverified, report.context.engine, opened, function=None, write=write, calls=calls,
+                                               allow_unverified=allow_unverified, source='probe', target=exe)
+        else:
+            unverified, transport = tuple(report.unverified), None
         ectx = EngineContext.from_snapshot(meta, report.context.to_offsets(), opened.source.fresh)
         g = meta['globals']
         probe_line = (f'probe: GObjects {g["GObjects"]["rva"]} · GNames {g["GNames"]["rva"]} · {len(report.values)} offsets '
                       f'({report.seconds:.1f}s)')
         del report, meta
         opened.source.refresh()
-        return ectx, unverified, probe_line
+        return ectx, unverified, probe_line, transport
 
     @staticmethod
     def injected() -> bool:
