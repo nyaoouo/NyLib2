@@ -5,7 +5,7 @@ import math
 import os
 import re
 import threading
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 from .. import calls as _calls
 from .. import pipeline, profiles, store
@@ -24,6 +24,9 @@ from .invoke import Invoker
 from .names import FNameValue, NameDecoder
 from .types import ClassFactory, RawPointer, StructView, UObjectProxy
 from .typesource import LiveTypeSource, SnapshotTypeSource
+
+if TYPE_CHECKING:
+    from ..stubs import StubReport
 
 logger = logging.getLogger('nylib.ue.runtime.session')
 _info = logging.getLogger('nylib.ue.runtime')
