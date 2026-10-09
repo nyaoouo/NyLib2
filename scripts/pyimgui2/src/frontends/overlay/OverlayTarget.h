@@ -30,6 +30,9 @@ START_M_IMGUI_IMPL_NAMESPACE
             void Step();
             // Publishes no target and drops the snapshot without firing a callback.
             void Reset() noexcept;
+            TargetState State() const;
+            // The target's client rect on the screen, in the calling thread's DPI context; false when it cannot be read.
+            bool ClientRectOnScreen(RECT &rect) const;
 
         private:
             RenderBase &self;
@@ -52,8 +55,8 @@ START_M_IMGUI_IMPL_NAMESPACE
             bool Resolve();
             uintptr_t CallFinder();
             void WriteRejected(uintptr_t candidate, const char *reason);
-            void Publish(HWND hwnd, DWORD pid);
-            void FireCallback(std::optional<py::function> &slot, const size_t &argc, const char *name);
+            void Publish(HWND target, DWORD targetPid);
+            void FireCallback(std::optional<py::function> &slot, const size_t &argc, const char *name);   // argc by reference: read after the GIL is taken
         };
     }
 }

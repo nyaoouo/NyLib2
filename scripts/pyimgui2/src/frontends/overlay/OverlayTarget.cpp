@@ -34,16 +34,31 @@ START_M_IMGUI_IMPL_NAMESPACE
         void TargetTracker::Reset() noexcept
         {
             this->Publish(nullptr, 0);
-            this->hwnd = nullptr;
-            this->pid = 0;
-            this->state = TargetState::Monitor;
-            this->seenGeneration = UINT64_MAX;
             PyObject *dropped = std::exchange(this->snapshot, nullptr);
             if (dropped == nullptr)
                 return;
             PyGILState_STATE gil = PyGILState_Ensure();
             Py_DECREF(dropped);
             PyGILState_Release(gil);
+        }
+
+        TargetState TargetTracker::State() const
+        {
+            return this->state;
+        }
+
+        bool TargetTracker::ClientRectOnScreen(RECT &rect) const
+        {
+            RECT client{};
+            if (!GetClientRect(this->hwnd, &client))
+                return false;
+            POINT a{client.left, client.top};
+            POINT b{client.right, client.bottom};
+            if (!ClientToScreen(this->hwnd, &a) || !ClientToScreen(this->hwnd, &b))
+                return false;
+            // A mirrored (right-to-left) window maps its client origin to the right edge.
+            rect = RECT{(std::min)(a.x, b.x), (std::min)(a.y, b.y), (std::max)(a.x, b.x), (std::max)(a.y, b.y)};
+            return true;
         }
 
         // Snapshots the slot; returns true when the tracked target is lost to a different value.
@@ -131,7 +146,7 @@ START_M_IMGUI_IMPL_NAMESPACE
                 return 0;
             if (!PyIndex_Check(result.ptr()))
                 throw py::type_error(std::format("an overlayTarget finder must return None or an int-like HWND, not {}", Py_TYPE(result.ptr())->tp_name));
-            return TargetBits(result.ptr());
+            return TargetBits(result.ptr(), "an overlayTarget finder's return");
         }
 
         void TargetTracker::WriteRejected(uintptr_t candidate, const char *reason)

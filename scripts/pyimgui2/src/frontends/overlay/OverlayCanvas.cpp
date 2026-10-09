@@ -103,15 +103,13 @@ START_M_IMGUI_IMPL_NAMESPACE
 
                 void Run()
                 {
-                    bool first = true;
                     while (this->PumpMessages())
                     {
                         this->CheckSignals();
                         int monitor = this->config.monitor.load();
                         this->tracker.Step();
                         ImGui::SetCurrentContext(this->ctx);
-                        this->UpdatePlacement(monitor, first);
-                        first = false;
+                        this->UpdatePlacement(monitor);
                         this->ResizeSwapChain();
                         this->BeginFrame();
                         this->FeedMouse();
@@ -183,6 +181,7 @@ START_M_IMGUI_IMPL_NAMESPACE
                 bool classRegistered = false;
                 HWND canvas = nullptr;
                 bool hwndSet = false;
+                bool shown = false;
                 IDCompositionDesktopDevice *dcompDevice = nullptr;
                 IDCompositionTarget *dcompTarget = nullptr;
                 IDCompositionVisual2 *dcompVisual = nullptr;
@@ -303,20 +302,37 @@ START_M_IMGUI_IMPL_NAMESPACE
                     ImGui::SetCurrentContext(this->ctx);
                 }
 
-                void UpdatePlacement(int monitor, bool first)
+                // The canvas half of the lifecycle step: placement, visibility, then z-order.
+                void UpdatePlacement(int monitor)
                 {
-                    RECT rect = this->PlacementRect(monitor);
-                    int width = rect.right - rect.left;
-                    int height = rect.bottom - rect.top;
-                    if (first)
+                    this->Place(monitor);
+                    this->Show();
+                    // Z-order: every visible state is topmost, which Place and Show already insert at.
+                }
+
+                // The target's client rect while tracking, else the monitor's; skipped when the target cannot be read.
+                void Place(int monitor)
+                {
+                    RECT rect{};
+                    if (this->tracker.State() == TargetState::Tracking)
                     {
-                        SetWindowPos(this->canvas, HWND_TOPMOST, rect.left, rect.top, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-                        return;
+                        if (!this->tracker.ClientRectOnScreen(rect))
+                            return;
                     }
+                    else
+                        rect = this->PlacementRect(monitor);
                     RECT current{};
                     if (GetWindowRect(this->canvas, &current) && EqualRect(&current, &rect))
                         return;
-                    SetWindowPos(this->canvas, HWND_TOPMOST, rect.left, rect.top, width, height, SWP_NOACTIVATE);
+                    SetWindowPos(this->canvas, HWND_TOPMOST, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, SWP_NOACTIVATE);
+                }
+
+                void Show()
+                {
+                    if (this->shown)
+                        return;
+                    SetWindowPos(this->canvas, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                    this->shown = true;
                 }
 
                 void ResizeSwapChain()

@@ -68,8 +68,9 @@ START_M_IMGUI_IMPL_NAMESPACE
             DWORD targetPid = 0;                               // (mutex)
         };
 
-        // The pointer bits of an __index__ value in [-2**63, 2**64). Runs Python: never call it under Config::mutex.
-        inline uintptr_t TargetBits(PyObject *value)
+        // The pointer bits of an __index__ value in [-2**63, 2**64); `what` names the value in the OverflowError.
+        // Runs Python: never call it under Config::mutex.
+        inline uintptr_t TargetBits(PyObject *value, const char *what)
         {
             py::object index = py::reinterpret_steal<py::object>(PyNumber_Index(value));
             if (!index)
@@ -89,7 +90,7 @@ START_M_IMGUI_IMPL_NAMESPACE
                     return (uintptr_t)unsignedBits;
                 PyErr_Clear();
             }
-            py::set_error(PyExc_OverflowError, "overlayTarget must lie in [-2**63, 2**64)");
+            py::set_error(PyExc_OverflowError, std::format("{} must lie in [-2**63, 2**64)", what).c_str());
             throw py::error_already_set();
         }
 
@@ -103,7 +104,7 @@ START_M_IMGUI_IMPL_NAMESPACE
                 throw py::type_error("overlayTarget cannot be a bool");
             if (PyIndex_Check(value))
             {
-                bits = TargetBits(value);
+                bits = TargetBits(value, "overlayTarget");
                 return TargetKind::Fixed;
             }
             if (PyCallable_Check(value))
