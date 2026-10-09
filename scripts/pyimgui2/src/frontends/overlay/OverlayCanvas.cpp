@@ -105,6 +105,7 @@ START_M_IMGUI_IMPL_NAMESPACE
                     bool first = true;
                     while (this->PumpMessages())
                     {
+                        this->CheckSignals();
                         int monitor = this->config.monitor.load();
                         this->UpdatePlacement(monitor, first);
                         first = false;
@@ -284,6 +285,17 @@ START_M_IMGUI_IMPL_NAMESPACE
                         return false;
                     ImGui::SetCurrentContext(this->ctx);
                     return true;
+                }
+
+                // Raises KeyboardInterrupt on Ctrl+C; Python handles signals only on the main thread.
+                void CheckSignals()
+                {
+                    {
+                        py::gil_scoped_acquire gil;
+                        if (PyErr_CheckSignals() != 0)
+                            throw py::error_already_set();
+                    }
+                    ImGui::SetCurrentContext(this->ctx);
                 }
 
                 void UpdatePlacement(int monitor, bool first)

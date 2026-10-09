@@ -43,7 +43,15 @@ START_M_IMGUI_IMPL_NAMESPACE
             Config &config;
         };
 
-        // Adds the overlay members and the guarded Serve to a window class with an `overlayConfig` member.
+        // Raises RuntimeError while an overlay Serve() runs.
+        inline void RefuseWhileServingOverlay(Config &config, const char *method)
+        {
+            std::lock_guard<std::mutex> lock(config.mutex);
+            if (config.serving && config.overlay)
+                _throwV_("{}() cannot be called while the overlay Serve() runs", method);
+        }
+
+        // Adds the overlay members, the guarded Serve and the tray guards to a window class with an `overlayConfig` member.
         template <class W, class... Options>
         void BindMembers(py::class_<W, Options...> &cls)
         {
@@ -62,6 +70,18 @@ START_M_IMGUI_IMPL_NAMESPACE
                 .def_property("overlayDpiAware",
                               [](W &self) { return self.overlayConfig.dpiAware.load(); },
                               [](W &self, bool value) { self.overlayConfig.dpiAware = value; })
+                .def("HideToTray",
+                     [](W &self)
+                     {
+                         RefuseWhileServingOverlay(self.overlayConfig, "HideToTray");
+                         self.HideToTray();
+                     })
+                .def("RestoreFromTray",
+                     [](W &self)
+                     {
+                         RefuseWhileServingOverlay(self.overlayConfig, "RestoreFromTray");
+                         self.RestoreFromTray();
+                     })
                 .def("Serve",
                      [](W &self)
                      {
