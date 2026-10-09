@@ -14,7 +14,7 @@ from ..model import ClassRecord, FunctionRecord, StructRecord, UNKNOWN_KIND
 from ..names import make_name_valid
 from . import codecs
 from .accessor import RuntimeAccessor
-from .codecs import FTextValue, kind_layout, make_codec
+from .codecs import FTextValue, WeakObjectPtr, kind_layout, make_codec
 from .containers import FixedArrayValue, TArrayValue, TMapValue, TSetValue, _bit_set, _bit_words, _read_sparse, _sparse_slot_size
 from .index import DESTROYED_FLAGS
 from .names import NameDecoder
@@ -655,6 +655,8 @@ class Invoker:
                 if value <= 0:
                     raise MarshalError(f'{plabel}: {value} is not an object address; pass None for a null object')
                 value = self._live_object(value, plabel)
+            elif kind == 'WeakObjectProperty' and isinstance(value, WeakObjectPtr):
+                value = self._weak_target(value, plabel)
             for op in codecs._plan(self._codec(t, size), ctx, address, value, plabel):
                 if callable(op):
                     raise MarshalError(f'{plabel}: {kind} values cannot be laid out in call memory in v1')
@@ -678,6 +680,21 @@ class Invoker:
         if not live:
             raise MarshalError(f'{plabel}: {address:#x} is not a live object')
         return proxy
+
+    def _weak_target(self, value, plabel: str):
+        """The proxy, or None for a null pointer, a weak pointer argument of this session points at."""
+        owner = value._ctx
+        if owner is not self.ctx and not (isinstance(owner, _CallView) and owner._session is self.ctx):
+            raise MarshalError(f'{plabel}: a weak pointer of another session cannot be passed; get the object in this session')
+        if value.index == 0 and value.serial == 0:
+            return None
+        try:
+            obj = value.get()
+        except MemoryReadError as exc:
+            raise MarshalError(f'{plabel}: the weak pointer {value!r} cannot be resolved: {exc}') from exc
+        if obj is None:
+            raise MarshalError(f'{plabel}: the weak pointer {value!r} no longer points at an object; pass None for a null object')
+        return obj
 
     def _text_bytes(self, value, size: int, plabel: str) -> bytes:
         ctx = self.ctx
