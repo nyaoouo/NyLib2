@@ -1310,10 +1310,10 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             .def("CreateTexture", [](Dx12Render &self, const char *filename) { return self.CreateTexture(filename); }, py::arg("filename"), py::return_value_policy::take_ownership)
             .def("CreateTexture", [](Dx12Render &self) { return self.CreateTexture(); }, py::return_value_policy::take_ownership);
 
-        py::class_<Dx12Window, Dx12Render>(m, "Dx12Window", py::dynamic_attr(), py::module_local())
-            .def(py::init<std::optional<py::function>>(), py::arg("renderCallback") = py::none())
-            .def_readwrite("ClearColor", &Dx12Window::ClearColor)
-            .def("Serve", &Dx12Window::Serve, py::call_guard<py::gil_scoped_release>());
+        py::class_<Dx12Window, Dx12Render> dx12Window(m, "Dx12Window", py::dynamic_attr(), py::module_local());
+        dx12Window.def(py::init<std::optional<py::function>>(), py::arg("renderCallback") = py::none())
+            .def_readwrite("ClearColor", &Dx12Window::ClearColor);
+        Overlay::BindMembers(dx12Window);
 
         py::class_<Dx12Inbound, Dx12Render>(m, "Dx12Inbound", py::dynamic_attr(), py::module_local())
             .def(py::init<std::optional<py::function>>(), py::arg("renderCallback") = py::none())

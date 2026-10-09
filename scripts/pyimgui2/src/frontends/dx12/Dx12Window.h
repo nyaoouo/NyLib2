@@ -2,6 +2,7 @@
 
 #include "../common/RenderBase.h"
 #include "../common/Win32Hook.h"
+#include "../overlay/OverlayConfig.h"
 
 #include <atomic>
 #include <d3d12.h>
@@ -72,6 +73,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         HANDLE hSwapChainWaitableObject = nullptr;
         ID3D12Resource *mainRenderTargetResource[NUM_BACK_BUFFERS] = {};
         D3D12_CPU_DESCRIPTOR_HANDLE mainRenderTargetDescriptor[NUM_BACK_BUFFERS] = {};
+        Overlay::Config overlayConfig;
 
         Dx12Window(std::optional<py::function> renderCallback = std::nullopt);
         ~Dx12Window();
