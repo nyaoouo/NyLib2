@@ -1890,6 +1890,7 @@ def generate(backends, debug=0, with_stubs=True):
                     imgui_dir / 'backends' / 'imgui_impl_win32.cpp',
                     imgui_dir / 'backends' / 'imgui_impl_dx11.cpp',
                     *(src_dir / 'frontends' / 'common').glob('*.cpp'),
+                    *(src_dir / 'frontends' / 'overlay').glob('*.cpp'),
                     *(f for f in (detours_dir / 'src').glob('*.cpp') if f.name != 'uimports.cpp'),
                     src_dir / 'gHeader.cpp',
                     src_dir / 'Dx11Window.cpp',
@@ -1898,7 +1899,7 @@ def generate(backends, debug=0, with_stubs=True):
                 include_dirs=common_include_dirs,
                 extra_objects=[str(core_import_lib)],
                 extra_compile_args=frontend_compile_args,
-                libraries=['user32', 'gdi32', 'dwmapi', 'shell32', 'd3d11', 'dxgi'],
+                libraries=['user32', 'gdi32', 'dwmapi', 'shell32', 'd3d11', 'dxgi', 'dcomp'],
                 debug=debug,
             )
             frontend_modules.append('pyimgui.dx11')
@@ -1910,13 +1911,14 @@ def generate(backends, debug=0, with_stubs=True):
                     imgui_dir / 'backends' / 'imgui_impl_dx12.cpp',
                     *(src_dir / 'frontends' / 'common').glob('*.cpp'),
                     *(src_dir / 'frontends' / 'dx12').glob('*.cpp'),
+                    *(src_dir / 'frontends' / 'overlay').glob('*.cpp'),
                     *(f for f in (detours_dir / 'src').glob('*.cpp') if f.name != 'uimports.cpp'),
                     src_dir / 'gHeader.cpp',
                 ])),
                 include_dirs=common_include_dirs,
                 extra_objects=[str(core_import_lib)],
                 extra_compile_args=frontend_compile_args,
-                libraries=['user32', 'gdi32', 'dwmapi', 'shell32', 'd3d12', 'dxgi', 'dxguid'],
+                libraries=['user32', 'gdi32', 'dwmapi', 'shell32', 'd3d12', 'dxgi', 'dxguid', 'dcomp'],
                 debug=debug,
             )
             frontend_modules.append('pyimgui.dx12')

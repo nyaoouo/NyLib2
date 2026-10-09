@@ -2,7 +2,9 @@
 #include "./frontends/common/ImguiInbound.h"
 #include "./frontends/common/PyDetours.h"
 #include "./frontends/common/Win32Hook.h"
+#include "./frontends/overlay/OverlayCanvas.h"
 
+#include <dxgi1_2.h>
 #include <atomic>
 #include <mutex>
 
@@ -157,6 +159,8 @@ START_M_IMGUI_IMPL_NAMESPACE
 
     void Dx11Window::Serve()
     {
+        if (this->overlayConfig.overlay)
+            return this->ServeOverlay();
         WNDCLASSEX wc = {sizeof(wc), CS_CLASSDC, Dx11WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, _T("PyImgui2Dx11Window"), nullptr};
         RegisterClassEx(&wc);
         HWND hwnd = CreateWindow(wc.lpszClassName, _T(""), WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, nullptr, nullptr, wc.hInstance, nullptr);
@@ -255,6 +259,135 @@ START_M_IMGUI_IMPL_NAMESPACE
         DestroyWindow(this->hwnd);
         UnregisterClass(wc.lpszClassName, wc.hInstance);
         this->hwnd = nullptr;
+    }
+
+    namespace
+    {
+        // The overlay canvas's D3D side; keeps device, context, swap chain and RTV in the window's Dx11Render fields.
+        class Dx11OverlayRenderer : public Overlay::Renderer
+        {
+        public:
+            explicit Dx11OverlayRenderer(Dx11Window &window) : window(window) {}
+
+            ~Dx11OverlayRenderer() override
+            {
+                this->Release();
+            }
+
+            IUnknown *CreateSwapChain(UINT width, UINT height) override
+            {
+                const D3D_FEATURE_LEVEL featureLevelArray[2] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0};
+                D3D_FEATURE_LEVEL featureLevel;
+                HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, featureLevelArray, 2, D3D11_SDK_VERSION, &this->window.pd3dDevice, &featureLevel, &this->window.pd3dDeviceContext);
+                if (hr == DXGI_ERROR_UNSUPPORTED)
+                    hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, featureLevelArray, 2, D3D11_SDK_VERSION, &this->window.pd3dDevice, &featureLevel, &this->window.pd3dDeviceContext);
+                if (FAILED(hr))
+                    _throwV_("Failed to create D3D11 device: {:#x}", (unsigned)hr);
+
+                IDXGIDevice *dxgiDevice = nullptr;
+                hr = this->window.pd3dDevice->QueryInterface(IID_PPV_ARGS(&dxgiDevice));
+                if (FAILED(hr))
+                    _throwV_("Failed to get IDXGIDevice: {:#x}", (unsigned)hr);
+                IDXGIAdapter *adapter = nullptr;
+                hr = dxgiDevice->GetAdapter(&adapter);
+                dxgiDevice->Release();
+                if (FAILED(hr))
+                    _throwV_("Failed to get the DXGI adapter: {:#x}", (unsigned)hr);
+                hr = adapter->GetParent(IID_PPV_ARGS(&this->factory));
+                adapter->Release();
+                if (FAILED(hr))
+                    _throwV_("Failed to get IDXGIFactory2: {:#x}", (unsigned)hr);
+
+                DXGI_SWAP_CHAIN_DESC1 desc = {};
+                desc.Width = width;
+                desc.Height = height;
+                desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                desc.SampleDesc.Count = 1;
+                desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+                desc.BufferCount = 2;
+                desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+                desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+                desc.Scaling = DXGI_SCALING_STRETCH;
+                IDXGISwapChain1 *swapChain = nullptr;
+                hr = this->factory->CreateSwapChainForComposition(this->window.pd3dDevice, &desc, nullptr, &swapChain);
+                if (FAILED(hr))
+                    _throwV_("CreateSwapChainForComposition failed: {:#x}", (unsigned)hr);
+                this->window.pSwapChain = swapChain;
+                this->window.CreateRenderTarget();
+                return swapChain;
+            }
+
+            void InitBackend() override
+            {
+                if (!ImGui_ImplDX11_Init(this->window.pd3dDevice, this->window.pd3dDeviceContext))
+                    _throw_("ImGui_ImplDX11_Init failed");
+            }
+
+            void ShutdownBackend() noexcept override
+            {
+                ImGui_ImplDX11_Shutdown();
+            }
+
+            void WaitIdle() noexcept override
+            {
+                if (this->window.pd3dDeviceContext != nullptr)
+                    this->window.pd3dDeviceContext->Flush();
+            }
+
+            void Resize(UINT width, UINT height) override
+            {
+                this->window.pd3dDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
+                this->window.CleanupRenderTarget();
+                HRESULT hr = this->window.pSwapChain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
+                if (FAILED(hr))
+                    _throwV_("Failed to resize the overlay swap chain: {:#x}", (unsigned)hr);
+                this->window.CreateRenderTarget();
+            }
+
+            void NewFrame() override
+            {
+                ImGui_ImplDX11_NewFrame();
+            }
+
+            bool RenderAndPresent() override
+            {
+                const float clearColor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                this->window.pd3dDeviceContext->OMSetRenderTargets(1, &this->window.mainRenderTargetView, nullptr);
+                this->window.pd3dDeviceContext->ClearRenderTargetView(this->window.mainRenderTargetView, clearColor);
+                ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+                HRESULT hr = this->window.pSwapChain->Present(1, 0);
+                if (hr == DXGI_STATUS_OCCLUDED)
+                    return false;
+                if (FAILED(hr))
+                    _throwV_("Failed to present the overlay swap chain: {:#x}", (unsigned)hr);
+                return true;
+            }
+
+            void Release() noexcept override
+            {
+                this->window.CleanupRenderTarget();
+                if (this->window.pSwapChain) { this->window.pSwapChain->Release(); this->window.pSwapChain = nullptr; }
+                if (this->factory) { this->factory->Release(); this->factory = nullptr; }
+                if (this->window.pd3dDeviceContext)
+                {
+                    this->window.pd3dDeviceContext->ClearState();
+                    this->window.pd3dDeviceContext->Flush();
+                    this->window.pd3dDeviceContext->Release();
+                    this->window.pd3dDeviceContext = nullptr;
+                }
+                if (this->window.pd3dDevice) { this->window.pd3dDevice->Release(); this->window.pd3dDevice = nullptr; }
+            }
+
+        private:
+            Dx11Window &window;
+            IDXGIFactory2 *factory = nullptr;
+        };
+    }
+
+    void Dx11Window::ServeOverlay()
+    {
+        Dx11OverlayRenderer renderer(*this);
+        Overlay::Serve(*this, this->overlayConfig, renderer, L"PyImgui2Dx11Overlay");
     }
 
     Dx11Texture *Dx11Render::CreateTexture(const char *filename)

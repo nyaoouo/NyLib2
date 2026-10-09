@@ -55,6 +55,7 @@ START_M_IMGUI_IMPL_NAMESPACE
         void CreateDeviceD3D();
         void CleanupDeviceD3D();
         void Serve();
+        void ServeOverlay();
     };
 
     class Dx11Inbound : public Dx11Render
