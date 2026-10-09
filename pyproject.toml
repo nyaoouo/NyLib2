@@ -75,6 +75,7 @@ exclude = [
     "build*",
     ".venv*",
     ".ignore*",
+    "nylib.ue.tests*",
 ]
 
 # Ship Python type stubs, PyInstaller hooks, and the bundled font resources.
@@ -85,6 +86,7 @@ exclude = [
 [tool.setuptools.package-data]
 "nylib" = ["py.typed", "*.pyi"]
 "nylib.vmware_wp" = ["py.typed", "README.md"]
+"nylib.ue" = ["py.typed"]
 "nylib.pyimgui" = ["*.pyi", "**/*.pyi"]
 "nylib.imguiutils.icons" = ["**/*.ttf"]
 "nylib.__pyinstaller" = ["README.md"]
