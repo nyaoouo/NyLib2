@@ -72,10 +72,14 @@ def _parse_exports(raw: str) -> tuple:
     return tuple(items)
 
 
-def _parse_allow_calls(raw: str) -> None:
-    for x in _split_list(raw):
+def _parse_allow_calls(raw: str) -> tuple:
+    items = _split_list(raw)
+    if not items:
+        raise ValueError('--allow-calls: name at least one of append-string, game-info, text, or give no value for all three')
+    for x in items:
         if x not in _ALLOW_CALLS_NAMES:
             raise ValueError(f'--allow-calls: unknown value {x!r}')
+    return tuple(items)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -122,7 +126,8 @@ def _build_parser() -> argparse.ArgumentParser:
                           'main module as a PE file), usmap (default: idmap,gobjects,gobjects-props,image; '
                           '"none" writes the snapshot only)')
     pd.add_argument('--allow-calls', dest='allow_calls', nargs='?', const=_ALLOW_CALLS_DEFAULT, default=None,
-                     help='append-string, game-info, text; no value means all three (not implemented yet)')
+                     help='append-string, game-info, text; no value means all three. Each makes a call in the game '
+                          'that can crash it; a profile can never enable calls')
     pd.add_argument('--json', action='store_true')
     common(pd)
     pd.set_defaults(func=_cmd_dump)
@@ -359,7 +364,7 @@ def _print_early_error(message: str, json_mode: bool, exit_code: int, *, err_typ
     return exit_code
 
 
-def _make_dump_progress(version: str):
+def _make_dump_progress(version: str, features=()):
     """I4 dump progress: header/profile/[n/3] INFO lines on `nylib.ue.cli`, each with its own elapsed seconds.
     (7-c) `image` prints nothing: its elapsed time is folded into `[3/3]`, not `[2/3]` (G7.6)."""
     cli_logger = logging.getLogger('nylib.ue.cli')
@@ -378,7 +383,8 @@ def _make_dump_progress(version: str):
         if event == 'exports':
             elapsed += image_seconds
         if event == 'open':
-            cli_logger.info('%s %s · dump · %s (pid %s) · %s · read-only', PROG, version, payload.exe, payload.pid, payload.mode)
+            tail = f'calls: {", ".join(features)}' if features else 'read-only'
+            cli_logger.info('%s %s · dump · %s (pid %s) · %s · %s', PROG, version, payload.exe, payload.pid, payload.mode, tail)
         elif event == 'probe':
             report = payload
             if report.profile:
@@ -387,7 +393,11 @@ def _make_dump_progress(version: str):
                 cli_logger.info('profile  %s', report.profile_note)
             names = ', '.join(report.unverified) if report.unverified else '-'
             cli_logger.info('[1/3] probe ok %d values (%d unverified: %s) (%.1fs)',
-                            len(report.values), len(report.unverified), names, elapsed)
+                            len(report.values), len(report.unverified), names, report.seconds)
+        elif event == 'calls':
+            results = payload
+            status = ' · '.join(f'{r.feature} {"ok" if r.ok else "failed" if r.ran else "not called"}' for r in results)
+            cli_logger.info('calls    %s (%.1fs)', status, sum(r.seconds for r in results))
         elif event == 'snapshot':
             c = payload
             cli_logger.info('[2/3] snapshot ok %s · %s · %s · %s · %s · %s (%.1fs)',
@@ -444,9 +454,11 @@ def _info_text_lines(doc: dict) -> list:
     counts = meta.get('counts') if isinstance(meta.get('counts'), dict) else {}
     prop_word = ('FProperty' if engine.get('use_fproperty') else 'UProperty') if 'use_fproperty' in engine else '?'
     pool_word = ('FNamePool' if engine.get('use_name_pool') else 'TNameEntryArray') if 'use_name_pool' in engine else '?'
+    rc = meta.get('remote_calls')
+    tail = f"calls: {', '.join(rc)}" if isinstance(rc, list) and rc and all(isinstance(x, str) for x in rc) else 'read-only'
     return [
         f"snapshot  schema {_meta_get(meta, 'schema.version')} · {_meta_get(meta, 'generator.tool')} "
-        f"{_meta_get(meta, 'generator.version')} · {_meta_get(meta, 'created')} · {_meta_get(meta, 'mode')} · read-only",
+        f"{_meta_get(meta, 'generator.version')} · {_meta_get(meta, 'created')} · {_meta_get(meta, 'mode')} · {tail}",
         f"game      {_meta_get(meta, 'target.game_name')} · pe {_meta_get(meta, 'target.module.pe_timestamp')} / "
         f"{_meta_get(meta, 'target.module.size')} · engine {_meta_get(meta, 'target.engine_version')} · "
         f"{prop_word} · {pool_word}",
@@ -641,13 +653,13 @@ def _cmd_dump(args, _open_target=None) -> int:
             return 2
         if 'usmap' in exports:  # reject before opening the target
             return _print_early_error('the usmap writer is not implemented yet', args.json, 1)
+    features = ()
     if args.allow_calls is not None:
         try:
-            _parse_allow_calls(args.allow_calls)
+            features = _parse_allow_calls(args.allow_calls)
         except ValueError as e:
             print(f'{PROG} dump: error: {e}', file=sys.stderr)
             return 2
-        return _print_early_error('--allow-calls is not implemented yet', args.json, 1)
 
     try:
         root = store_mod.resolve_out_root(args.out)
@@ -660,8 +672,10 @@ def _cmd_dump(args, _open_target=None) -> int:
         try:
             from . import pipeline  # lazy import: cli avoids pipeline at module load
             dump_exports = pipeline.DEFAULT_DUMP_EXPORTS if exports is None else exports
+            allow_calls_kwargs = {'allow_calls': features} if args.allow_calls is not None else {}
             result = pipeline.dump(_target_arg(args.target), profile=args.profile, out=args.out, exports=dump_exports,
-                                    progress=_make_dump_progress(_package_version()), _open_target=_open_target)
+                                    progress=_make_dump_progress(_package_version(), features or ()),
+                                    _open_target=_open_target, **allow_calls_kwargs)
         except Exception as e:
             return _finish_error(e, args.json, target=args.target, log_file=log_file, logger=logger)
         for w in result.warnings:
@@ -671,7 +685,9 @@ def _cmd_dump(args, _open_target=None) -> int:
             _print_json({'ok': True, 'snapshot': result.path, 'mode': result.target.mode,
                          'seconds': round(result.seconds, 1), 'counts': result.counts,
                          'exports': list(result.exports), 'unverified': list(result.unverified),
-                         'warnings': list(result.warnings)})
+                         'warnings': list(result.warnings),
+                         'remote_calls': [{'feature': r.feature, 'ran': r.ran, 'ok': r.ok, 'detail': r.detail,
+                                            'seconds': round(r.seconds, 1)} for r in result.remote_calls]})
         else:
             print(result.path)
         return 0

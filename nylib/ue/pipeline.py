@@ -9,11 +9,13 @@ import re
 import time
 from typing import Callable
 
+from . import calls
 from . import errors
 from . import image
 from . import memory
 from . import pe
 from . import profiles
+from . import remote_calls
 from . import scan
 from . import store
 from .exports import DEFAULT_EXPORTS, EXPORT_SPECS
@@ -117,6 +119,7 @@ class DumpResult:
     export_paths: tuple
     warnings: tuple
     seconds: float
+    remote_calls: tuple = ()  # one FeatureResult per requested feature, in RUN_ORDER
 
 
 @dataclasses.dataclass(frozen=True)
@@ -551,8 +554,29 @@ def probe(target=None, *, profile=None, out=None, cache_bytes=None, _open_target
 # dump
 # --------------------------------------------------------------------------------------------
 
-def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, log_file=None, cache_bytes=None,
-         progress=None, _open_target=None) -> DumpResult:
+def _report_after_calls(report: ProbeReport) -> ProbeReport:
+    """Rebuilds the rows, stem and unverified set that run()'s calls may have changed in report.context.engine."""
+    e = report.context.engine
+    unverified_set = set(report.context.unverified())
+    values = []
+    for v in report.values:
+        label = e.provenance.get(v.key, v.how)
+        value, resolved = _resolve_provenance_value(e, v.key)
+        if label != v.how or (resolved and value != v.value):
+            v = dataclasses.replace(v, value=value, how=label, unverified=(v.name in unverified_set or v.key in unverified_set))
+        values.append(v)
+    game_name = e.settings.Generator.GameName or ''
+    engine_version = e.settings.Generator.GameVersion or ''
+    return dataclasses.replace(
+        report, values=tuple(values), unverified=tuple(report.context.unverified()),
+        game_name=game_name, game_name_from=e.provenance.get('Settings.Generator.GameName', ''),
+        engine_version=engine_version, engine_version_from=e.provenance.get('Settings.Generator.GameVersion', ''),
+        stem=f'{engine_version}-{game_name}' if engine_version and game_name else '',
+    )
+
+
+def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, allow_calls=None, log_file=None,
+         cache_bytes=None, progress=None, _open_target=None) -> DumpResult:
     if not isinstance(exports, (list, tuple)):
         raise TypeError(f'exports must be a list or tuple, got {type(exports).__name__}')
     fmts = []
@@ -565,6 +589,7 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, l
             fmts.append(fmt)
     if 'usmap' in fmts:  # reject before opening the target
         raise NotImplementedError('the usmap writer is not implemented yet')
+    features = remote_calls.parse_features(allow_calls)  # errors before any root or target access
     if log_file is not None and not isinstance(log_file, (str, os.PathLike)):
         raise TypeError(f'log_file must be str, os.PathLike or None, got {type(log_file).__name__}')
     if progress is not None and not callable(progress):
@@ -590,15 +615,28 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, l
         ue_logger.setLevel(logging.DEBUG)
 
     try:
-        opened = (_open_target or open_target)(target, write=False, remote_calls=False, cache_bytes=cache_bytes)
+        opened = (_open_target or open_target)(target, write=False, remote_calls=bool(features), cache_bytes=cache_bytes)
         try:
+            if features and opened.process is None:
+                raise errors.UeError('--allow-calls needs a live target; a capture cannot run code')
             if progress is not None:
                 progress('open', opened.info)
             report = probe_opened(opened, profile=prof, out_root=root)
             if not report.ok:
                 raise report.error
+            if features:
+                transport = calls.open_transport('remote-thread' if opened.info.mode == 'external' else 'any-thread', opened.process)
+                try:
+                    results = remote_calls.run(report.context, transport, features)
+                finally:
+                    transport.close()
+                report = _report_after_calls(report)
+            else:
+                results = ()
             if progress is not None:
                 progress('probe', report)
+                if features:
+                    progress('calls', results)
 
             from . import reflect
             when = datetime.datetime.now().astimezone()
@@ -606,8 +644,11 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, l
             ctx = report.context
             m = ctx.to_meta()
             info = opened.info
+            if features:  # to_meta()'s own default ('called': False) stands when no call was requested
+                m['globals']['AppendString']['called'] = any(r.feature == 'append-string' and r.ran for r in results)
             meta = {
-                'created': when.isoformat(timespec='seconds'), 'mode': info.mode, 'remote_calls': [],
+                'created': when.isoformat(timespec='seconds'), 'mode': info.mode,
+                'remote_calls': [r.feature for r in results if r.ran],
                 'target': {**m['target'], 'pid': info.pid, 'exe': info.exe, 'exe_path': info.exe_path,
                           'exe_sha256': info.exe_sha256,
                           'module': {'base': _hex(info.module_base), 'size': _hex(info.size_of_image),
@@ -644,7 +685,8 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, l
             if progress is not None:
                 progress('snapshot', wr.counts)
 
-            warning_list = list(report.warnings)  # order: the report's, the image's (7-c), the unreadable share's
+            warning_list = list(report.warnings)  # order: the report's, the calls', the image's (7-c), the unreadable share's
+            warning_list.extend(f'--allow-calls {r.feature}: {r.detail}' for r in results if not r.ok)
             if img is not None:
                 warning_list.extend(img.warnings)
             share = (wr.unreadable / wr.walked) if wr.walked else 0.0
@@ -667,7 +709,7 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, l
 
             return DumpResult(path=folder, target=opened.info, report=report, counts=dict(wr.counts),
                               unverified=report.unverified, exports=written_fmts, export_paths=export_paths,
-                              warnings=tuple(warning_list), seconds=time.perf_counter() - t0)
+                              warnings=tuple(warning_list), seconds=time.perf_counter() - t0, remote_calls=results)
         finally:
             opened.close()
     finally:
