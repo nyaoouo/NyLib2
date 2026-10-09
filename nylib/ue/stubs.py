@@ -7,6 +7,7 @@ import re
 import sys
 import time
 import unicodedata
+from typing import NamedTuple
 
 from . import calls
 from .errors import MemoryReadError, SessionError
@@ -106,11 +107,18 @@ class TLazyObjectPtr(_LazyObjectPtr_, _Generic_[_T_]):
 """
 
 
-class StubReport(collections.namedtuple('StubReport', 'out_dir source files types removed skipped modules')):
+class StubReport(NamedTuple):
     """One `write_stubs` run: files/types written, stale files removed, type objects a session skipped, and the module map."""
+    out_dir: str                  # absolute
+    source: str                   # the header's source text, e.g. 'snapshot 20261002-024137'
+    files: int                    # .pyi files written, <out_dir>/__init__.pyi included
+    types: int                    # classes, structs and enums written
+    removed: int                  # stale generated files deleted (step 6)
+    skipped: int                  # type objects a session source did not write (step 2)
+    modules: dict[str, str]       # UE package path -> its file relative to out_dir, '/'-separated; in code-point order
 
 
-def usable(n: str) -> bool:
+def _usable(n: str) -> bool:
     """A name a script can write as a source identifier."""
     if not isinstance(n, str):
         raise TypeError(f'n must be str, got {type(n).__name__}')
@@ -157,7 +165,7 @@ def _check_out_dir(out_dir) -> tuple[str, str]:
         raise ValueError('out_dir must not be empty')
     out = os.path.abspath(s)
     name = os.path.basename(out)
-    if not usable(name) or name in sys.stdlib_module_names or name == 'nylib':
+    if not _usable(name) or name in sys.stdlib_module_names or name == 'nylib':
         raise ValueError(f'the last part of out_dir must be a Python package name that hides no module, got {name!r}: '
                           f'scripts import the stubs from it, e.g. {name}.Script.Engine')
     if os.path.exists(out) and not os.path.isdir(out):
@@ -799,7 +807,7 @@ def _declare_record(rec, predefined) -> tuple[list, tuple[str, int, str] | None,
     properties: list[tuple[str, PropertyRecord]] = []
     for p in rec.properties:
         names = member_names(p.name)
-        n = next((x for x in names if usable(x) and x not in taken), None)
+        n = next((x for x in names if _usable(x) and x not in taken), None)
         if n is not None:
             properties.append((n, p))
         taken.update(names)
@@ -816,7 +824,7 @@ def _declare_record(rec, predefined) -> tuple[list, tuple[str, int, str] | None,
             if f.flags & EFunctionFlags.Delegate:
                 taken.update(names)
                 continue
-            attr = next((x for x in names if usable(x) and x not in taken), None)
+            attr = next((x for x in names if _usable(x) and x not in taken), None)
             if attr is not None:
                 functions.append((attr, f))
             taken.update(names)
@@ -881,7 +889,7 @@ def _signature_line(attr: str, frec: FunctionRecord, ctx, records_by_path: dict)
     first_refused = None
     for i, p in enumerate(lay.inputs):
         cand = py_name(p.name)
-        if cand != receiver and cand not in used and usable(cand):
+        if cand != receiver and cand not in used and _usable(cand):
             name, renamed = cand, False
         else:
             name = f'_p{i}'
@@ -992,7 +1000,7 @@ def _enum_body(rec: EnumRecord) -> list[str]:
         if m in seen:
             continue
         seen.add(m)
-        if usable(m):
+        if _usable(m):
             lines.append(f'    {m} = {value}')
     return lines or ['    ...']
 
@@ -1012,7 +1020,7 @@ def _value_class_lines(rec: StructRecord, ctx, records_by_path: dict) -> list[st
     if fields is None:
         lines.append('    ...')
         return lines
-    usable_pairs = [(f, m) for f, m in zip(fields, members) if usable(f)]
+    usable_pairs = [(f, m) for f, m in zip(fields, members) if _usable(f)]
     if not usable_pairs:
         lines.append('    ...')
         return lines
@@ -1038,7 +1046,7 @@ def _result_fields(frec: FunctionRecord, rec, records_by_path: dict):
 def _result_class_lines(frec: FunctionRecord, rec, ctx, records_by_path: dict) -> list[str]:
     name = _own_name(ctx, _result_key(frec.path))
     fields, outputs = _result_fields(frec, rec, records_by_path)
-    simple = all(usable(f) and not f.startswith('_') for f in fields)
+    simple = all(_usable(f) and not f.startswith('_') for f in fields)
     lines = []
     if simple:
         lines.append(f'class {name}(_NamedTuple_):')
@@ -1049,7 +1057,7 @@ def _result_class_lines(frec: FunctionRecord, rec, ctx, records_by_path: dict) -
         lines.append(f'class {name}({ctx.builtin("tuple")}[{types}]):')
         any_usable = False
         for f, p in zip(fields, outputs):
-            if usable(f):
+            if _usable(f):
                 any_usable = True
                 lines.append('    @property')
                 lines.append(f'    def {f}(self) -> {_out_expr(p, ctx, records_by_path)}: ...')
@@ -1373,7 +1381,8 @@ def _write_stubs_impl(records: list, source_text: str, skipped: int, predefined,
         _assign_imports(mod, names_of[mod.modpath], refs, written, by_chain, names_of)
     planned: dict[str, str] = {}
     modules: dict[str, str] = {}
-    for pkg, mod in by_package.items():
+    for pkg in sorted(by_package):
+        mod = by_package[pkg]
         header = _header_line(pkg, source_text)
         text = _render_module(mod, header, written, names_of, by_chain, records_by_path, predefined)
         path = os.path.join(out, *mod.file.split('/'))
