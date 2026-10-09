@@ -1,6 +1,7 @@
 #include "./Dx12Window.h"
 #include "../common/ImguiInbound.h"
 #include "../common/PyDetours.h"
+#include "../overlay/OverlayCanvas.h"
 
 #include <mutex>
 
@@ -426,6 +427,8 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 
     void Dx12Window::Serve()
     {
+        if (this->overlayConfig.overlay)
+            return this->ServeOverlay();
         WNDCLASSEX wc = {sizeof(wc), CS_CLASSDC, Dx12ImguiWndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, _T("mImguiWindowDx12"), nullptr};
         ::RegisterClassEx(&wc);
         HWND hwnd = ::CreateWindow(wc.lpszClassName, _T(""), WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, nullptr, nullptr, wc.hInstance, nullptr);
@@ -554,6 +557,310 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         ::DestroyWindow(hwnd);
         ::UnregisterClass(wc.lpszClassName, wc.hInstance);
         this->hwnd = nullptr;
+    }
+
+    namespace
+    {
+        template <class T>
+        void ReleaseCom(T *&p) noexcept
+        {
+            if (p != nullptr)
+            {
+                p->Release();
+                p = nullptr;
+            }
+        }
+
+        void CloseHandleOnce(HANDLE &handle) noexcept
+        {
+            if (handle != nullptr)
+            {
+                CloseHandle(handle);
+                handle = nullptr;
+            }
+        }
+
+        // The overlay canvas's D3D12 side; keeps device, queue, swap chain, heaps and list in the window's Dx12Render fields.
+        class Dx12OverlayRenderer : public Overlay::Renderer
+        {
+        public:
+            explicit Dx12OverlayRenderer(Dx12Window &window) : window(window) {}
+
+            ~Dx12OverlayRenderer() override
+            {
+                this->Release();
+            }
+
+            IUnknown *CreateSwapChain(UINT width, UINT height) override
+            {
+                HRESULT hr = D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&this->window.pd3dDevice));
+                if (FAILED(hr))
+                    _throwV_("Failed to create D3D12 device: {:#x}", (unsigned)hr);
+                ID3D12Device *device = this->window.pd3dDevice;
+
+                D3D12_COMMAND_QUEUE_DESC queueDesc = {};
+                queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+                hr = device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&this->window.pd3dCommandQueue));
+                if (FAILED(hr))
+                    _throwV_("Failed to create the overlay command queue: {:#x}", (unsigned)hr);
+                hr = CreateDXGIFactory2(0, IID_PPV_ARGS(&this->factory));
+                if (FAILED(hr))
+                    _throwV_("Failed to create IDXGIFactory2: {:#x}", (unsigned)hr);
+
+                DXGI_SWAP_CHAIN_DESC1 desc = {};
+                desc.Width = width;
+                desc.Height = height;
+                desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                desc.SampleDesc.Count = 1;
+                desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+                desc.BufferCount = Dx12Window::NUM_BACK_BUFFERS;
+                desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+                desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+                desc.Scaling = DXGI_SCALING_STRETCH;
+                desc.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+                IDXGISwapChain1 *swapChain1 = nullptr;
+                hr = this->factory->CreateSwapChainForComposition(this->window.pd3dCommandQueue, &desc, nullptr, &swapChain1);
+                if (FAILED(hr))
+                    _throwV_("CreateSwapChainForComposition failed: {:#x}", (unsigned)hr);
+                hr = swapChain1->QueryInterface(IID_PPV_ARGS(&this->window.pSwapChain));
+                swapChain1->Release();
+                if (FAILED(hr))
+                    _throwV_("Failed to query IDXGISwapChain3: {:#x}", (unsigned)hr);
+                hr = this->window.pSwapChain->SetMaximumFrameLatency(Dx12Window::NUM_BACK_BUFFERS);
+                if (FAILED(hr))
+                    _throwV_("SetMaximumFrameLatency failed: {:#x}", (unsigned)hr);
+                this->latencyWaitable = this->window.pSwapChain->GetFrameLatencyWaitableObject();
+                if (this->latencyWaitable == nullptr)
+                    _throw_("The overlay swap chain has no frame latency waitable object");
+
+                D3D12_DESCRIPTOR_HEAP_DESC rtvDesc = {};
+                rtvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+                rtvDesc.NumDescriptors = Dx12Window::NUM_BACK_BUFFERS;
+                hr = device->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&this->window.pd3dRtvDescHeap));
+                if (FAILED(hr))
+                    _throwV_("Failed to create the overlay RTV heap: {:#x}", (unsigned)hr);
+                D3D12_DESCRIPTOR_HEAP_DESC srvDesc = {};
+                srvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+                srvDesc.NumDescriptors = 2;
+                srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+                hr = device->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&this->window.pd3dSrvDescHeap));
+                if (FAILED(hr))
+                    _throwV_("Failed to create the overlay SRV heap: {:#x}", (unsigned)hr);
+
+                for (UINT i = 0; i < Dx12Window::NUM_FRAMES_IN_FLIGHT; i++)
+                {
+                    hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&this->allocators[i]));
+                    if (FAILED(hr))
+                        _throwV_("Failed to create overlay command allocator {}: {:#x}", i, (unsigned)hr);
+                }
+                hr = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, this->allocators[0], nullptr, IID_PPV_ARGS(&this->window.pd3dCommandList));
+                if (FAILED(hr))
+                    _throwV_("Failed to create the overlay command list: {:#x}", (unsigned)hr);
+                hr = this->window.pd3dCommandList->Close();
+                if (FAILED(hr))
+                    _throwV_("Failed to close the overlay command list: {:#x}", (unsigned)hr);
+                hr = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&this->fence));
+                if (FAILED(hr))
+                    _throwV_("Failed to create the overlay fence: {:#x}", (unsigned)hr);
+                this->fenceEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+                if (this->fenceEvent == nullptr)
+                    _throwV_("Failed to create the overlay fence event: {}", GetLastError());
+
+                this->AcquireBackBuffers();
+                return this->window.pSwapChain;
+            }
+
+            void InitBackend() override
+            {
+                ID3D12DescriptorHeap *srvHeap = this->window.pd3dSrvDescHeap;
+                if (!ImGui_ImplDX12_Init(this->window.pd3dDevice, Dx12Window::NUM_FRAMES_IN_FLIGHT, DXGI_FORMAT_R8G8B8A8_UNORM, srvHeap,
+                                         srvHeap->GetCPUDescriptorHandleForHeapStart(), srvHeap->GetGPUDescriptorHandleForHeapStart()))
+                    _throw_("ImGui_ImplDX12_Init failed");
+            }
+
+            void ShutdownBackend() noexcept override
+            {
+                ImGui_ImplDX12_Shutdown();
+            }
+
+            // Waits for a fresh fence value, so a list executed just before a throw is covered too.
+            void WaitIdle() noexcept override
+            {
+                if (this->window.pd3dCommandQueue == nullptr || this->fence == nullptr || this->fenceEvent == nullptr)
+                    return;
+                UINT64 value = this->lastSignaled + 1;
+                if (FAILED(this->window.pd3dCommandQueue->Signal(this->fence, value)))
+                    return;
+                this->lastSignaled = value;
+                if (FAILED(this->fence->SetEventOnCompletion(value, this->fenceEvent)))
+                    return;
+                WaitForSingleObject(this->fenceEvent, INFINITE);
+            }
+
+            void Resize(UINT width, UINT height) override
+            {
+                if (this->fence->GetCompletedValue() < this->lastSignaled)
+                    _throw_("The GPU is still using the overlay back buffers");
+                this->ReleaseBackBuffers();
+                HRESULT hr = this->window.pSwapChain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
+                if (FAILED(hr))
+                    _throwV_("Failed to resize the overlay swap chain: {:#x}", (unsigned)hr);
+                this->AcquireBackBuffers();
+            }
+
+            void NewFrame() override
+            {
+                ImGui_ImplDX12_NewFrame();
+            }
+
+            bool RenderAndPresent() override
+            {
+                IDXGISwapChain3 *swapChain = this->window.pSwapChain;
+                if (this->occluded)
+                {
+                    if (swapChain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED)
+                        return false;
+                    this->occluded = false;
+                }
+
+                UINT slot = this->WaitForSlot();
+                UINT backBuffer = swapChain->GetCurrentBackBufferIndex();
+                ID3D12GraphicsCommandList *list = this->window.pd3dCommandList;
+                HRESULT hr = this->allocators[slot]->Reset();
+                if (FAILED(hr))
+                    _throwV_("Failed to reset the overlay command allocator: {:#x}", (unsigned)hr);
+                hr = list->Reset(this->allocators[slot], nullptr);
+                if (FAILED(hr))
+                    _throwV_("Failed to reset the overlay command list: {:#x}", (unsigned)hr);
+
+                D3D12_RESOURCE_BARRIER barrier = {};
+                barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                barrier.Transition.pResource = this->backBuffers[backBuffer];
+                barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+                barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+                list->ResourceBarrier(1, &barrier);
+                const float clearColor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                list->ClearRenderTargetView(this->rtvHandles[backBuffer], clearColor, 0, nullptr);
+                list->OMSetRenderTargets(1, &this->rtvHandles[backBuffer], FALSE, nullptr);
+                list->SetDescriptorHeaps(1, &this->window.pd3dSrvDescHeap);
+                ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), list);
+                barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+                barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+                list->ResourceBarrier(1, &barrier);
+                hr = list->Close();
+                if (FAILED(hr))
+                    _throwV_("Failed to close the overlay command list: {:#x}", (unsigned)hr);
+
+                this->window.pd3dCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList *const *)&list);
+                hr = swapChain->Present(1, 0);
+                this->SignalSlot(slot);
+                if (hr == DXGI_STATUS_OCCLUDED)
+                {
+                    this->occluded = true;
+                    return false;
+                }
+                if (FAILED(hr))
+                    _throwV_("Failed to present the overlay swap chain: {:#x}", (unsigned)hr);
+                return true;
+            }
+
+            void Release() noexcept override
+            {
+                this->ReleaseBackBuffers();
+                ReleaseCom(this->window.pSwapChain);
+                CloseHandleOnce(this->latencyWaitable);
+                ReleaseCom(this->window.pd3dCommandList);
+                for (ID3D12CommandAllocator *&allocator : this->allocators)
+                    ReleaseCom(allocator);
+                ReleaseCom(this->window.pd3dRtvDescHeap);
+                ReleaseCom(this->window.pd3dSrvDescHeap);
+                ReleaseCom(this->fence);
+                CloseHandleOnce(this->fenceEvent);
+                ReleaseCom(this->window.pd3dCommandQueue);
+                ReleaseCom(this->factory);
+                ReleaseCom(this->window.pd3dDevice);
+                for (UINT64 &value : this->slotFenceValues)
+                    value = 0;
+                this->frameIndex = 0;
+                this->lastSignaled = 0;
+                this->occluded = false;
+            }
+
+        private:
+            Dx12Window &window;
+            IDXGIFactory2 *factory = nullptr;
+            HANDLE latencyWaitable = nullptr;
+            ID3D12CommandAllocator *allocators[Dx12Window::NUM_FRAMES_IN_FLIGHT] = {};
+            UINT64 slotFenceValues[Dx12Window::NUM_FRAMES_IN_FLIGHT] = {};
+            UINT frameIndex = 0;
+            ID3D12Fence *fence = nullptr;
+            HANDLE fenceEvent = nullptr;
+            UINT64 lastSignaled = 0;
+            bool occluded = false;
+            ID3D12Resource *backBuffers[Dx12Window::NUM_BACK_BUFFERS] = {};
+            D3D12_CPU_DESCRIPTOR_HANDLE rtvHandles[Dx12Window::NUM_BACK_BUFFERS] = {};
+
+            void AcquireBackBuffers()
+            {
+                UINT increment = this->window.pd3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+                D3D12_CPU_DESCRIPTOR_HANDLE handle = this->window.pd3dRtvDescHeap->GetCPUDescriptorHandleForHeapStart();
+                for (UINT i = 0; i < Dx12Window::NUM_BACK_BUFFERS; i++)
+                {
+                    HRESULT hr = this->window.pSwapChain->GetBuffer(i, IID_PPV_ARGS(&this->backBuffers[i]));
+                    if (FAILED(hr))
+                        _throwV_("Failed to get overlay back buffer {}: {:#x}", i, (unsigned)hr);
+                    this->rtvHandles[i] = handle;
+                    this->window.pd3dDevice->CreateRenderTargetView(this->backBuffers[i], nullptr, handle);
+                    handle.ptr += increment;
+                }
+            }
+
+            void ReleaseBackBuffers() noexcept
+            {
+                for (ID3D12Resource *&buffer : this->backBuffers)
+                    ReleaseCom(buffer);
+            }
+
+            // Advances to the next slot and waits for the latency waitable and the slot's last frame; returns the slot.
+            UINT WaitForSlot()
+            {
+                this->frameIndex++;
+                UINT slot = this->frameIndex % Dx12Window::NUM_FRAMES_IN_FLIGHT;
+                HANDLE handles[2] = {this->latencyWaitable, nullptr};
+                DWORD count = 1;
+                if (this->slotFenceValues[slot] != 0)
+                {
+                    HRESULT hr = this->fence->SetEventOnCompletion(this->slotFenceValues[slot], this->fenceEvent);
+                    if (FAILED(hr))
+                        _throwV_("Failed to set the overlay fence event: {:#x}", (unsigned)hr);
+                    this->slotFenceValues[slot] = 0;
+                    handles[1] = this->fenceEvent;
+                    count = 2;
+                }
+                DWORD result = WaitForMultipleObjects(count, handles, TRUE, INFINITE);
+                if (result >= WAIT_OBJECT_0 + count)
+                    _throwV_("Failed to wait for the overlay frame: {:#x} (error {})", (unsigned)result, GetLastError());
+                return slot;
+            }
+
+            // Signals the next fence value for the slot's list; on failure the slot stays 0.
+            void SignalSlot(UINT slot)
+            {
+                UINT64 value = this->lastSignaled + 1;
+                HRESULT hr = this->window.pd3dCommandQueue->Signal(this->fence, value);
+                if (FAILED(hr))
+                    _throwV_("Failed to signal the overlay fence: {:#x}", (unsigned)hr);
+                this->lastSignaled = value;
+                this->slotFenceValues[slot] = value;
+            }
+        };
+    }
+
+    void Dx12Window::ServeOverlay()
+    {
+        Dx12OverlayRenderer renderer(*this);
+        Overlay::Serve(*this, this->overlayConfig, renderer, L"PyImgui2Dx12Overlay");
     }
 
     typedef long(__fastcall *PresentD3D12)(IDXGISwapChain3 *pSwapChain, UINT SyncInterval, UINT Flags);

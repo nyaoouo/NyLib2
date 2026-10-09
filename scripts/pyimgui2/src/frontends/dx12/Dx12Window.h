@@ -85,6 +85,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         void WaitForLastSubmittedFrame();
         FrameContext *WaitForNextFrameResources();
         void Serve();
+        void ServeOverlay();
     };
 
     class Dx12Inbound : public Dx12Render
