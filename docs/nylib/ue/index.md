@@ -52,4 +52,5 @@ The snapshot stays usable without the game: [load it](dump.md#load-a-snapshot), 
 - PalServer (UE 5.1, build 25247047), TRIANGLE STRATEGY (UE 4.27, build 11410614) and FrostBound (UE 5.4, build 24486464).
 - Dumps: verified on captures of all three, and live against Dumper-7 on all three; the internal (injected) dump live on PalServer.
 - The IDA importer, runtime reads, call parameter layouts, `--allow-calls` targets and stubs: checked on captures of all three; the importer applied in IDA 9.3.
-- Not yet verified on a real game: runtime sessions (reads, writes, calls), `--allow-calls`, `attach_current`.
+- Live on FrostBound (main menu): runtime reads through both type sources, one property write (restored), one remote-thread UFunction call, and `dump --allow-calls` with all three features, checked against Dumper-7's output for the same build.
+- Not yet verified on a real game: `attach_current` and `calls='any-thread'`; runtime sessions and `--allow-calls` on PalServer and TRIANGLE STRATEGY; calls with inputs or with string, array or FText outputs.
