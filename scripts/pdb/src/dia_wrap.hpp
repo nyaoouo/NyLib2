@@ -72,6 +72,13 @@ public:
     LONG offset() const;                     // relative offset (for members)
     DWORD sym_index_id() const;
     std::optional<DiaType> type() const;
+
+    // --- extension properties ---
+    bool is_function() const;                // PublicSymbol only: true iff DIA flags the public as a function
+    bool is_code() const;                    // PublicSymbol only: true iff DIA flags the public as code
+    std::optional<DWORD> data_kind() const;  // DataKind for a Data symbol; nullopt otherwise
+    bool is_static() const;                  // Function symbols only: true iff file-static
+    DWORD location_type() const;             // LocationType; LocIsNull unless S_OK
 };
 
 // A member of a UDT or an enum - carries name/offset/type + bitfield info.
@@ -85,13 +92,14 @@ public:
         : owner(std::move(o)), sym(std::move(s)) {}
 
     std::string name() const;
-    LONG offset() const;                     // byte offset, -1 for static
+    LONG offset() const;                     // byte offset of a field/bitfield/non-virtual base; -1 otherwise
     LONG bit_offset() const;                 // -1 if not a bitfield
     ULONGLONG bit_length() const;            // 0 if not a bitfield
     std::optional<LONGLONG> enum_value() const;  // filled only for enum members
     std::optional<DiaType> type() const;
     DWORD tag_id() const;
     std::string tag() const;
+    DWORD access() const;                    // CV_access_e (1/2/3); 0 unless S_OK
 };
 
 // A DIA "type" symbol (UDT / Enum / Pointer / Array / Typedef / BaseType ...).
@@ -114,6 +122,16 @@ public:
     std::vector<DiaMember> fields() const;   // instance data members only (SymTagData + DataIsMember)
     std::optional<DiaType> base_type() const; // Typedef/Pointer/Array underlying
     DWORD sym_index_id() const;
+
+    // --- extension properties ---
+    std::optional<DWORD> udt_kind() const;   // UdtKind for a UDT; nullopt otherwise
+    bool is_const() const;                   // true iff get_constType is S_OK and TRUE
+    bool is_volatile() const;                // true iff get_volatileType is S_OK and TRUE
+    bool is_unaligned() const;               // true iff get_unalignedType is S_OK and TRUE
+    bool is_reference() const;               // true iff get_reference is S_OK and TRUE
+    bool is_rvalue_reference() const;        // true iff get_RValueReference is S_OK and TRUE
+    std::optional<DWORD> calling_convention() const;  // CV_call_e for a FunctionType; nullopt otherwise
+    std::optional<DiaType> class_parent() const;      // enclosing class; nullopt unless S_OK and non-null
 };
 
 // Wraps IDiaDataSource + IDiaSession + global scope for one open PDB.
