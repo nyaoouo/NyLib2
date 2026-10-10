@@ -37,6 +37,13 @@ START_M_IMGUI_IMPL_NAMESPACE
                 return DefWindowProcW(hwnd, msg, wParam, lParam);
             }
 
+            constexpr int ZOrderWalkLimit = 1024;
+
+            bool IsTopmost(HWND window) noexcept
+            {
+                return (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+            }
+
             template <class T>
             void ReleaseCom(T *&p) noexcept
             {
@@ -107,9 +114,10 @@ START_M_IMGUI_IMPL_NAMESPACE
                     {
                         this->CheckSignals();
                         int monitor = this->config.monitor.load();
+                        int zOrder = this->config.zOrder.load();
                         this->tracker.Step();
                         ImGui::SetCurrentContext(this->ctx);
-                        this->UpdatePlacement(monitor);
+                        this->UpdatePlacement(monitor, zOrder);
                         if (this->tracker.State() == TargetState::Hidden)
                         {
                             // The callback keeps running at most every 50 ms; nothing is resized or presented.
@@ -186,6 +194,7 @@ START_M_IMGUI_IMPL_NAMESPACE
                 HWND canvas = nullptr;
                 bool hwndSet = false;
                 bool shown = false;
+                bool everShown = false;
                 IDCompositionDesktopDevice *dcompDevice = nullptr;
                 IDCompositionTarget *dcompTarget = nullptr;
                 IDCompositionVisual2 *dcompVisual = nullptr;
@@ -307,13 +316,99 @@ START_M_IMGUI_IMPL_NAMESPACE
                 }
 
                 // The canvas half of the lifecycle step: placement, visibility, then z-order.
-                void UpdatePlacement(int monitor)
+                void UpdatePlacement(int monitor, int zOrder)
                 {
                     bool visible = this->tracker.State() != TargetState::Hidden;
                     if (visible)
                         this->Place(monitor);
                     this->SetVisible(visible);
-                    // Z-order: every visible state is topmost, which Place and SetVisible already insert at.
+                    if (visible)
+                        this->UpdateZOrder(zOrder);
+                }
+
+                // Moves the canvas in the z-order only where overlayZOrder, the target's root and the foreground window say it is wrong.
+                void UpdateZOrder(int zOrder) noexcept
+                {
+                    HWND foreground = GetForegroundWindow();
+                    bool topmost = IsTopmost(this->canvas);
+                    if (this->tracker.State() != TargetState::Tracking)
+                    {
+                        this->KeepTopmost(topmost, nullptr, foreground);
+                        return;
+                    }
+                    HWND root = GetAncestor(this->tracker.Target(), GA_ROOT);
+                    if (root == nullptr)
+                        return;
+                    if (zOrder == (int)OVERLAY_TYPES_NAMESPACE::OverlayZOrder::Topmost)
+                    {
+                        this->KeepTopmost(topmost, IsTopmost(root) ? root : nullptr, foreground);
+                        return;
+                    }
+                    bool rootTopmost = IsTopmost(root);
+                    if (!rootTopmost && (foreground == root || foreground == this->canvas))
+                    {
+                        if (!topmost)
+                            this->InsertCanvas(HWND_TOPMOST);
+                        return;
+                    }
+                    this->KeepAbove(root, rootTopmost, topmost);
+                }
+
+                // Topmost, and back in front of `above` (a topmost root) or a topmost foreground window that lies above the canvas.
+                void KeepTopmost(bool topmost, HWND above, HWND foreground) noexcept
+                {
+                    // A window turning topmost enters at the bottom of the topmost band, so the walks below see where it landed.
+                    if (!topmost)
+                        this->InsertCanvas(HWND_TOPMOST);
+                    if (above != nullptr && this->CanvasBelow(above))
+                        this->InsertCanvas(HWND_TOPMOST);
+                    else if (foreground != nullptr && foreground != this->canvas && IsTopmost(foreground) && this->CanvasBelow(foreground))
+                        this->InsertCanvas(HWND_TOPMOST);
+                }
+
+                // Directly above the root, with the root's topmost bit.
+                void KeepAbove(HWND root, bool rootTopmost, bool topmost) noexcept
+                {
+                    HWND above = GetWindow(root, GW_HWNDPREV);
+                    if (above == this->canvas && topmost == rootTopmost)
+                        return;
+                    if (rootTopmost)
+                    {
+                        if (!topmost)
+                            this->InsertCanvas(HWND_TOPMOST);
+                        this->InsertCanvas(above == nullptr || above == this->canvas ? HWND_TOPMOST : above);
+                    }
+                    else if (above == nullptr || above == this->canvas || IsTopmost(above))
+                    {
+                        // HWND_NOTOPMOST puts a topmost canvas in front of every non-topmost window, so directly above this root.
+                        if (!topmost)
+                            this->InsertCanvas(HWND_TOPMOST);
+                        this->InsertCanvas(HWND_NOTOPMOST);
+                    }
+                    else
+                        this->InsertCanvas(above);
+                }
+
+                // True when a bounded walk up from `window` reaches the top of the z-order without meeting the canvas; false when a window on the way is destroyed.
+                bool CanvasBelow(HWND window) const noexcept
+                {
+                    HWND current = window;
+                    for (int i = 0; i < ZOrderWalkLimit; i++)
+                    {
+                        HWND previous = GetWindow(current, GW_HWNDPREV);
+                        if (previous == nullptr)
+                            return IsWindow(current) != FALSE;
+                        if (previous == this->canvas)
+                            return false;
+                        current = previous;
+                    }
+                    return false;
+                }
+
+                // A failed call is left to the next iteration.
+                void InsertCanvas(HWND insertAfter) noexcept
+                {
+                    SetWindowPos(this->canvas, insertAfter, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
                 }
 
                 // The target's client rect while tracking, else the monitor's; skipped when the target cannot be read.
@@ -330,18 +425,22 @@ START_M_IMGUI_IMPL_NAMESPACE
                     RECT current{};
                     if (GetWindowRect(this->canvas, &current) && EqualRect(&current, &rect))
                         return;
-                    SetWindowPos(this->canvas, HWND_TOPMOST, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, SWP_NOACTIVATE);
+                    SetWindowPos(this->canvas, nullptr, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, SWP_NOZORDER | SWP_NOACTIVATE);
                 }
 
+                // The first show inserts at the top of the topmost band; a later show keeps the z-order.
                 void SetVisible(bool visible)
                 {
                     if (visible == this->shown)
                         return;
-                    if (visible)
+                    if (visible && !this->everShown)
                         SetWindowPos(this->canvas, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                    else if (visible)
+                        SetWindowPos(this->canvas, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOZORDER);
                     else
                         SetWindowPos(this->canvas, nullptr, 0, 0, 0, 0, SWP_HIDEWINDOW | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER);
                     this->shown = visible;
+                    this->everShown = this->everShown || visible;
                 }
 
                 void ResizeSwapChain()

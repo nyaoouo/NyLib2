@@ -32,6 +32,8 @@ START_M_IMGUI_IMPL_NAMESPACE
             // Publishes no target and drops the snapshot without firing a callback.
             void Reset() noexcept;
             TargetState State() const;
+            // The target while Tracking or Hidden, else nullptr.
+            HWND Target() const;
             // The target's client rect on the screen, in the calling thread's DPI context; false when it cannot be read.
             bool ClientRectOnScreen(RECT &rect) const;
 

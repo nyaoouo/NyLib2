@@ -50,6 +50,11 @@ START_M_IMGUI_IMPL_NAMESPACE
             return this->state;
         }
 
+        HWND TargetTracker::Target() const
+        {
+            return this->Tracked() ? this->hwnd : nullptr;
+        }
+
         bool TargetTracker::ClientRectOnScreen(RECT &rect) const
         {
             RECT client{};
