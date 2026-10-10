@@ -55,6 +55,7 @@ pip install ".[full]"   # all of the above
 | Dear ImGui | `nylib.pyimgui` | direct ImGui bindings, standalone windows + injected overlays |
 | ImGui widgets | `nylib.imguiutils` | alerts, file dialog, window manager, and a full debug view |
 | Unity / Mono | `nylib.mono` | runtime inspector for Mono/IL2CPP-style games |
+| Unreal Engine | `nylib.ue` | UE4.25+/UE5 reflection dumper (snapshots, Dumper-7-format exports, IDA importer), runtime objects with opt-in writes and UFunction calls |
 | VMware | `nylib.vmware_wp` | drive VMware Workstation Pro (power/snapshots/guest/REST) |
 | Misc | `nylib.utils`, `nylib.logging` | lazy pip, asm, eventloop, color logging, ... |
 
@@ -152,6 +153,19 @@ print(vr.list_running_vms())
 ```
 
 Full details in [`nylib/vmware_wp/README.md`](nylib/vmware_wp/README.md).
+
+### Dump and attach to an Unreal Engine game
+
+```python
+# needs a running game
+from nylib.ue import dump, Unreal
+
+result = dump('TRIANGLE_STRATEGY-Win64-Shipping.exe')
+with Unreal.attach('TRIANGLE_STRATEGY-Win64-Shipping.exe', dump=result.path) as ue:
+    print(ue.world())
+```
+
+Usage docs: [docs/nylib/ue/index.md](docs/nylib/ue/index.md).
 
 ---
 

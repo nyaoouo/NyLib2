@@ -374,7 +374,13 @@ class c_char_p(Pointer[c_char]):
 
     @property
     def content(self) -> bytes:
-        return ctypes.string_at(self.value)
+        if isinstance(self._accessor_, CAccessorLocal): return ctypes.string_at(self.value)  # raises OSError on bad pointers
+        address, res = self.value, bytearray()
+        while True:  # chunks never cross a page the string does not reach
+            chunk = self._accessor_.read(address, min(0x100, 0x1000 - (address & 0xFFF)))
+            if (i := chunk.find(0)) >= 0: return bytes(res + chunk[:i])
+            res += chunk
+            address += len(chunk)
 
 
 class Array(CData, typing.Generic[_CData_T]):
@@ -414,7 +420,7 @@ class Array(CData, typing.Generic[_CData_T]):
             "_type_": t,
             "_length_": length,
             "_size_": size,
-            "_pad_size_": t._pad_size_,
+            "_pad_size_": padsizeof(t),
             "_can_self_handle_": can_self_handle
         })
 
@@ -462,7 +468,7 @@ class SArray(CData, typing.Generic[_T]):
             "_type_": t,
             "_length_": length,
             "_size_": size,
-            "_pad_size_": t._pad_size_,
+            "_pad_size_": padsizeof(t),
             "_can_self_handle_": can_self_handle
         })
 
@@ -495,6 +501,8 @@ def finalize_struct(cls):
             bit_max = field_size * 8
             if field.bit_offset < 0:
                 field.bit_offset = 0
+            elif field.bit_offset + field.bit_size > bit_max:
+                raise ValueError("Bit field overflow")
             bit_cur = field.bit_offset + field.bit_size
             while i < len(fields):
                 next_field = fields[i]
@@ -507,7 +515,8 @@ def finalize_struct(cls):
                         if bit_cur + next_field.bit_size > bit_max: break
                         next_field.bit_offset = bit_cur
                     else:
-                        if next_field.bit_offset > next_field.bit_offset: break
+                        if next_field.bit_offset + next_field.bit_size > bit_max:
+                            raise ValueError("Bit field overflow")
                     next_field.offset = field.offset
                 elif next_field.offset < field.offset:
                     assert next_field.bit_offset >= 0, "Bit offset must be set for backward bit field"
@@ -518,7 +527,7 @@ def finalize_struct(cls):
                             raise ValueError("Bit field overflow")
                         next_field.bit_offset = bit_cur
                     else:
-                        if next_field.bit_offset > next_field.bit_offset:
+                        if next_field.bit_offset + next_field.bit_size > bit_max:
                             raise ValueError("Bit field overflow")
                 bit_cur = max(bit_cur, next_field.bit_offset + next_field.bit_size)
                 i += 1
@@ -570,7 +579,9 @@ class SField(Field[_T]):
 
 
 class BField(Field[int]):
-    rev_mask: int = -1  # fill when finalize ~(self.bit_mask << self.bit_offset)
+    @property
+    def rev_mask(self) -> int:
+        return ~(self.bit_mask << self.bit_offset)
 
     def __init__(self, t: typing.Type[SimpleCData[int]], bit_size: int = 1, offset: int = -1, bit_offset: int = -1):
         assert issubclass(t, SimpleCData), "Field type must be subclass of SimpleCData"
@@ -587,7 +598,9 @@ class BField(Field[int]):
     def __set__(self, instance: Struct, value: int):
         if self.bit_offset < 0 or self.bit_size < 0: finalize_struct(instance.__class__)
         _value = super().__get__(instance, instance.__class__)
-        _value.value = (_value.value & self.rev_mask) | ((value & self.bit_mask) << self.bit_offset)
+        bits = _value._struct_.size * 8
+        v = ((_value.value & self.rev_mask) | ((value & self.bit_mask) << self.bit_offset)) & ((1 << bits) - 1)
+        _value.value = v - (1 << bits) if v >> (bits - 1) and _value._struct_.format in 'bhiq' else v  # signed unit
 
 
 def offsetof(t: Field) -> int:
@@ -820,14 +833,20 @@ class CAccessorProcess(CAccessor):
 
         param, need_fix_ptr = func_decl.make_param(address, *args)
         abuf = self.alloc(len(param))
-        for off in need_fix_ptr:
-            struct_u64.pack_into(param, off, abuf + struct_u64.unpack_from(param, off)[0])
-        self.write(abuf, param)
+        try:
+            for off in need_fix_ptr:
+                struct_u64.pack_into(param, off, abuf + struct_u64.unpack_from(param, off)[0])
+            self.write(abuf, param)
 
-        res_t = func_decl.restype
-        res_is_xmm = res_t is c_float or res_t is c_double
-        # TODO: use better shell
-        res = self.process.call(ptr, abuf, read_xmm=res_is_xmm, get_bytes=True)
+            res_t = func_decl.restype
+            res_is_xmm = res_t is c_float or res_t is c_double
+            # TODO: use better shell
+            res = self.process.call(ptr, abuf, read_xmm=res_is_xmm, get_bytes=True)
+        finally:
+            try:
+                self.free(abuf)
+            except OSError:  # target process is gone
+                pass
         if issubclass(res_t, SimpleCData):
             return res_t._struct_.unpack_from(res)[0]
         return res_t(_address_=res, _accessor_=self)
