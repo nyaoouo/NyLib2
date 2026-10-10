@@ -56,6 +56,7 @@ START_M_IMGUI_IMPL_NAMESPACE
             std::atomic<bool> overlay{false};
             std::atomic<int> monitor{0};
             std::atomic<bool> dpiAware{true};
+            std::atomic<int> zOrder{0};   // OverlayZOrder value, 0 = AboveTarget; read once per iteration without the GIL
             py::object target;                                 // empty reads as None (GIL, then mutex)
             TargetKind targetKind = TargetKind::None;          // (mutex)
             uintptr_t targetBits = 0;                          // a Fixed value's pointer bits (mutex)
@@ -200,6 +201,9 @@ START_M_IMGUI_IMPL_NAMESPACE
                 .def_property("overlayDpiAware",
                               [](W &self) { return self.overlayConfig.dpiAware.load(); },
                               [](W &self, bool value) { self.overlayConfig.dpiAware = value; })
+                .def_property("overlayZOrder",
+                              [](W &self) { return (OVERLAY_TYPES_NAMESPACE::OverlayZOrder)(int)self.overlayConfig.zOrder.load(); },
+                              [](W &self, OVERLAY_TYPES_NAMESPACE::OverlayZOrder value) { self.overlayConfig.zOrder = (int)value; })
                 .def_property("overlayTarget",
                               [](W &self) { return LoadTarget(self.overlayConfig); },
                               [](W &self, TargetArg value) { StoreTarget(self.overlayConfig, std::move(value)); })
