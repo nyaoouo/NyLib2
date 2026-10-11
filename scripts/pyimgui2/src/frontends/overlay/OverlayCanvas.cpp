@@ -16,9 +16,62 @@ START_M_IMGUI_IMPL_NAMESPACE
     {
         namespace
         {
+            constexpr int PolicyCaptureAll = (int)OVERLAY_TYPES_NAMESPACE::InputPolicy::CaptureAll;
+            constexpr int PolicyPassAll = (int)OVERLAY_TYPES_NAMESPACE::InputPolicy::PassAll;
+
+            // The serving canvas's inputPolicy (null outside Serve()), whether its last read was PassAll, and whether a read entered PassAll since the last frame.
+            struct CanvasFilter
+            {
+                const std::atomic<int> *policy = nullptr;
+                bool lastPassAll = false;
+                bool entered = false;
+            };
+            thread_local CanvasFilter canvasFilter;
+
+            // Records one policy read, by CanvasWndProc or the frame, whichever sees a change first.
+            void NotePolicy(bool passAll) noexcept
+            {
+                if (passAll && !canvasFilter.lastPassAll)
+                    canvasFilter.entered = true;
+                canvasFilter.lastPassAll = passAll;
+            }
+
+            // The messages ImGui does not see under PassAll: button presses, wheel, keyboard and WM_SETCURSOR.
+            bool SkippedUnderPassAll(UINT msg) noexcept
+            {
+                switch (msg)
+                {
+                case WM_LBUTTONDOWN:
+                case WM_LBUTTONDBLCLK:
+                case WM_RBUTTONDOWN:
+                case WM_RBUTTONDBLCLK:
+                case WM_MBUTTONDOWN:
+                case WM_MBUTTONDBLCLK:
+                case WM_XBUTTONDOWN:
+                case WM_XBUTTONDBLCLK:
+                case WM_MOUSEWHEEL:
+                case WM_MOUSEHWHEEL:
+                case WM_KEYDOWN:
+                case WM_KEYUP:
+                case WM_SYSKEYDOWN:
+                case WM_SYSKEYUP:
+                case WM_CHAR:
+                case WM_SYSCHAR:
+                case WM_DEADCHAR:
+                case WM_SYSDEADCHAR:
+                case WM_UNICHAR:
+                case WM_SETCURSOR:
+                    return true;
+                }
+                return false;
+            }
+
             LRESULT CALLBACK CanvasWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) noexcept
             {
-                if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam))
+                bool passAll = canvasFilter.policy != nullptr && canvasFilter.policy->load() == PolicyPassAll;
+                NotePolicy(passAll);
+                bool skip = passAll && SkippedUnderPassAll(msg);
+                if (!skip && ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam))
                     return true;
                 switch (msg)
                 {
@@ -74,6 +127,7 @@ START_M_IMGUI_IMPL_NAMESPACE
 
                     this->RegisterCanvasClass();
 
+                    canvasFilter = {&this->self.inputPolicy, this->self.inputPolicy.load() == PolicyPassAll, false};
                     RECT rect = this->PlacementRect(this->config.monitor.load());
                     this->canvas = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_TOPMOST, this->className, L"", WS_POPUP,
                                                    rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top,
@@ -90,6 +144,8 @@ START_M_IMGUI_IMPL_NAMESPACE
                     this->bufferHeight = (UINT)(std::max)(1L, client.bottom - client.top);
                     IUnknown *swapChain = this->renderer.CreateSwapChain(this->bufferWidth, this->bufferHeight);
                     this->BindComposition(swapChain);
+                    int policy = this->self.inputPolicy.load();
+                    this->ApplyLayered(policy != PolicyCaptureAll);
 
                     this->ctx = ImGui::CreateContext(nullptr);
                     this->self.ctx = this->ctx;
@@ -128,6 +184,7 @@ START_M_IMGUI_IMPL_NAMESPACE
                         }
                         this->ResizeSwapChain();
                         this->ProduceFrame();
+                        this->UpdateClickThrough();
                         this->Present();
                     }
                 }
@@ -162,6 +219,7 @@ START_M_IMGUI_IMPL_NAMESPACE
                         DestroyWindow(this->canvas);
                         this->canvas = nullptr;
                     }
+                    canvasFilter = {};
                     if (this->classRegistered)
                     {
                         UnregisterClassW(this->className, this->instance);
@@ -252,6 +310,17 @@ START_M_IMGUI_IMPL_NAMESPACE
                     hr = this->dcompDevice->Commit();
                     if (FAILED(hr))
                         _throwV_("DirectComposition Commit failed: {:#x}", (unsigned)hr);
+                }
+
+                // Makes the canvas layered at full opacity, passing clicks through from the start when `passThrough`.
+                void ApplyLayered(bool passThrough)
+                {
+                    LONG_PTR exStyle = GetWindowLongPtrW(this->canvas, GWL_EXSTYLE) | WS_EX_LAYERED | (passThrough ? WS_EX_TRANSPARENT : 0);
+                    SetLastError(0);
+                    if (SetWindowLongPtrW(this->canvas, GWL_EXSTYLE, exStyle) == 0 && GetLastError() != 0)
+                        _throwV_("Failed to make the overlay window layered: {}", GetLastError());
+                    if (!SetLayeredWindowAttributes(this->canvas, 0, 255, LWA_ALPHA))
+                        _throwV_("Failed to set the overlay window opacity: {}", GetLastError());
                 }
 
                 void WarnMonitorOutOfRange(int index, size_t count)
@@ -468,6 +537,19 @@ START_M_IMGUI_IMPL_NAMESPACE
                     ImGui::SetCurrentContext(this->ctx);
                     this->renderer.NewFrame();
                     ImGui_ImplWin32_NewFrame();
+                    this->GateInput();
+                }
+
+                // Drops what ImGui holds once inputPolicy entered PassAll since the last frame, and hides the gamepad unless the canvas is the foreground window.
+                void GateInput()
+                {
+                    ImGuiIO &io = ImGui::GetIO();
+                    bool passAll = this->self.inputPolicy.load() == PolicyPassAll;
+                    NotePolicy(passAll);
+                    if (std::exchange(canvasFilter.entered, false))
+                        io.AddFocusEvent(false);
+                    if (passAll || GetForegroundWindow() != this->canvas)
+                        io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
                 }
 
                 // BeginFrame through the render callback.
@@ -497,6 +579,33 @@ START_M_IMGUI_IMPL_NAMESPACE
                     }
                     ImGui::SetCurrentContext(this->ctx);
                     ClearViewportsFlag();
+                }
+
+                // Lets mouse input pass through where inputPolicy and this frame's io.WantCaptureMouse say so; one call per change.
+                void UpdateClickThrough() noexcept
+                {
+                    LONG_PTR exStyle = GetWindowLongPtrW(this->canvas, GWL_EXSTYLE);
+                    bool passing = (exStyle & WS_EX_TRANSPARENT) != 0;
+                    int policy = this->self.inputPolicy.load();
+                    bool wantCapture = ImGui::GetIO().WantCaptureMouse;
+                    bool capture = policy == PolicyCaptureAll || (policy != PolicyPassAll && wantCapture && !this->OutsidePressHeld());
+                    bool passThrough = !capture;
+                    if (passing == passThrough)
+                        return;
+                    SetWindowLongPtrW(this->canvas, GWL_EXSTYLE, passThrough ? exStyle | WS_EX_TRANSPARENT : exStyle & ~WS_EX_TRANSPARENT);
+                }
+
+                // True while a mouse button is down and the canvas does not hold the mouse capture.
+                bool OutsidePressHeld() const noexcept
+                {
+                    if (GetCapture() == this->canvas)
+                        return false;
+                    for (int button : {VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2})
+                    {
+                        if (GetAsyncKeyState(button) & 0x8000)
+                            return true;
+                    }
+                    return false;
                 }
 
                 void Present()
