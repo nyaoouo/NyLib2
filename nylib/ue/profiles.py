@@ -405,7 +405,7 @@ def render_profile(exe: str, game_name: str, pins, *, when: datetime.datetime) -
     lines += [
         '',
         '[offsets]',
-        '# "UStruct.MinAlignment" = 0x5C',
+        '# "Off.UStruct.MinAlignment" = 0x5C',
         '',
         '[hooks]',
         '# FILE beside the profile; the hook runs in the process that runs the dump, which is inside the game in internal mode',
