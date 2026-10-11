@@ -1,6 +1,9 @@
 #pragma once
 
 #include "../../gHeader.h"
+#include "../../OverlayTypes.h"   // InputPolicy type only; never call pybind_setup_OverlayTypes here
+
+#include <atomic>
 
 #define M_IMGUI_IMPL_NAMESPACE mNameSpace::MImguiImpl
 #define START_M_IMGUI_IMPL_NAMESPACE namespace mNameSpace{ namespace MImguiImpl
@@ -24,6 +27,8 @@ START_M_IMGUI_IMPL_NAMESPACE
         HICON trayIcon = nullptr;
         bool inTray = false;
         ImGuiContext *ctx = nullptr;
+        std::atomic<int> inputPolicy{0};   // InputPolicy value; 0 = Auto
+        std::atomic<int> gamepadPolicy{0}; // GamepadPolicy value; 0 = WhenForeground
 
         RenderBase(std::optional<py::function> renderCallback = std::nullopt);
         virtual ~RenderBase();
@@ -32,6 +37,9 @@ START_M_IMGUI_IMPL_NAMESPACE
         std::string GetTitle();
         void SetTitle(std::string title);
         void SetRenderCallback(std::optional<py::function> renderCallback);
+        void SetInputPolicy(OVERLAY_TYPES_NAMESPACE::InputPolicy policy);
+        void SetGamepadPolicy(OVERLAY_TYPES_NAMESPACE::GamepadPolicy policy);
+        void GateGamepad(bool passAll) noexcept; // hides the gamepad from this frame per gamepadPolicy; passAll hides it always
         void ProcessCallBeforeFrameOnce(py::object self);
         void ProcessRenderCallback(py::object self);
         void Close();

@@ -1,11 +1,49 @@
 #include "win32_app.h"
+#include "foreign_hook.h"
 
 #include <d3d11.h>
 #include <dxgi.h>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <vector>
 
 extern "C" __declspec(dllexport) volatile unsigned long long g_dxtest_tick = 0;
+
+namespace
+{
+    std::string EnvOrEmpty(const char *name)
+    {
+        char *value = nullptr;
+        size_t size = 0;
+        std::string result;
+        if (_dupenv_s(&value, &size, name) == 0 && value != nullptr)
+        {
+            result = value;
+            free(value);
+        }
+        return result;
+    }
+
+    // Comma-separated seconds, e.g. "2,4" (DXTEST_RESIZE_AT).
+    std::vector<double> ParseTimes(const std::string &text)
+    {
+        std::vector<double> result;
+        size_t pos = 0;
+        while (pos < text.size())
+        {
+            size_t next = text.find(',', pos);
+            std::string token = text.substr(pos, next == std::string::npos ? std::string::npos : next - pos);
+            if (!token.empty())
+                result.push_back(std::atof(token.c_str()));
+            if (next == std::string::npos)
+                break;
+            pos = next + 1;
+        }
+        return result;
+    }
+}
 
 extern "C" __declspec(dllexport) void dxtest_tick(unsigned long long in,
                                                    unsigned long long* out) {
@@ -57,13 +95,40 @@ int main()
     device->CreateRenderTargetView(back_buffer, nullptr, &rtv);
     back_buffer->Release();
 
+    auto resize_at = ParseTimes(EnvOrEmpty("DXTEST_RESIZE_AT"));
+    size_t resize_at_next = 0;
+    std::string foreign_mode = EnvOrEmpty("DXTEST_FOREIGN");
+    unsigned long long foreign_calls_snapshot = 0;
+    auto foreign_snapshot_time = std::chrono::steady_clock::now();
+
     auto start = std::chrono::steady_clock::now();
     auto seconds = std::chrono::seconds(dxtest::RunSecondsFromEnv());
     while (window.PumpMessages() && std::chrono::steady_clock::now() - start < seconds)
     {
+        double elapsed_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         unsigned long long _dx_out = 0;
         dxtest_tick(g_dxtest_tick, &_dx_out);
         title_stats.Update(window.hwnd, g_dxtest_tick);
+
+        if (!foreign_mode.empty())
+        {
+            dxtest::ForeignHookTick(swap_chain, elapsed_s);
+            // Slide a ~1s-old snapshot forward so the end-of-run check below
+            // can tell whether the counter is still advancing.
+            if (std::chrono::duration<double>(std::chrono::steady_clock::now() - foreign_snapshot_time).count() >= 1.0)
+            {
+                foreign_calls_snapshot = g_foreign_present_calls;
+                foreign_snapshot_time = std::chrono::steady_clock::now();
+            }
+        }
+
+        if (resize_at_next < resize_at.size() && elapsed_s >= resize_at[resize_at_next])
+        {
+            ++resize_at_next;
+            int new_w = (window.width > 800) ? 640 : 960;
+            int new_h = (window.height > 480) ? 360 : 540;
+            SetWindowPos(window.hwnd, nullptr, 0, 0, new_w, new_h, SWP_NOMOVE | SWP_NOZORDER);
+        }
 
         if (window.size_changed && window.width > 0 && window.height > 0)
         {
@@ -89,6 +154,13 @@ int main()
         context->OMSetRenderTargets(1, &rtv, nullptr);
         context->ClearRenderTargetView(rtv, color);
         swap_chain->Present(1, 0);
+    }
+
+    if (!foreign_mode.empty() && g_foreign_present_calls <= foreign_calls_snapshot)
+    {
+        std::printf("dx11 foreign present counter stalled: now=%llu snapshot=%llu\n",
+                     g_foreign_present_calls, foreign_calls_snapshot);
+        return 13;
     }
 
     rtv->Release();

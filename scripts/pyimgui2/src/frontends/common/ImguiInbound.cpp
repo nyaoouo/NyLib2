@@ -1,10 +1,23 @@
 #include "./ImguiInbound.h"
+#include <dxgi1_4.h>
 
 START_IMGUI_INBOUND_NAMESPACE
 {
     static RenderType g_renderType = RenderType::None;
     static PVOID *g_methodsTable = nullptr;
     static size_t g_methodsTableSize = 0;
+    static PVOID *g_d3d12QueueVtable = nullptr;
+    static PVOID *g_d3d12SwapChain3Vtable = nullptr;
+
+    PVOID *GetD3D12QueueVtable()
+    {
+        return g_d3d12QueueVtable;
+    }
+
+    PVOID *GetD3D12SwapChain3Vtable()
+    {
+        return g_d3d12SwapChain3Vtable;
+    }
 
     RenderType GuessRenderType()
     {
@@ -281,6 +294,13 @@ START_IMGUI_INBOUND_NAMESPACE
                                         _mSetMethodsTable_(44 + 19, commandAllocator, 9);
                                         _mSetMethodsTable_(44 + 19 + 9, commandList, 60);
                                         _mSetMethodsTable_(44 + 19 + 9 + 60, swapChain, 18);
+                                        g_d3d12QueueVtable = *(PVOID **)commandQueue;
+                                        IDXGISwapChain3 *swapChain3 = nullptr;
+                                        if (swapChain->QueryInterface(__uuidof(IDXGISwapChain3), (void **)&swapChain3) == S_OK)
+                                        {
+                                            g_d3d12SwapChain3Vtable = *(PVOID **)swapChain3;
+                                            swapChain3->Release();
+                                        }
                                         swapChain->Release();
                                         _mSBreak_();
                                     } while (0);

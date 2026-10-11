@@ -4,6 +4,12 @@
 
 #include <chrono>
 
+// Tag marking a WndProc message as a probe message (RE2/RE2-lite, unit
+// 2-1): LOWORD(lParam) for buttons/wheel/keyboard, HIWORD(lParam) for
+// WM_SETCURSOR. These are fields ImGui's Win32 handler ignores for those
+// messages, so a probe never changes real input behaviour.
+#define DXTEST_PROBE_TAG 0x5E5Eu
+
 namespace dxtest
 {
     class Window

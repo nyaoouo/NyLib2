@@ -6,6 +6,7 @@
 #include <wrl/client.h>
 #include <mutex>
 #include <algorithm>
+#include <deque>
 
 #pragma comment(lib, "dwrite.lib")
 
@@ -450,32 +451,40 @@ const ScriptProfile* LookupScriptProfile(const std::wstring& locale)
 // SECTION 5 — ImGui atlas installation
 // ============================================================
 
+// Returns a process-lifetime copy of `ranges`, de-duplicated by content.
+const ImWchar* InternRanges(const std::vector<ImWchar>& ranges)
+{
+    static std::deque<std::vector<ImWchar>> store;
+    for (const auto& existing : store)
+        if (existing == ranges) return existing.data();
+    store.push_back(ranges);
+    return store.back().data();
+}
+
 // Install a chain of matches as a single merged ImFont. Returns the primary
-// ImFont* (py wrapped). matches is held by const ref AND iterated without
-// moves — ImGui keeps the ranges pointer until Build() runs.
+// ImFont* (py wrapped). Ranges are interned via InternRanges before being
+// handed to the atlas (see above).
 py::object InstallMatches(const std::vector<Win32FontMatch>& matches, float size_pixels)
 {
     if (matches.empty()) return py::none();
 
-    py::module_ imgui_mod = py::module_::import("pyimgui.imgui");
-    py::object  fonts     = imgui_mod.attr("GetIO")().attr("Fonts");
-    py::object  FontCfg   = imgui_mod.attr("ImFontConfig");
-    py::object  primary   = py::none();
+    ImFontAtlas* atlas   = ImGui::GetIO().Fonts;
+    ImFont*      primary = nullptr;
 
     for (size_t i = 0; i < matches.size(); ++i) {
         const auto& m = matches[i];
-        py::object cfg = FontCfg();
-        cfg.attr("FontNo") = m.face_index;
-        if (i > 0) cfg.attr("MergeMode") = true;
-        py::object f = fonts.attr("AddFontFromFileTTF")(
-            WstrToUtf8(m.file_path),
+        ImFontConfig cfg;
+        cfg.FontNo = m.face_index;
+        if (i > 0) cfg.MergeMode = true;
+        ImFont* f = atlas->AddFontFromFileTTF(
+            WstrToUtf8(m.file_path).c_str(),
             size_pixels,
-            cfg,
-            py::int_(reinterpret_cast<uintptr_t>(m.ranges.data())));
+            &cfg,
+            InternRanges(m.ranges));
         if (i == 0) primary = f;
     }
-    fonts.attr("Build")();
-    return primary;
+    atlas->Build();
+    return primary ? py::cast(primary) : py::none();
 }
 
 }  // anonymous namespace

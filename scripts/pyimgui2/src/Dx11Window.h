@@ -1,5 +1,6 @@
 #pragma once
 #include "./frontends/common/RenderBase.h"
+#include "./frontends/overlay/OverlayConfig.h"
 
 #include <d3d11.h>
 #include <dxgi.h>
@@ -46,6 +47,7 @@ START_M_IMGUI_IMPL_NAMESPACE
         UINT resizeWidth = 0;
         UINT resizeHeight = 0;
         ImVec4 ClearColor = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
+        Overlay::Config overlayConfig;
 
         Dx11Window(std::optional<py::function> renderCallback = std::nullopt);
         ~Dx11Window();
@@ -53,6 +55,7 @@ START_M_IMGUI_IMPL_NAMESPACE
         void CreateDeviceD3D();
         void CleanupDeviceD3D();
         void Serve();
+        void ServeOverlay();
     };
 
     class Dx11Inbound : public Dx11Render
@@ -61,6 +64,8 @@ START_M_IMGUI_IMPL_NAMESPACE
         static inline Dx11Inbound *_instance = nullptr;
         bool isImGuiInitialized = false;
         bool isInLogic = false;
+        std::atomic<bool> viewportsEnable{true};
+        std::atomic<bool> viewportsDirty{false};
 
         Dx11Inbound(std::optional<py::function> renderCallback = std::nullopt);
         ~Dx11Inbound();

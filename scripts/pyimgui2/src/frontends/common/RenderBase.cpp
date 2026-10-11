@@ -71,6 +71,35 @@ START_M_IMGUI_IMPL_NAMESPACE
         this->renderCallback_argc = renderCallback ? PyFuncArgc(renderCallback.value()) : 0;
     }
 
+    void RenderBase::SetInputPolicy(OVERLAY_TYPES_NAMESPACE::InputPolicy policy)
+    {
+        this->inputPolicy = (int)policy;
+    }
+
+    void RenderBase::SetGamepadPolicy(OVERLAY_TYPES_NAMESPACE::GamepadPolicy policy)
+    {
+        this->gamepadPolicy = (int)policy;
+    }
+
+    // Runs between the backend's NewFrame and ImGui::NewFrame, with this window's context current; takes no GIL.
+    void RenderBase::GateGamepad(bool passAll) noexcept
+    {
+        int policy = this->gamepadPolicy.load();
+        bool gated;
+        if (passAll || policy == (int)OVERLAY_TYPES_NAMESPACE::GamepadPolicy::Never)
+            gated = true;
+        else if (policy == (int)OVERLAY_TYPES_NAMESPACE::GamepadPolicy::Always)
+            gated = false;
+        else
+        {
+            HWND self = (HWND)ImGui::GetMainViewport()->PlatformHandle;
+            HWND fg = GetForegroundWindow();
+            gated = !(fg != nullptr && (fg == self || IsChild(fg, self) || ImGui::FindViewportByPlatformHandle(fg)));
+        }
+        if (gated)
+            ImGui::GetIO().BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
+    }
+
     void RenderBase::ProcessCallBeforeFrameOnce(py::object self)
     {
         auto gstate = PyGILState_Ensure();
@@ -244,6 +273,12 @@ START_M_IMGUI_IMPL_NAMESPACE
         py::class_<RenderBase>(m, "_RenderBase", py::dynamic_attr(), py::module_local())
             .def_property("renderCallback", [](RenderBase &self) { return self.renderCallback; }, &RenderBase::SetRenderCallback)
             .def_property("title", &RenderBase::GetTitle, &RenderBase::SetTitle)
+            .def_property("inputPolicy",
+                           [](RenderBase &self) { return (OVERLAY_TYPES_NAMESPACE::InputPolicy)(int)self.inputPolicy.load(); },
+                           &RenderBase::SetInputPolicy)
+            .def_property("gamepadPolicy",
+                           [](RenderBase &self) { return (OVERLAY_TYPES_NAMESPACE::GamepadPolicy)(int)self.gamepadPolicy.load(); },
+                           &RenderBase::SetGamepadPolicy)
             .def("CallBeforeFrameOnce", [](RenderBase &self, py::function func) { self.callBeforeFrameOnce.push_back(func); })
             .def("Close", &RenderBase::Close)
             .def("UpdateTrayIconInfo", &RenderBase::UpdateTrayIconInfo, py::arg("tooltip"), py::arg("iconPath") = L"")

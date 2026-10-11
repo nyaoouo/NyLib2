@@ -3,8 +3,45 @@
 #include <d3d9.h>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <vector>
 
 extern "C" __declspec(dllexport) volatile unsigned long long g_dxtest_tick = 0;
+
+namespace
+{
+    std::string EnvOrEmpty(const char *name)
+    {
+        char *value = nullptr;
+        size_t size = 0;
+        std::string result;
+        if (_dupenv_s(&value, &size, name) == 0 && value != nullptr)
+        {
+            result = value;
+            free(value);
+        }
+        return result;
+    }
+
+    // Comma-separated seconds, e.g. "2,4" (DXTEST_RESIZE_AT; each resize runs IDirect3DDevice9::Reset).
+    std::vector<double> ParseTimes(const std::string &text)
+    {
+        std::vector<double> result;
+        size_t pos = 0;
+        while (pos < text.size())
+        {
+            size_t next = text.find(',', pos);
+            std::string token = text.substr(pos, next == std::string::npos ? std::string::npos : next - pos);
+            if (!token.empty())
+                result.push_back(std::atof(token.c_str()));
+            if (next == std::string::npos)
+                break;
+            pos = next + 1;
+        }
+        return result;
+    }
+}
 
 extern "C" __declspec(dllexport) void dxtest_tick(unsigned long long in,
                                                    unsigned long long* out) {
@@ -51,13 +88,25 @@ int main()
         return 3;
     }
 
+    auto resize_at = ParseTimes(EnvOrEmpty("DXTEST_RESIZE_AT"));
+    size_t resize_at_next = 0;
+
     auto start = std::chrono::steady_clock::now();
     auto seconds = std::chrono::seconds(dxtest::RunSecondsFromEnv());
     while (window.PumpMessages() && std::chrono::steady_clock::now() - start < seconds)
     {
+        double elapsed_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         unsigned long long _dx_out = 0;
         dxtest_tick(g_dxtest_tick, &_dx_out);
         title_stats.Update(window.hwnd, g_dxtest_tick);
+
+        if (resize_at_next < resize_at.size() && elapsed_s >= resize_at[resize_at_next])
+        {
+            ++resize_at_next;
+            int new_w = (window.width > 800) ? 640 : 960;
+            int new_h = (window.height > 480) ? 360 : 540;
+            SetWindowPos(window.hwnd, nullptr, 0, 0, new_w, new_h, SWP_NOMOVE | SWP_NOZORDER);
+        }
 
         if (window.size_changed && window.width > 0 && window.height > 0)
         {
@@ -68,7 +117,11 @@ int main()
             if (FAILED(hrz))
             {
                 std::printf("dx9 Reset failed: 0x%08lx\n", hrz);
+                std::fflush(stdout);
+                return 10;
             }
+            std::printf("dx9 Reset %dx%d ok\n", window.width, window.height);
+            std::fflush(stdout);
         }
 
         device->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, D3DCOLOR_XRGB(28, 42, 72), 1.0f, 0);

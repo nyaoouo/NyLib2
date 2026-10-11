@@ -2,6 +2,11 @@
 #include "./frontends/common/ImguiInbound.h"
 #include "./frontends/common/PyDetours.h"
 #include "./frontends/common/Win32Hook.h"
+#include "./frontends/overlay/OverlayCanvas.h"
+
+#include <dxgi1_2.h>
+#include <atomic>
+#include <mutex>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -154,6 +159,8 @@ START_M_IMGUI_IMPL_NAMESPACE
 
     void Dx11Window::Serve()
     {
+        if (this->overlayConfig.overlay)
+            return this->ServeOverlay();
         WNDCLASSEX wc = {sizeof(wc), CS_CLASSDC, Dx11WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, _T("PyImgui2Dx11Window"), nullptr};
         RegisterClassEx(&wc);
         HWND hwnd = CreateWindow(wc.lpszClassName, _T(""), WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, nullptr, nullptr, wc.hInstance, nullptr);
@@ -219,6 +226,7 @@ START_M_IMGUI_IMPL_NAMESPACE
             }
             ImGui_ImplDX11_NewFrame();
             ImGui_ImplWin32_NewFrame();
+            this->GateGamepad(false);
             ImGui::NewFrame();
 
             {
@@ -254,6 +262,135 @@ START_M_IMGUI_IMPL_NAMESPACE
         this->hwnd = nullptr;
     }
 
+    namespace
+    {
+        // The overlay canvas's D3D side; keeps device, context, swap chain and RTV in the window's Dx11Render fields.
+        class Dx11OverlayRenderer : public Overlay::Renderer
+        {
+        public:
+            explicit Dx11OverlayRenderer(Dx11Window &window) : window(window) {}
+
+            ~Dx11OverlayRenderer() override
+            {
+                this->Release();
+            }
+
+            IUnknown *CreateSwapChain(UINT width, UINT height) override
+            {
+                const D3D_FEATURE_LEVEL featureLevelArray[2] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0};
+                D3D_FEATURE_LEVEL featureLevel;
+                HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, featureLevelArray, 2, D3D11_SDK_VERSION, &this->window.pd3dDevice, &featureLevel, &this->window.pd3dDeviceContext);
+                if (hr == DXGI_ERROR_UNSUPPORTED)
+                    hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, featureLevelArray, 2, D3D11_SDK_VERSION, &this->window.pd3dDevice, &featureLevel, &this->window.pd3dDeviceContext);
+                if (FAILED(hr))
+                    _throwV_("Failed to create D3D11 device: {:#x}", (unsigned)hr);
+
+                IDXGIDevice *dxgiDevice = nullptr;
+                hr = this->window.pd3dDevice->QueryInterface(IID_PPV_ARGS(&dxgiDevice));
+                if (FAILED(hr))
+                    _throwV_("Failed to get IDXGIDevice: {:#x}", (unsigned)hr);
+                IDXGIAdapter *adapter = nullptr;
+                hr = dxgiDevice->GetAdapter(&adapter);
+                dxgiDevice->Release();
+                if (FAILED(hr))
+                    _throwV_("Failed to get the DXGI adapter: {:#x}", (unsigned)hr);
+                hr = adapter->GetParent(IID_PPV_ARGS(&this->factory));
+                adapter->Release();
+                if (FAILED(hr))
+                    _throwV_("Failed to get IDXGIFactory2: {:#x}", (unsigned)hr);
+
+                DXGI_SWAP_CHAIN_DESC1 desc = {};
+                desc.Width = width;
+                desc.Height = height;
+                desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                desc.SampleDesc.Count = 1;
+                desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+                desc.BufferCount = 2;
+                desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+                desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+                desc.Scaling = DXGI_SCALING_STRETCH;
+                IDXGISwapChain1 *swapChain = nullptr;
+                hr = this->factory->CreateSwapChainForComposition(this->window.pd3dDevice, &desc, nullptr, &swapChain);
+                if (FAILED(hr))
+                    _throwV_("CreateSwapChainForComposition failed: {:#x}", (unsigned)hr);
+                this->window.pSwapChain = swapChain;
+                this->window.CreateRenderTarget();
+                return swapChain;
+            }
+
+            void InitBackend() override
+            {
+                if (!ImGui_ImplDX11_Init(this->window.pd3dDevice, this->window.pd3dDeviceContext))
+                    _throw_("ImGui_ImplDX11_Init failed");
+            }
+
+            void ShutdownBackend() noexcept override
+            {
+                ImGui_ImplDX11_Shutdown();
+            }
+
+            void WaitIdle() noexcept override
+            {
+                if (this->window.pd3dDeviceContext != nullptr)
+                    this->window.pd3dDeviceContext->Flush();
+            }
+
+            void Resize(UINT width, UINT height) override
+            {
+                this->window.pd3dDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
+                this->window.CleanupRenderTarget();
+                HRESULT hr = this->window.pSwapChain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
+                if (FAILED(hr))
+                    _throwV_("Failed to resize the overlay swap chain: {:#x}", (unsigned)hr);
+                this->window.CreateRenderTarget();
+            }
+
+            void NewFrame() override
+            {
+                ImGui_ImplDX11_NewFrame();
+            }
+
+            bool RenderAndPresent() override
+            {
+                const float clearColor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                this->window.pd3dDeviceContext->OMSetRenderTargets(1, &this->window.mainRenderTargetView, nullptr);
+                this->window.pd3dDeviceContext->ClearRenderTargetView(this->window.mainRenderTargetView, clearColor);
+                ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+                HRESULT hr = this->window.pSwapChain->Present(1, 0);
+                if (hr == DXGI_STATUS_OCCLUDED)
+                    return false;
+                if (FAILED(hr))
+                    _throwV_("Failed to present the overlay swap chain: {:#x}", (unsigned)hr);
+                return true;
+            }
+
+            void Release() noexcept override
+            {
+                this->window.CleanupRenderTarget();
+                if (this->window.pSwapChain) { this->window.pSwapChain->Release(); this->window.pSwapChain = nullptr; }
+                if (this->factory) { this->factory->Release(); this->factory = nullptr; }
+                if (this->window.pd3dDeviceContext)
+                {
+                    this->window.pd3dDeviceContext->ClearState();
+                    this->window.pd3dDeviceContext->Flush();
+                    this->window.pd3dDeviceContext->Release();
+                    this->window.pd3dDeviceContext = nullptr;
+                }
+                if (this->window.pd3dDevice) { this->window.pd3dDevice->Release(); this->window.pd3dDevice = nullptr; }
+            }
+
+        private:
+            Dx11Window &window;
+            IDXGIFactory2 *factory = nullptr;
+        };
+    }
+
+    void Dx11Window::ServeOverlay()
+    {
+        Dx11OverlayRenderer renderer(*this);
+        Overlay::Serve(*this, this->overlayConfig, renderer, L"PyImgui2Dx11Overlay");
+    }
+
     Dx11Texture *Dx11Render::CreateTexture(const char *filename)
     {
         return new Dx11Texture(this->pd3dDevice, filename);
@@ -265,6 +402,115 @@ START_M_IMGUI_IMPL_NAMESPACE
     typedef HRESULT(__stdcall *ResizeBuffers)(IDXGISwapChain *, UINT, UINT, UINT, DXGI_FORMAT, UINT);
     static ResizeBuffers oResizeBuffers = nullptr;
 
+    // Hooks stay installed for the process lifetime and reach the instance only through hookInstance.
+    static std::atomic<Dx11Inbound *> hookInstance{nullptr};
+    static std::atomic<bool> hooksEnabled{false};
+    static std::atomic<int> hooksInFlight{0};
+    static thread_local int hookBodyDepth = 0;
+    // Depth of our own render logic and submits on this thread; hooks reached from inside it pass through.
+    static thread_local int logicDepth = 0;
+    static std::atomic<HWND> attachedHwnd{nullptr};
+    static bool presentHooked = false;
+    static bool resizeHooked = false;
+    static bool atexitRegistered = false;
+    // Serializes hooksEnabled, the Win32Hook subclass and the visible hwnd; never held while acquiring the GIL.
+    static std::mutex transitionMutex;
+
+    namespace
+    {
+        // Marks a hook body that may use hookInstance.
+        struct HookBody
+        {
+            HookBody() { hookBodyDepth++; hooksInFlight++; }
+            ~HookBody() { hooksInFlight--; hookBodyDepth--; }
+        };
+
+        // Marks our own render logic or submit on this thread.
+        struct LogicScope
+        {
+            LogicScope() { logicDepth++; }
+            ~LogicScope() { logicDepth--; }
+        };
+    }
+
+    static bool IsFinalizing()
+    {
+#if PY_VERSION_HEX >= 0x030D0000
+        return Py_IsFinalizing();
+#else
+        return _Py_IsFinalizing();
+#endif
+    }
+
+    // Waits until no other thread is inside a hook body, releasing the GIL and serving sent messages meanwhile.
+    static void WaitForHooks()
+    {
+        auto busy = []() { return hooksInFlight.load() != hookBodyDepth && !IsFinalizing(); };
+        if (!busy())
+            return;
+        std::optional<py::gil_scoped_release> release;
+        if (PyGILState_Check())
+            release.emplace();
+        MSG msg;
+        while (busy())
+        {
+            ::MsgWaitForMultipleObjects(0, nullptr, FALSE, 1, QS_SENDMESSAGE);
+            ::PeekMessage(&msg, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+        }
+    }
+
+    // Stops drawing and input; the hooks stay installed.
+    static void StopHooks()
+    {
+        std::lock_guard<std::mutex> lock(transitionMutex);
+        hooksEnabled = false;
+        try
+        {
+            if (HWND hwnd = attachedHwnd)
+                M_IMGUI_IMPL_WIN32_NAMESPACE::Detach(hwnd);
+        }
+        catch (...)
+        {
+        }
+    }
+
+    // Stops drawing and input after a failure inside a hook and reports it on stderr.
+    static void DisableFromHook(const char *reason)
+    {
+        StopHooks();
+        fprintf(stderr, "[pyimgui] dx11 inbound disabled: %s\n", reason);
+        std::fflush(stderr);
+    }
+
+    // Runs from atexit, before finalization; afterwards no hook reaches Python or the instance.
+    static void StopHooksAtExit()
+    {
+        hookInstance = nullptr;
+        StopHooks();
+        WaitForHooks();
+    }
+
+    static int ReleasePendingReference(void *object)
+    {
+        Py_DECREF((PyObject *)object);
+        return 0;
+    }
+
+    // Hands the last reference to Python's main thread and stops drawing and input at once; keeps the object alive if that cannot be scheduled.
+    // The object is freed only when the main thread next runs bytecode.
+    static void DeferLastReference(py::object &self)
+    {
+        if (Py_REFCNT(self.ptr()) != 1)
+            return;
+        PyObject *object = self.release().ptr();
+        if (IsFinalizing() || Py_AddPendingCall(ReleasePendingReference, object) != 0)
+        {
+            fprintf(stderr, "[pyimgui] dx11 inbound: could not schedule the release of the last reference, keeping the object alive\n");
+            std::fflush(stderr);
+        }
+        StopHooks();
+    }
+
     HRESULT __stdcall hkResizeBuffers11(
         IDXGISwapChain *pSwapChain,
         UINT BufferCount,
@@ -273,27 +519,36 @@ START_M_IMGUI_IMPL_NAMESPACE
         DXGI_FORMAT NewFormat,
         UINT SwapChainFlags)
     {
-        if (Dx11Inbound::_instance != nullptr && Dx11Inbound::_instance->isImGuiInitialized)
-            Dx11Inbound::_instance->CleanupRenderTarget();
+        HookBody body;
+        Dx11Inbound *instance = hookInstance;
+        if (instance != nullptr && instance->isImGuiInitialized)
+            instance->CleanupRenderTarget();
         auto res = oResizeBuffers(pSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
-        if (Dx11Inbound::_instance != nullptr && Dx11Inbound::_instance->isImGuiInitialized)
-            Dx11Inbound::_instance->CreateRenderTarget();
+        if (instance != nullptr && instance->isImGuiInitialized)
+            instance->CreateRenderTarget();
         return res;
     }
 
     HRESULT __stdcall hkPresent11(IDXGISwapChain *pSwapChain, UINT SyncInterval, UINT Flags)
     {
-        if (Dx11Inbound::_instance != nullptr && !Dx11Inbound::_instance->isInLogic)
         {
-            auto instance = Dx11Inbound::_instance;
-            try
+            HookBody body;
+            Dx11Inbound *instance = hookInstance;
+            if (instance != nullptr && hooksEnabled && logicDepth == 0)
             {
-                instance->InitImGui(pSwapChain);
-                instance->Update();
-            }
-            catch (...)
-            {
-                instance->Detach();
+                try
+                {
+                    instance->InitImGui(pSwapChain);
+                    instance->Update();
+                }
+                catch (const std::exception &e)
+                {
+                    DisableFromHook(e.what());
+                }
+                catch (...)
+                {
+                    DisableFromHook("unknown exception");
+                }
             }
         }
         return oPresent(pSwapChain, SyncInterval, Flags);
@@ -304,44 +559,86 @@ START_M_IMGUI_IMPL_NAMESPACE
         if (_instance != nullptr)
             _throw_("Only one instance of Dx11Inbound is allowed");
         _instance = this;
+        hookInstance = this;
     }
 
     Dx11Inbound::~Dx11Inbound()
     {
-        this->Detach();
+        hookInstance = nullptr;
+        try
+        {
+            this->Detach();
+        }
+        catch (...)
+        {
+        }
+        WaitForHooks();
+        this->CleanupRenderTarget();
+        if (this->pd3dDeviceContext != nullptr)
+        {
+            this->pd3dDeviceContext->Release();
+            this->pd3dDeviceContext = nullptr;
+        }
+        if (this->pd3dDevice != nullptr)
+        {
+            this->pd3dDevice->Release();
+            this->pd3dDevice = nullptr;
+        }
         _instance = nullptr;
     }
 
+    // Installs each hook at most once; a later Attach only re-enables drawing and input.
     void Dx11Inbound::Attach()
     {
-        IMGUI_INBOUND_NAMESPACE::Init(IMGUI_INBOUND_NAMESPACE::D3D11);
-        oPresent = (Present)IMGUI_INBOUND_NAMESPACE::GetMethod(8);
-        oResizeBuffers = (ResizeBuffers)IMGUI_INBOUND_NAMESPACE::GetMethod(13);
-        PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oPresent, (PVOID)hkPresent11);
-        PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oResizeBuffers, (PVOID)hkResizeBuffers11);
+        if (!atexitRegistered)
+        {
+            py::module_::import("atexit").attr("register")(py::cpp_function(StopHooksAtExit));
+            atexitRegistered = true;
+        }
+        if (!presentHooked || !resizeHooked)
+        {
+            IMGUI_INBOUND_NAMESPACE::Init(IMGUI_INBOUND_NAMESPACE::D3D11);
+            if (!presentHooked)
+            {
+                oPresent = (Present)IMGUI_INBOUND_NAMESPACE::GetMethod(8);
+                PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oPresent, (PVOID)hkPresent11);
+                presentHooked = true;
+            }
+            if (!resizeHooked)
+            {
+                oResizeBuffers = (ResizeBuffers)IMGUI_INBOUND_NAMESPACE::GetMethod(13);
+                PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oResizeBuffers, (PVOID)hkResizeBuffers11);
+                resizeHooked = true;
+            }
+        }
+        std::lock_guard<std::mutex> lock(transitionMutex);
+        HWND hwnd = attachedHwnd;
+        if (this->isImGuiInitialized && hwnd != nullptr)
+        {
+            M_IMGUI_IMPL_WIN32_NAMESPACE::Attach(hwnd, &this->inputPolicy);
+            this->SetHwnd(hwnd);
+        }
+        hooksEnabled = true;
     }
 
+    // Disables drawing and input; the hooks and originals stay installed.
     void Dx11Inbound::Detach()
     {
-        if (this->hwnd != nullptr)
-        {
-            M_IMGUI_IMPL_WIN32_NAMESPACE::Detach(this->hwnd);
-            this->hwnd = nullptr;
-        }
-        if (oPresent != nullptr)
-        {
-            auto originalPresent = (Present)IMGUI_INBOUND_NAMESPACE::GetMethod(8);
-            if (oPresent != originalPresent)
-                PYDETOURS_NAMESPACE::SimpleDetach((PVOID *)&oPresent, (PVOID)hkPresent11);
-            oPresent = nullptr;
-        }
-        if (oResizeBuffers != nullptr)
-        {
-            auto originalResizeBuffers = (ResizeBuffers)IMGUI_INBOUND_NAMESPACE::GetMethod(13);
-            if (oResizeBuffers != originalResizeBuffers)
-                PYDETOURS_NAMESPACE::SimpleDetach((PVOID *)&oResizeBuffers, (PVOID)hkResizeBuffers11);
-            oResizeBuffers = nullptr;
-        }
+        std::lock_guard<std::mutex> lock(transitionMutex);
+        hooksEnabled = false;
+        if (HWND hwnd = attachedHwnd)
+            M_IMGUI_IMPL_WIN32_NAMESPACE::Detach(hwnd);
+        this->SetHwnd(nullptr);
+    }
+
+    // Sets or clears ImGuiConfigFlags_ViewportsEnable on the current context.
+    static void SetViewportsFlag(bool enable)
+    {
+        ImGuiIO &io = ImGui::GetIO();
+        if (enable)
+            io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+        else
+            io.ConfigFlags &= ~ImGuiConfigFlags_ViewportsEnable;
     }
 
     void Dx11Inbound::InitImGui(IDXGISwapChain *pSwapChain)
@@ -353,13 +650,12 @@ START_M_IMGUI_IMPL_NAMESPACE
         HRESULT hr = this->pSwapChain->GetDesc(&desc);
         if (hr != S_OK)
             _throwV_("Failed to get swap chain desc: {}", hr);
-        this->SetHwnd(desc.OutputWindow);
+        HWND host = desc.OutputWindow;
         hr = this->pSwapChain->GetDevice(__uuidof(ID3D11Device), (void **)&this->pd3dDevice);
         if (hr != S_OK)
             _throwV_("Failed to get D3D11 device from swap chain: {}", hr);
         this->pd3dDevice->GetImmediateContext(&this->pd3dDeviceContext);
 
-        M_IMGUI_IMPL_WIN32_NAMESPACE::Attach(this->hwnd);
         this->CreateRenderTarget();
         this->ctx = ImGui::CreateContext();
 
@@ -378,18 +674,26 @@ START_M_IMGUI_IMPL_NAMESPACE
             style.Colors[ImGuiCol_WindowBg].w = 1.0f;
         }
 
-        ImGui_ImplWin32_Init(this->hwnd);
+        ImGui_ImplWin32_Init(host);
         ImGui_ImplDX11_Init(this->pd3dDevice, this->pd3dDeviceContext);
-        this->isImGuiInitialized = true;
+        this->viewportsDirty = false;
+        SetViewportsFlag(this->viewportsEnable);
 
+        std::lock_guard<std::mutex> lock(transitionMutex);
+        this->isImGuiInitialized = true;
+        attachedHwnd = host;
+        if (hooksEnabled && hookInstance == this)
+        {
+            M_IMGUI_IMPL_WIN32_NAMESPACE::Attach(host, &this->inputPolicy);
+            this->SetHwnd(host);
+        }
         dbgPrint("init dx11 inbound success\n");
     }
 
     void Dx11Inbound::Update()
     {
-        this->isInLogic = true;
+        LogicScope logic;
         this->_Update();
-        this->isInLogic = false;
     }
 
     void Dx11Inbound::_Update()
@@ -406,38 +710,62 @@ START_M_IMGUI_IMPL_NAMESPACE
         // is a delayed NULL function-pointer call on the OTHER thread.
         // See the standalone `Dx11Window::Update` path above for the same
         // pattern done correctly.
+        if (IsFinalizing())
+            return;
+        bool raised = false;
         {
             py::gil_scoped_acquire gil;
+            if (hookInstance != this)
+                return;
             py::object self = py::cast(this, py::return_value_policy::reference);
-            this->ProcessCallBeforeFrameOnce(self);
+            try
+            {
+                this->ProcessCallBeforeFrameOnce(self);
+            }
+            catch (std::exception &e)
+            {
+                fprintf(stderr, "[pyimgui] dx11 inbound CallBeforeFrameOnce raised:\n%s\n", e.what());
+                std::fflush(stderr);
+                raised = true;
+            }
+            DeferLastReference(self);
+        }
+        if (raised)
+        {
+            DisableFromHook("CallBeforeFrameOnce raised");
+            return;
         }
 
+        // ImGui asserts when ViewportsEnable is first set on frame 1, so an assignment then waits one frame.
+        if (ImGui::GetFrameCount() != 1 && this->viewportsDirty.exchange(false))
+            SetViewportsFlag(this->viewportsEnable);
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
+        this->GateGamepad(this->inputPolicy.load() == (int)OVERLAY_TYPES_NAMESPACE::InputPolicy::PassAll);
         ImGui::NewFrame();
 
-        try
+        if (IsFinalizing())
+            return;
         {
             py::gil_scoped_acquire gil;
+            if (hookInstance != this)
+                return;
             py::object self = py::cast(this, py::return_value_policy::reference);
-            this->ProcessRenderCallback(self);
+            try
+            {
+                this->ProcessRenderCallback(self);
+            }
+            catch (std::exception &e)
+            {
+                fprintf(stderr, "[pyimgui] dx11 inbound render callback raised, detaching:\n%s\n", e.what());
+                std::fflush(stderr);
+                raised = true;
+            }
+            DeferLastReference(self);
         }
-        catch (std::exception &e)
+        if (raised)
         {
-            // The exception may be `pybind11::error_already_set`, whose
-            // destructor decrefs Python objects and therefore needs the GIL.
-            // The inner gil_scoped_acquire was unwound before we landed here,
-            // so re-acquire for the duration of the catch body (covers
-            // `e.what()`, which may also touch Python, and the implicit
-            // destruction of `e` when this scope exits). Without this, the
-            // GIL-less decref on the C++ render thread races CPython's
-            // runtime state and crashes with RIP=0 on a NULL function-pointer
-            // call (typically several frames later, on whichever thread next
-            // touches the corrupted slot).
-            py::gil_scoped_acquire gil;
-            fprintf(stderr, "[pyimgui] dx11 inbound render callback raised, detaching:\n%s\n", e.what());
-            std::fflush(stderr);
-            this->Detach();
+            DisableFromHook("render callback raised");
             return;
         }
 
@@ -446,11 +774,10 @@ START_M_IMGUI_IMPL_NAMESPACE
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
         this->pd3dDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
 
-        if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
-        {
-            ImGui::UpdatePlatformWindows();
+        // Runs every frame: ImGui's sanity check expects it even while viewports are off.
+        ImGui::UpdatePlatformWindows();
+        if (ImGui::GetCurrentContext()->ConfigFlagsCurrFrame & ImGuiConfigFlags_ViewportsEnable)
             ImGui::RenderPlatformWindowsDefault();
-        }
     }
 
     void pybind_setup_mImguiImpl(pybind11::module_ m)
@@ -467,16 +794,23 @@ START_M_IMGUI_IMPL_NAMESPACE
             .def_static("CreateDeviceObjects", []() { return ImGui_ImplDX11_CreateDeviceObjects(); })
             .def("CreateTexture", &Dx11Render::CreateTexture, py::arg("filename"), py::return_value_policy::take_ownership);
 
-        py::class_<Dx11Window, Dx11Render>(m, "Dx11Window", py::dynamic_attr(), py::module_local())
-            .def(py::init<std::optional<py::function>>(), py::arg("renderCallback") = py::none())
+        py::class_<Dx11Window, Dx11Render> dx11Window(m, "Dx11Window", py::dynamic_attr(), py::module_local());
+        dx11Window.def(py::init<std::optional<py::function>>(), py::arg("renderCallback") = py::none())
             .def_readwrite("ClearColor", &Dx11Window::ClearColor)
             .def("InvalidateDeviceObjects", [](Dx11Window &) { ImGui_ImplDX11_InvalidateDeviceObjects(); })
-            .def("CreateDeviceObjects", [](Dx11Window &) { return ImGui_ImplDX11_CreateDeviceObjects(); })
-            .def("Serve", &Dx11Window::Serve, py::call_guard<py::gil_scoped_release>());
+            .def("CreateDeviceObjects", [](Dx11Window &) { return ImGui_ImplDX11_CreateDeviceObjects(); });
+        Overlay::BindMembers(dx11Window);
 
         py::class_<Dx11Inbound, Dx11Render>(m, "Dx11Inbound", py::dynamic_attr(), py::module_local())
             .def(py::init<std::optional<py::function>>(), py::arg("renderCallback") = py::none())
-            .def_property_readonly("isInLogic", [](Dx11Inbound &self) { return self.isInLogic; })
+            .def_property_readonly("isInLogic", [](Dx11Inbound &) { return logicDepth > 0; })
+            .def_property("viewportsEnable",
+                          [](Dx11Inbound &self) { return self.viewportsEnable.load(); },
+                          [](Dx11Inbound &self, bool enable)
+                          {
+                              self.viewportsEnable = enable;
+                              self.viewportsDirty = true;
+                          })
             .def("Attach", &Dx11Inbound::Attach)
             .def("Detach", &Dx11Inbound::Detach);
     }

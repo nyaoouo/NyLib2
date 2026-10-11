@@ -1,3 +1,4 @@
+import ast
 import atexit
 import io
 import json
@@ -422,6 +423,24 @@ namespace PYBIND11_NAMESPACE { namespace detail { \
 
     def _is_record_type(self, type_name):
         return self._base_type(type_name) in self.parser.records
+
+    def _is_single_opaque_pointer_overload(self, overload):
+        if len(overload.args) != 1:
+            return False
+        arg_type = self._clean_type(overload.args[0].type)
+        return (
+            arg_type.endswith('*')
+            and arg_type not in ('const char*', 'char const*')
+            and self._base_type(arg_type) == 'void'
+        )
+
+    def _is_single_int_like_overload(self, overload):
+        if len(overload.args) != 1:
+            return False
+        arg_type = self._clean_type(overload.args[0].type)
+        if arg_type.endswith('*') or arg_type.endswith('&'):
+            return False
+        return self._is_scalar_type(arg_type) and arg_type != 'void'
 
     def _is_public_record_type(self, type_name):
         record = self.parser.records.get(self._base_type(type_name))
@@ -1340,7 +1359,14 @@ namespace PYBIND11_NAMESPACE { namespace detail { \
             if key := specified_wrappers.get(f'_GFUNC_:{name}'):
                 global_defs.write(f'{key}\n')
                 continue
-            for overload in self.parser.functions[name]:
+            overloads = self.parser.functions[name]
+            # pybind11's first pass would give every int to a py::object pointer overload; bind it after int siblings.
+            if (
+                any(self._is_single_opaque_pointer_overload(o) for o in overloads)
+                and any(self._is_single_int_like_overload(o) for o in overloads)
+            ):
+                overloads = sorted(overloads, key=self._is_single_opaque_pointer_overload)
+            for overload in overloads:
                 signature = (name, overload.result, tuple(arg.type for arg in overload.args))
                 if signature in seen_signatures:
                     continue
@@ -1617,6 +1643,11 @@ def patch_frontend_compat_stubs(output_dir, frontends):
     if not init_stub.is_file():
         return
     data = init_stub.read_text(encoding='utf-8')
+    # MonitorInfo.pos/size resolve to imgui.ImVec2 (a submodule type);
+    # stubgen can't resolve the cross-module reference and leaves the
+    # unqualified name / typing.Any instead.
+    data = _patch_field_stub_types(data, {'MonitorInfo': {'pos': 'imgui.ImVec2', 'size': 'imgui.ImVec2'}})
+    data = _patch_function_return_types(data, {'': {'GetMonitors': 'list[MonitorInfo]', 'CreateInbound': '_RenderBase'}})
     exports = ['gUtils', 'imgui']
     imports = []
     if 'dx9' in frontends:
@@ -1641,9 +1672,23 @@ def patch_frontend_compat_stubs(output_dir, frontends):
         imports.append('from pyimgui.vk import VkInbound as VkInbound, VkWindow as VkWindow, _VkRender as _VkRender')
         imports.append('VkRender = _VkRender')
     if imports:
+        # Merge, don't replace: keep whatever stubgen already put in __all__
+        # (core names like MINIDUMP_TYPE, InputPolicy, OverlayZOrder) and
+        # union in the frontend names, deduping in order.
+        existing = []
+        existing_match = re.search(r"__all__: list\[str\] = \[([^\]]*)\]", data)
+        if existing_match:
+            try:
+                existing = ast.literal_eval('[' + existing_match.group(1) + ']')
+            except (SyntaxError, ValueError):
+                existing = []
+        merged = list(existing)
+        for name in exports:
+            if name not in merged:
+                merged.append(name)
         data = re.sub(
             r"__all__: list\[str\] = \[[^\]]*\]",
-            f"__all__: list[str] = {exports!r}",
+            f"__all__: list[str] = {merged!r}",
             data,
             count=1,
         )
@@ -1669,6 +1714,13 @@ def patch_frontend_module_stubs(output_dir, module_name):
     if package_stub.is_file() and flat_stub.is_file():
         flat_stub.unlink()
     data = module_stub.read_text(encoding='utf-8')
+    # _RenderBase.inputPolicy/gamepadPolicy are defined on core pyimgui
+    # enums; stubgen may not resolve the cross-module type and emit
+    # typing.Any instead.
+    data = _patch_field_stub_types(data, {'_RenderBase': {
+        'inputPolicy': 'pyimgui.InputPolicy',
+        'gamepadPolicy': 'pyimgui.GamepadPolicy',
+    }})
     if module_key == 'dx9':
         data = re.sub(
             r"__all__: list\[str\] = \[[^\]]*\]",
@@ -1733,6 +1785,18 @@ def cleanup_legacy_frontend_outputs(cwd):
     for legacy_file in cwd.glob('pyimgui_dx*.*'):
         if legacy_file.is_file():
             legacy_file.unlink()
+
+
+def copy_python_modules(cwd):
+    cwd = pathlib.Path(cwd)
+    src_dir = cwd / 'py'
+    if not src_dir.is_dir():
+        print('copy_python_modules: py/ is missing, skipping')
+        return
+    dst_dir = cwd / 'pyimgui'
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for src_file in src_dir.glob('*.py'):
+        shutil.copy2(src_file, dst_dir / src_file.name)
 
 
 def copy_build_outputs(cwd, debug=0):
@@ -1800,6 +1864,8 @@ def generate(backends, debug=0, with_stubs=True):
                 src_dir / 'DllMain.cpp',
                 src_dir / 'gHeader.cpp',
                 src_dir / 'ImguiCtx.cpp',
+                src_dir / 'OverlayQueries.cpp',
+                src_dir / 'OverlayTypes.cpp',
                 src_dir / 'UnhandledException.cpp',
                 src_dir / 'Win32Font.cpp',
             ])),
@@ -1853,6 +1919,7 @@ def generate(backends, debug=0, with_stubs=True):
                     imgui_dir / 'backends' / 'imgui_impl_win32.cpp',
                     imgui_dir / 'backends' / 'imgui_impl_dx11.cpp',
                     *(src_dir / 'frontends' / 'common').glob('*.cpp'),
+                    *(src_dir / 'frontends' / 'overlay').glob('*.cpp'),
                     *(f for f in (detours_dir / 'src').glob('*.cpp') if f.name != 'uimports.cpp'),
                     src_dir / 'gHeader.cpp',
                     src_dir / 'Dx11Window.cpp',
@@ -1861,7 +1928,7 @@ def generate(backends, debug=0, with_stubs=True):
                 include_dirs=common_include_dirs,
                 extra_objects=[str(core_import_lib)],
                 extra_compile_args=frontend_compile_args,
-                libraries=['user32', 'gdi32', 'dwmapi', 'shell32', 'd3d11', 'dxgi'],
+                libraries=['user32', 'gdi32', 'dwmapi', 'shell32', 'd3d11', 'dxgi', 'dcomp'],
                 debug=debug,
             )
             frontend_modules.append('pyimgui.dx11')
@@ -1873,13 +1940,14 @@ def generate(backends, debug=0, with_stubs=True):
                     imgui_dir / 'backends' / 'imgui_impl_dx12.cpp',
                     *(src_dir / 'frontends' / 'common').glob('*.cpp'),
                     *(src_dir / 'frontends' / 'dx12').glob('*.cpp'),
+                    *(src_dir / 'frontends' / 'overlay').glob('*.cpp'),
                     *(f for f in (detours_dir / 'src').glob('*.cpp') if f.name != 'uimports.cpp'),
                     src_dir / 'gHeader.cpp',
                 ])),
                 include_dirs=common_include_dirs,
                 extra_objects=[str(core_import_lib)],
                 extra_compile_args=frontend_compile_args,
-                libraries=['user32', 'gdi32', 'dwmapi', 'shell32', 'd3d12', 'dxgi', 'dxguid'],
+                libraries=['user32', 'gdi32', 'dwmapi', 'shell32', 'd3d12', 'dxgi', 'dxguid', 'dcomp'],
                 debug=debug,
             )
             frontend_modules.append('pyimgui.dx12')
@@ -1932,6 +2000,7 @@ def generate(backends, debug=0, with_stubs=True):
                 stub_gen(frontend_module, str(cwd))
                 patch_frontend_module_stubs(cwd, frontend_module)
             patch_frontend_compat_stubs(cwd, {module.rsplit('.', 1)[-1] for module in frontend_modules})
+        copy_python_modules(cwd)
         copy_build_outputs(cwd, debug=debug)
     finally:
         os.chdir(old_cwd)
