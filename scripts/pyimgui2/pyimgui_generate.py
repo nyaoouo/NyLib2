@@ -424,6 +424,24 @@ namespace PYBIND11_NAMESPACE { namespace detail { \
     def _is_record_type(self, type_name):
         return self._base_type(type_name) in self.parser.records
 
+    def _is_single_opaque_pointer_overload(self, overload):
+        if len(overload.args) != 1:
+            return False
+        arg_type = self._clean_type(overload.args[0].type)
+        return (
+            arg_type.endswith('*')
+            and arg_type not in ('const char*', 'char const*')
+            and self._base_type(arg_type) == 'void'
+        )
+
+    def _is_single_int_like_overload(self, overload):
+        if len(overload.args) != 1:
+            return False
+        arg_type = self._clean_type(overload.args[0].type)
+        if arg_type.endswith('*') or arg_type.endswith('&'):
+            return False
+        return self._is_scalar_type(arg_type) and arg_type != 'void'
+
     def _is_public_record_type(self, type_name):
         record = self.parser.records.get(self._base_type(type_name))
         return record is not None and record.source == 'imgui.h'
@@ -1341,7 +1359,14 @@ namespace PYBIND11_NAMESPACE { namespace detail { \
             if key := specified_wrappers.get(f'_GFUNC_:{name}'):
                 global_defs.write(f'{key}\n')
                 continue
-            for overload in self.parser.functions[name]:
+            overloads = self.parser.functions[name]
+            # pybind11's first pass would give every int to a py::object pointer overload; bind it after int siblings.
+            if (
+                any(self._is_single_opaque_pointer_overload(o) for o in overloads)
+                and any(self._is_single_int_like_overload(o) for o in overloads)
+            ):
+                overloads = sorted(overloads, key=self._is_single_opaque_pointer_overload)
+            for overload in overloads:
                 signature = (name, overload.result, tuple(arg.type for arg in overload.args))
                 if signature in seen_signatures:
                     continue
