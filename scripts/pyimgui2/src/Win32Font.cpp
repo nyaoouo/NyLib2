@@ -6,6 +6,7 @@
 #include <wrl/client.h>
 #include <mutex>
 #include <algorithm>
+#include <cmath>
 #include <deque>
 
 #pragma comment(lib, "dwrite.lib")
@@ -461,30 +462,104 @@ const ImWchar* InternRanges(const std::vector<ImWchar>& ranges)
     return store.back().data();
 }
 
-// Install a chain of matches as a single merged ImFont. Returns the primary
-// ImFont* (py wrapped). Ranges are interned via InternRanges before being
-// handed to the atlas (see above).
+// Max atlas side InstallMatches allows (the D3D11/D3D12 2D texture limit).
+constexpr int kMaxAtlasTexDim = 16384;
+
+// Installs `matches` as one merged ImFont and returns it (py-wrapped), or None if no font loaded.
+// Call from wnd.CallBeforeFrameOnce(...): needs a current ImGui context and an unlocked atlas.
+// Doubles TexDesiredWidth (kept on success) while a side exceeds kMaxAtlasTexDim; if the build
+// fails or still does not fit, removes the fonts it added and throws std::runtime_error.
 py::object InstallMatches(const std::vector<Win32FontMatch>& matches, float size_pixels)
 {
     if (matches.empty()) return py::none();
+    if (!(size_pixels >= 1.0f && std::isfinite(size_pixels)))
+        _throwV_("InstallMatches: size_pixels must be >= 1 and finite, got {}", size_pixels);
+    if (ImGui::GetCurrentContext() == nullptr)
+        _throw_("InstallMatches: no current ImGui context; call win32_font install "
+                "functions from wnd.CallBeforeFrameOnce(...) (the context is created "
+                "by Serve() or the inbound hook)");
 
-    ImFontAtlas* atlas   = ImGui::GetIO().Fonts;
-    ImFont*      primary = nullptr;
+    ImFontAtlas* atlas = ImGui::GetIO().Fonts;
+    if (atlas->Locked)
+        _throw_("InstallMatches: font atlas is locked between NewFrame() and Render(); "
+                "call win32_font install functions from wnd.CallBeforeFrameOnce(...)");
 
-    for (size_t i = 0; i < matches.size(); ++i) {
-        const auto& m = matches[i];
+    const int          fonts_count0       = atlas->Fonts.Size;
+    const int          cfg_count0         = atlas->ConfigData.Size;
+    const int          tex_desired_width0 = atlas->TexDesiredWidth;
+    const ImTextureID  tex_id0            = atlas->TexID;
+
+    ImFont* primary = nullptr;
+    for (const auto& m : matches) {
+        std::string path_utf8 = WstrToUtf8(m.file_path);
+        size_t      data_size = 0;
+        // Unlike AddFontFromFileTTF, this fails quietly (no IM_ASSERT_USER_ERROR) on an unreadable file.
+        void* data = ImFileLoadToMemory(path_utf8.c_str(), "rb", &data_size, 0);
+        if (!data) continue;
+
         ImFontConfig cfg;
         cfg.FontNo = m.face_index;
-        if (i > 0) cfg.MergeMode = true;
-        ImFont* f = atlas->AddFontFromFileTTF(
-            WstrToUtf8(m.file_path).c_str(),
-            size_pixels,
-            &cfg,
-            InternRanges(m.ranges));
-        if (i == 0) primary = f;
+        if (primary) {
+            cfg.MergeMode = true;
+            cfg.DstFont   = primary;
+        }
+        if (cfg.Name[0] == '\0') {
+            const char* p;
+            for (p = path_utf8.c_str() + path_utf8.size();
+                 p > path_utf8.c_str() && p[-1] != '/' && p[-1] != '\\'; p--) {}
+            ImFormatString(cfg.Name, IM_ARRAYSIZE(cfg.Name), "%s, %.0fpx", p, size_pixels);
+        }
+        ImFont* f = atlas->AddFontFromMemoryTTF(
+            data, (int)data_size, size_pixels, &cfg, InternRanges(m.ranges));
+        if (!primary) primary = f;
     }
-    atlas->Build();
-    return primary ? py::cast(primary) : py::none();
+    if (!primary) return py::none();
+
+    bool built = atlas->Build();
+    while (built
+           && ImMax(atlas->TexWidth, atlas->TexHeight) > kMaxAtlasTexDim
+           && atlas->TexWidth < kMaxAtlasTexDim) {
+        atlas->TexDesiredWidth = ImMin(atlas->TexWidth * 2, kMaxAtlasTexDim);
+        built = atlas->Build();
+    }
+
+    if (!built || ImMax(atlas->TexWidth, atlas->TexHeight) > kMaxAtlasTexDim) {
+        const int attempted_w = atlas->TexWidth;
+        const int attempted_h = atlas->TexHeight;
+
+        for (int i = cfg_count0; i < atlas->ConfigData.Size; ++i) {
+            ImFontConfig& cfg = atlas->ConfigData[i];
+            if (cfg.FontData && cfg.FontDataOwnedByAtlas) {
+                IM_FREE(cfg.FontData);
+                cfg.FontData = nullptr;
+            }
+        }
+        atlas->ConfigData.resize(cfg_count0);
+
+        for (int i = fonts_count0; i < atlas->Fonts.Size; ++i)
+            IM_DELETE(atlas->Fonts[i]);
+        atlas->Fonts.resize(fonts_count0);
+
+        atlas->TexDesiredWidth = tex_desired_width0;
+        if (atlas->Fonts.Size > 0) {
+            // Restore TexID: Build() resets it, but the backend keeps its old texture bound.
+            bool rebuilt = atlas->Build();
+            if (rebuilt && tex_id0 != (ImTextureID)0)
+                atlas->SetTexID(tex_id0);
+        } else {
+            atlas->ClearTexData();
+        }
+
+        if (!built)
+            _throw_("InstallMatches: atlas build failed (stb_truetype could not parse a "
+                    "font); the fonts this call added were removed");
+        _throwV_("InstallMatches: atlas build exceeded max texture size {}x{} (limit {}); "
+                 "the fonts this call added were removed; use a smaller size_pixels or "
+                 "fewer font families",
+                 attempted_w, attempted_h, kMaxAtlasTexDim);
+    }
+
+    return py::cast(primary);
 }
 
 }  // anonymous namespace
