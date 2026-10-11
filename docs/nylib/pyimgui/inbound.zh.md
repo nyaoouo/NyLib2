@@ -30,7 +30,7 @@ renderer.Detach()
 
 你的 `renderCallback` 总是在拥有游戏呈现调用的线程上运行 - 只能从那里调用 `pyimgui`/`pyimgui.esp`，不能从其他线程调用。
 
-<!-- dt:section id="knobs-0" hash="9c55b1d9a68b" -->
+<!-- dt:section id="knobs-0" hash="bfb0538c4556" -->
 ## 常用设置
 
 - `inputPolicy` （`pyimgui.InputPolicy.Auto`/`CaptureAll`/`PassAll`，默认
@@ -41,3 +41,6 @@ renderer.Detach()
 - `viewportsEnable` （仅适用于 `Dx11Inbound`/`Dx12Inbound`，默认 `True`）：
   设置为 `False` 以将 ImGui 窗口保持在游戏窗口内，而不是作为独立的 OS 窗口
   浮动。
+- `gamepadPolicy` （`pyimgui.GamepadPolicy`，默认 `WhenForeground`）：手柄
+  仅在游戏窗口为前台窗口时才向 ImGui 提供输入；`Always` 表示旧行为；`Never`
+  表示忽略它；在 `PassAll` 下无此项。

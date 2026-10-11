@@ -52,6 +52,11 @@ wnd.Serve()
 相同的扩展也可以作为顶层 `pyimgui` 导入（演示就是这样做的）；
 每个进程使用一个名称，永远不要同时使用两个。
 
+<!-- dt:section id="gamepad-0" hash="25597a36b3ea" -->
+## 手柄
+
+`gamepadPolicy` (`pyimgui.GamepadPolicy`，默认 `WhenForeground`) 控制 ImGui 是否读取已连接的手柄。在默认情况下，ImGui 仅在其绘制所用的窗口为前台窗口时读取手柄，因此后台窗口默认不再对控制器做出反应；`Always` 每帧读取手柄，`Never` 则不读取；`NavEnableGamepad` 无论如何都保持启用。在 `inputPolicy = PassAll` 下，Inbound 和叠加层永远不读取手柄，无论 `gamepadPolicy` 怎么说。对于 `Always`，ImGui 也会在无人观察的帧上读取手柄——例如当叠加层的目标被最小化时——因此按键可以激活视线外的获焦小部件。当门打开时，如果手柄按钮已经被按住——例如窗口变成前台窗口——ImGui 会在该帧看到一次新的按键。
+
 <!-- dt:section id="next-0" hash="03f1565c2acf" -->
 ## 下一步
 
