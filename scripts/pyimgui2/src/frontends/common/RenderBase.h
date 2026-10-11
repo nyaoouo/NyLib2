@@ -39,6 +39,7 @@ START_M_IMGUI_IMPL_NAMESPACE
         void SetRenderCallback(std::optional<py::function> renderCallback);
         void SetInputPolicy(OVERLAY_TYPES_NAMESPACE::InputPolicy policy);
         void SetGamepadPolicy(OVERLAY_TYPES_NAMESPACE::GamepadPolicy policy);
+        void GateGamepad(bool passAll) noexcept; // hides the gamepad from this frame per gamepadPolicy; passAll hides it always
         void ProcessCallBeforeFrameOnce(py::object self);
         void ProcessRenderCallback(py::object self);
         void Close();

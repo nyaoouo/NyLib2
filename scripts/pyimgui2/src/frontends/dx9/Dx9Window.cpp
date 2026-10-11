@@ -190,6 +190,7 @@ START_M_IMGUI_IMPL_DX9_NAMESPACE
 
             ImGui_ImplDX9_NewFrame();
             ImGui_ImplWin32_NewFrame();
+            this->GateGamepad(false);
             ImGui::NewFrame();
 
             this->ProcessRenderCallback(py::cast(this));
@@ -538,6 +539,7 @@ START_M_IMGUI_IMPL_DX9_NAMESPACE
 
         ImGui_ImplDX9_NewFrame();
         ImGui_ImplWin32_NewFrame();
+        this->GateGamepad(this->inputPolicy.load() == (int)OVERLAY_TYPES_NAMESPACE::InputPolicy::PassAll);
         ImGui::NewFrame();
 
         if (IsFinalizing())

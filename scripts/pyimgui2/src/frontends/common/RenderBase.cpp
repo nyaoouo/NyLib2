@@ -81,6 +81,25 @@ START_M_IMGUI_IMPL_NAMESPACE
         this->gamepadPolicy = (int)policy;
     }
 
+    // Runs between the backend's NewFrame and ImGui::NewFrame, with this window's context current; takes no GIL.
+    void RenderBase::GateGamepad(bool passAll) noexcept
+    {
+        int policy = this->gamepadPolicy.load();
+        bool gated;
+        if (passAll || policy == (int)OVERLAY_TYPES_NAMESPACE::GamepadPolicy::Never)
+            gated = true;
+        else if (policy == (int)OVERLAY_TYPES_NAMESPACE::GamepadPolicy::Always)
+            gated = false;
+        else
+        {
+            HWND self = (HWND)ImGui::GetMainViewport()->PlatformHandle;
+            HWND fg = GetForegroundWindow();
+            gated = !(fg != nullptr && (fg == self || IsChild(fg, self) || ImGui::FindViewportByPlatformHandle(fg)));
+        }
+        if (gated)
+            ImGui::GetIO().BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
+    }
+
     void RenderBase::ProcessCallBeforeFrameOnce(py::object self)
     {
         auto gstate = PyGILState_Ensure();

@@ -226,6 +226,7 @@ START_M_IMGUI_IMPL_NAMESPACE
             }
             ImGui_ImplDX11_NewFrame();
             ImGui_ImplWin32_NewFrame();
+            this->GateGamepad(false);
             ImGui::NewFrame();
 
             {
@@ -740,6 +741,7 @@ START_M_IMGUI_IMPL_NAMESPACE
             SetViewportsFlag(this->viewportsEnable);
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
+        this->GateGamepad(this->inputPolicy.load() == (int)OVERLAY_TYPES_NAMESPACE::InputPolicy::PassAll);
         ImGui::NewFrame();
 
         if (IsFinalizing())

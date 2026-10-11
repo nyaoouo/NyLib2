@@ -540,7 +540,7 @@ START_M_IMGUI_IMPL_NAMESPACE
                     this->GateInput();
                 }
 
-                // Drops what ImGui holds once inputPolicy entered PassAll since the last frame, and hides the gamepad unless the canvas is the foreground window.
+                // Drops what ImGui holds once inputPolicy entered PassAll since the last frame, and gates the gamepad per gamepadPolicy (none under PassAll).
                 void GateInput()
                 {
                     ImGuiIO &io = ImGui::GetIO();
@@ -548,8 +548,7 @@ START_M_IMGUI_IMPL_NAMESPACE
                     NotePolicy(passAll);
                     if (std::exchange(canvasFilter.entered, false))
                         io.AddFocusEvent(false);
-                    if (passAll || GetForegroundWindow() != this->canvas)
-                        io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
+                    this->self.GateGamepad(passAll);
                 }
 
                 // BeginFrame through the render callback.

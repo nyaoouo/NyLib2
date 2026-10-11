@@ -429,6 +429,7 @@ START_M_IMGUI_IMPL_VK_NAMESPACE
 
             ImGui_ImplVulkan_NewFrame();
             ImGui_ImplWin32_NewFrame();
+            this->GateGamepad(false);
             ImGui::NewFrame();
             this->ProcessRenderCallback(py::cast(this));
             ImGui::Render();
