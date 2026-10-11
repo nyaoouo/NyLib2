@@ -57,7 +57,7 @@ wnd.Serve()
 
 `gamepadPolicy` (`pyimgui.GamepadPolicy`，默认 `WhenForeground`) 控制 ImGui 是否读取已连接的手柄。在默认情况下，ImGui 仅在其绘制所用的窗口为前台窗口时读取手柄，因此后台窗口默认不再对控制器做出反应；`Always` 每帧读取手柄，`Never` 则不读取；`NavEnableGamepad` 无论如何都保持启用。在 `inputPolicy = PassAll` 下，Inbound 和叠加层永远不读取手柄，无论 `gamepadPolicy` 怎么说。对于 `Always`，ImGui 也会在无人观察的帧上读取手柄——例如当叠加层的目标被最小化时——因此按键可以激活视线外的获焦小部件。当门打开时，如果手柄按钮已经被按住——例如窗口变成前台窗口——ImGui 会在该帧看到一次新的按键。
 
-<!-- dt:section id="fonts-0" hash="b11df1790a72" -->
+<!-- dt:section id="fonts-0" hash="87988bbd0cf7" -->
 ## 字体
 
 `win32_font` 通过 DirectWrite 查找系统字体，并把它们加载进 ImGui 的
@@ -90,12 +90,16 @@ wnd.Serve()
 在第一帧之后安装的字体需要在同一个 `CallBeforeFrameOnce` 回调里调用
 `wnd.InvalidateDeviceObjects()`，让后端上传重建后的图集纹理。
 
-每个文字的字体都会贡献它的全部字形，所以图集随 `size_pixels` 增长
-（`AutoInstall` 在 16 px 时约为 4096x4096）。如果某次安装会让图集的某一边
-超过 16384 像素，会先加宽图集；仍然放不下时，这次安装会移除它添加的字体并
-抛出 `RuntimeError`。DX10 把纹理每边限制在 8192 像素，D3D11/D3D12 还会限制
-单个纹理的字节大小——在专用显存较少的设备上低至 128 MiB（即 4096x8192 的
-图集）——所以在这些环境下请使用更小的 `size_pixels`。
+每个文字的字体都会贡献它的全部字形，所以图集随 `size_pixels` 增长：
+`AutoInstall(locale='zh-CN')` 在 16 px 时约为 4096x4096（64 MiB），24 px 时
+4096x8192（128 MiB），32 px 时 4096x16384（256 MiB）。后端按每像素 4 字节上传
+图集，而 D3D11/D3D12 只保证单个纹理能有 128 MiB，所以默认把安装限制在每边
+16384 像素、总共 128 MiB 以内。超过边长上限的安装会先加宽图集；如果图集仍然
+超出某个上限，这次安装会移除它添加的字体并抛出 `RuntimeError`。
+`win32_font.SetAtlasLimits(max_side=None, max_mib=None)` 修改本进程的上限
+（`None` 表示保持该项不变），`GetAtlasLimits()` 返回 `(max_side, max_mib)`：
+在显存足够的 GPU 上需要更大的 CJK 字号时调大 `max_mib`，在 DX10 下设置
+`max_side=8192`。
 
 <!-- dt:section id="next-0" hash="03f1565c2acf" -->
 ## 下一步
