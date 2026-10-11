@@ -72,6 +72,7 @@ START_G_UTILS_NAMESPACE
     {
         py::object res_onEnter;
         std::function<void()> onExit;
+        bool entered = false;
 
         PyCtxWrapper(py::object res_onEnter, std::function<void()> onExit)
         {
@@ -88,9 +89,21 @@ START_G_UTILS_NAMESPACE
     {
         py::class_<PyCtxWrapper>(m, "PyCtxWrapper")
             .def("__enter__", [](PyCtxWrapper &self)
-                 { return self.res_onEnter; })
+                 {
+                     if (self.entered)
+                         _throw_("PyCtxWrapper is single-use; call the ctx function again for each with block");
+                     self.entered = true;
+                     return self.res_onEnter;
+                 })
             .def("__exit__", [](PyCtxWrapper &self, py::args args)
-                 { if (self.onExit) self.onExit(); });
+                 {
+                     auto onExit = std::move(self.onExit);
+                     self.onExit = nullptr;
+                     if (onExit)
+                         onExit();
+                 })
+            .def("__bool__", [](PyCtxWrapper &) -> bool
+                 { throw py::type_error("ctx objects are context managers: use 'with ctx.X(...) as v:' and test v"); });
     }
 }
 END_G_UTILS_NAMESPACE
