@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <deque>
+#include <tuple>
 
 #pragma comment(lib, "dwrite.lib")
 
@@ -462,13 +463,14 @@ const ImWchar* InternRanges(const std::vector<ImWchar>& ranges)
     return store.back().data();
 }
 
-// Max atlas side InstallMatches allows (the D3D11/D3D12 2D texture limit).
-constexpr int kMaxAtlasTexDim = 16384;
+// Atlas side/byte limits enforced by InstallMatches; adjustable via SetAtlasLimits.
+int g_max_atlas_side = 16384;  // D3D11/D3D12 2D texture side limit
+int g_max_atlas_mib  = 128;    // D3D11/D3D12 128 MiB per-resource guarantee
 
 // Installs `matches` as one merged ImFont and returns it (py-wrapped), or None if no font loaded.
 // Call from wnd.CallBeforeFrameOnce(...): needs a current ImGui context and an unlocked atlas.
-// Doubles TexDesiredWidth (kept on success) while a side exceeds kMaxAtlasTexDim; if the build
-// fails or still does not fit, removes the fonts it added and throws std::runtime_error.
+// Doubles TexDesiredWidth up to the configured max side; on build failure or a limit still
+// exceeded (side or byte size), removes the added fonts and throws std::runtime_error.
 py::object InstallMatches(const std::vector<Win32FontMatch>& matches, float size_pixels)
 {
     if (matches.empty()) return py::none();
@@ -517,15 +519,22 @@ py::object InstallMatches(const std::vector<Win32FontMatch>& matches, float size
 
     bool built = atlas->Build();
     while (built
-           && ImMax(atlas->TexWidth, atlas->TexHeight) > kMaxAtlasTexDim
-           && atlas->TexWidth < kMaxAtlasTexDim) {
-        atlas->TexDesiredWidth = ImMin(atlas->TexWidth * 2, kMaxAtlasTexDim);
+           && ImMax(atlas->TexWidth, atlas->TexHeight) > g_max_atlas_side
+           && atlas->TexWidth < g_max_atlas_side) {
+        atlas->TexDesiredWidth = ImMin(atlas->TexWidth * 2, g_max_atlas_side);
         built = atlas->Build();
     }
 
-    if (!built || ImMax(atlas->TexWidth, atlas->TexHeight) > kMaxAtlasTexDim) {
+    const bool side_over = built && ImMax(atlas->TexWidth, atlas->TexHeight) > g_max_atlas_side;
+    const bool bytes_over = built && !side_over
+        && static_cast<int64_t>(atlas->TexWidth) * atlas->TexHeight * 4
+               > static_cast<int64_t>(g_max_atlas_mib) * 1024 * 1024;
+
+    if (!built || side_over || bytes_over) {
         const int attempted_w = atlas->TexWidth;
         const int attempted_h = atlas->TexHeight;
+        const int64_t attempted_mib =
+            (static_cast<int64_t>(attempted_w) * attempted_h * 4) / (1024 * 1024);
 
         for (int i = cfg_count0; i < atlas->ConfigData.Size; ++i) {
             ImFontConfig& cfg = atlas->ConfigData[i];
@@ -553,10 +562,15 @@ py::object InstallMatches(const std::vector<Win32FontMatch>& matches, float size
         if (!built)
             _throw_("InstallMatches: atlas build failed (stb_truetype could not parse a "
                     "font); the fonts this call added were removed");
-        _throwV_("InstallMatches: atlas build exceeded max texture size {}x{} (limit {}); "
-                 "the fonts this call added were removed; use a smaller size_pixels or "
-                 "fewer font families",
-                 attempted_w, attempted_h, kMaxAtlasTexDim);
+        if (side_over)
+            _throwV_("InstallMatches: atlas build exceeded max texture side {}x{} (limit {}); "
+                     "the fonts this call added were removed; use a smaller size_pixels or "
+                     "raise the limit with win32_font.SetAtlasLimits(max_side=...)",
+                     attempted_w, attempted_h, g_max_atlas_side);
+        _throwV_("InstallMatches: atlas build {}x{} ({} MiB) exceeded max atlas size (limit {} "
+                 "MiB); the fonts this call added were removed; use a smaller size_pixels or "
+                 "raise the limit with win32_font.SetAtlasLimits(max_mib=...)",
+                 attempted_w, attempted_h, attempted_mib, g_max_atlas_mib);
     }
 
     return py::cast(primary);
@@ -936,6 +950,17 @@ void pybind_setup_Win32Font(py::module_ m)
         for (const auto& f : families) wfams.push_back(Utf8ToWstr(f));
         return AutoInstallChain(std::move(wfams), opt_w(locale), size_pixels);
     }, py::arg("family_names"), py::arg("locale") = py::none(), py::arg("size_pixels") = 16.0f);
+
+    m.def("SetAtlasLimits", [](std::optional<int> max_side, std::optional<int> max_mib) {
+        if (max_side && *max_side < 1)
+            _throwV_("SetAtlasLimits: max_side must be >= 1, got {}", *max_side);
+        if (max_mib && *max_mib < 1)
+            _throwV_("SetAtlasLimits: max_mib must be >= 1, got {}", *max_mib);
+        if (max_side) g_max_atlas_side = *max_side;
+        if (max_mib) g_max_atlas_mib = *max_mib;
+    }, py::arg("max_side") = py::none(), py::arg("max_mib") = py::none());
+
+    m.def("GetAtlasLimits", []() { return std::make_tuple(g_max_atlas_side, g_max_atlas_mib); });
 
     // snake_case aliases for the three high-traffic installers.
     m.attr("auto_install")         = m.attr("AutoInstall");
