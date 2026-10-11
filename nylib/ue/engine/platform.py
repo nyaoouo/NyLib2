@@ -3,7 +3,7 @@ import bisect
 import re
 
 from ..errors import PeFormatError
-from ..memory import MemorySource
+from ..memory import USER_MAX, USER_MIN, MemorySource
 from ..pe import IMAGE_SCN_MEM_READ, PeImage, Section
 from ..scan import Scanner
 
@@ -143,6 +143,8 @@ class Platform:
     def is_bad_read_ptr(self, address: int) -> bool:
         """PlatformWindows::IsBadReadPtr @ ea0dab3 (K8, K13)."""
         if not self.is_valid_64_bit_virtual_address(address):
+            return True
+        if not (USER_MIN <= address < USER_MAX):  # never readable from user mode; don't trust an optimistic source
             return True
         return not self.source.readable(address, 1)
 

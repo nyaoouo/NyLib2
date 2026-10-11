@@ -89,10 +89,10 @@ python -m nylib.ue info <snapshot>
 
 `list`、`probe` 和 `dump` 都需要一个正在运行的游戏。`--allow-calls` 不带值表示启用全部三项。`--json`（除 `export` 外的所有命令）会输出机器可读的结果。日志会写入 `<out>/_logs/<command>.log`，除非指定了 `--log-file`。退出码：0 表示成功，1 表示错误，2 表示用法错误，3 表示检测失败，4 表示无法打开目标或目标已退出，130 表示被中断。
 
-<!-- dt:section id="own-memory-backend-0" hash="65a0bfd7ea3c" -->
+<!-- dt:section id="own-memory-backend-0" hash="60eb0fa5b2a5" -->
 ## 自定义内存后端
 
-私有的 `_open_target=` 工厂函数允许 `probe`、`dump` 和 `Unreal.attach` 使用你自己的 `nylib.process.Process` 风格对象(`read`、`write`、`iter_memory_region`、`virtual_query`、`enum_ldr_data`、`process_id`、`still_alive`),而不是让它们自行打开目标:
+私有的 `_open_target=` 工厂让 `probe`、`dump` 和 `Unreal.attach` 使用你自己的类似 `nylib.process.Process` 的对象(`read`、`write`、`iter_memory_region`、`virtual_query`、`enum_ldr_data`、`process_id`、`still_alive`),而不是让它们自己去打开目标:
 
 ```python
 # needs a running game
@@ -109,4 +109,6 @@ def factory(target, *, write, remote_calls, cache_bytes):
 report = probe(proc.process_id, _open_target=factory)
 ```
 
-没有 `closer=`,所以你的句柄由你自己保留;`OpenedTarget.close()` 只有在你传入了 closer 时才会关闭它。`nylib.ctype` 的访问器会变成 `memory.MemorySource` 的子类(`_read`、`_readable_ranges`、`regions`、`modules`);该关键字是私有的,可能会发生变化。
+没有传入 `closer=`,所以你的句柄仍由你自己持有;只有在你传入了 closer 时,`OpenedTarget.close()` 才会去关闭它。`nylib.ctype` 的访问器会改成 `memory.MemorySource` 的子类(`_read`、`_readable_ranges`、`regions`、`modules`);这个关键字是私有的,可能会变动。
+
+`_readable_ranges` 必须只报告你的后端真正能读取的内存;拿不准的内存就不要报告。dumper 会信任它来决定该解引用哪些指针、读取哪些范围,因此过度报告会导致 probe 失败,或者悄悄丢失被扫描的某一段。`_read` 对无法读取的字节会抛出 `nylib.ue.errors.MemoryReadError`。

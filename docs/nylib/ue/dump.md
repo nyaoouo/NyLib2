@@ -99,3 +99,5 @@ report = probe(proc.process_id, _open_target=factory)
 ```
 
 No `closer=`, so you keep your handle; `OpenedTarget.close()` closes it only if you pass one. A `nylib.ctype` accessor becomes a `memory.MemorySource` subclass instead (`_read`, `_readable_ranges`, `regions`, `modules`); the keyword is private and may change.
+
+`_readable_ranges` must report only memory your backend can actually read; when unsure, leave it out. The dumper trusts it to choose which pointers to dereference and which ranges to read, so an over-report fails a probe or silently drops a scanned section. `_read` raises `nylib.ue.errors.MemoryReadError` for bytes it cannot read.
