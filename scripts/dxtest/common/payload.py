@@ -33,7 +33,7 @@ _DETECT_ORDER = (
     ("d3d9.dll",  "dx9",  "Dx9Inbound"),
 )
 
-# Per-backend flat-table index of the swap chain's Present slot (VF§2.3);
+# Per-backend flat-table index of the swap chain's Present slot;
 # DX12 index 8 is a device-vtable slot, not swap-chain Present.
 _PRESENT_METHOD_INDEX = {"dx11": 8, "dx12": 140}
 
@@ -105,9 +105,9 @@ state = DebugViewState(
     update_interval_ms=200,
 )
 
-# T2 proof (VF§8): elapsed seconds (since this payload started) past which a
-# resize was requested on the host side; drawn_after_resize is marked once
-# draw() keeps being called past that point. Only set by the T2 harness.
+# Elapsed seconds (since this payload started) past which a resize was
+# requested on the host side; drawn_after_resize is marked once draw() keeps
+# being called past that point. Only set by the resize harness.
 _resize_at = [float(v) for v in os.environ.get("DXTEST_RESIZE_AT", "").split(",") if v]
 _payload_start = time.time()
 _resize_marked = False
@@ -154,17 +154,17 @@ _HARNESS_ENV_VARS = (
 if any(os.environ.get(name) for name in _HARNESS_ENV_VARS):
     mark("nylib_pyimgui_file", str(nylib.pyimgui.__file__))
 
-# T1 harness plumbing (stage 9 wires DXTEST_HOOK_MODE to an Attach(mode=...)
-# argument; until then Attach() always takes the Detours path - VF§7.2 S0).
+# When DXTEST_HOOK_MODE is set, record the Present slot's owning module and
+# the first byte of the dxgi Present body, so a run can tell which hook owns
+# the slot. Attach() always takes the Detours path.
 if os.environ.get("DXTEST_HOOK_MODE") and backend in _PRESENT_METHOD_INDEX:
     present_addr = frontend_module.GetMethod(_PRESENT_METHOD_INDEX[backend])
     owner = _module_owner(Process.current, present_addr)
     first_byte = bytes(Process.current.read_memoryview(present_addr, 1))[0]
     mark("hook_mode", f"owner={owner} first_byte=0x{first_byte:02X}")
 
-# T4 proof (VF§8): detach at a fixed elapsed time instead of only at exit, so
-# a foreign hook installed earlier (DXTEST_FOREIGN_AT) can be checked across
-# our Detach() - today's blind DetourDetach can wipe it (VF§6).
+# Detach at a fixed elapsed time instead of only at exit, so a foreign hook
+# installed earlier (DXTEST_FOREIGN_AT) can be checked across our Detach().
 _detach_at = os.environ.get("DXTEST_DETACH_AT")
 detached = False
 try:

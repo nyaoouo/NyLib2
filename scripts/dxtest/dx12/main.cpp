@@ -27,7 +27,7 @@ namespace
         return result;
     }
 
-    // Comma-separated seconds, e.g. "2,4" (DXTEST_RESIZE_AT, T2, VF§8).
+    // Comma-separated seconds, e.g. "2,4" (DXTEST_RESIZE_AT).
     std::vector<double> ParseTimes(const std::string &text)
     {
         std::vector<double> result;
@@ -95,7 +95,7 @@ int main()
     dxtest::Window window(L"dxtest_dx12_window", L"dxtest dx12", 960, 540);
     dxtest::TitleStats title_stats(L"dxtest dx12");
 
-    // T8 (VF§8): enable the debug layer before device creation; errors are
+    // Enable the debug layer before device creation; errors are
     // polled via ID3D12InfoQueue near the end of the run.
     bool debug_layer_requested = EnvOrEmpty("DXTEST_D3D12_DEBUG") == "1";
     if (debug_layer_requested)
@@ -129,7 +129,7 @@ int main()
     if (debug_layer_requested)
         device->QueryInterface(IID_PPV_ARGS(&debug_info_queue));
 
-    // T3 (VF§8): queues created before the real present queue, so "take the
+    // Queues created before the real present queue, so "take the
     // first queue seen" would pick the wrong one. DIRECT#1 is created but
     // never submitted to; a closed empty list runs on COMPUTE every frame,
     // ahead of the real present queue's submit.
@@ -229,7 +229,7 @@ int main()
         {
             dxtest::ForeignHookTick(swap_chain, elapsed_s);
             // Slide a ~1s-old snapshot forward so the end-of-run check below
-            // can tell whether the counter is still advancing (T4, VF§8).
+            // can tell whether the counter is still advancing.
             if (std::chrono::duration<double>(std::chrono::steady_clock::now() - foreign_snapshot_time).count() >= 1.0)
             {
                 foreign_calls_snapshot = g_foreign_present_calls;

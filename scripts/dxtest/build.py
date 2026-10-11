@@ -14,7 +14,7 @@ BACKENDS = ("dx9", "dx11", "dx12")
 
 # Vendored Detours (scripts/pyimgui2/auto_src/detours), reused so
 # foreign_hook.cpp's "detours" mode is a genuinely separate Detours engine,
-# like a third-party hooker statically linking its own copy (VF§7.2 S0).
+# like a third-party hooker statically linking its own copy.
 PYIMGUI2_AUTO_SRC = REPO_ROOT / "scripts" / "pyimgui2" / "auto_src"
 DETOURS_SRC_DIR = PYIMGUI2_AUTO_SRC / "detours" / "src"
 

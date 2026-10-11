@@ -26,7 +26,7 @@ namespace
         return result;
     }
 
-    // Comma-separated seconds, e.g. "2,4" (DXTEST_RESIZE_AT, T2, VF§8).
+    // Comma-separated seconds, e.g. "2,4" (DXTEST_RESIZE_AT).
     std::vector<double> ParseTimes(const std::string &text)
     {
         std::vector<double> result;
@@ -114,7 +114,7 @@ int main()
         {
             dxtest::ForeignHookTick(swap_chain, elapsed_s);
             // Slide a ~1s-old snapshot forward so the end-of-run check below
-            // can tell whether the counter is still advancing (T4, VF§8).
+            // can tell whether the counter is still advancing.
             if (std::chrono::duration<double>(std::chrono::steady_clock::now() - foreign_snapshot_time).count() >= 1.0)
             {
                 foreign_calls_snapshot = g_foreign_present_calls;

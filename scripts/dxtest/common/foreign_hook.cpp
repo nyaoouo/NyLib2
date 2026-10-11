@@ -52,8 +52,7 @@ namespace
             std::printf("foreign_hook: detours mode installed\n");
     }
 
-    // Shared-vtable slot hook: compare-and-swap the dxgi vtable entry
-    // (same technique stage 9 proposes for our own hook).
+    // Shared-vtable slot hook: compare-and-swap the dxgi vtable entry.
     void InstallVtable(IUnknown *swap_chain)
     {
         void **slot = PresentSlot(swap_chain);
@@ -71,7 +70,7 @@ namespace
     }
 
     // Per-instance vptr swap: copy a generous run of the swap chain's
-    // vtable (no RTTI; VF3.3 observed >=357 back-to-back entries) and
+    // vtable (no RTTI; a generous back-to-back entry run) and
     // repoint only this object's vptr, leaving the shared dxgi vtable
     // untouched (simulates a tool that proxies the game's object).
     constexpr size_t kVtableCopyEntries = 512;
