@@ -49,4 +49,4 @@ process, never both.
 
 - [inbound.md](inbound.md) - draw inside another process's own D3D/GL/VK renderer.
 - [esp.md](esp.md) - world-to-screen projection and ESP drawing helpers.
-- overlay mode (`Dx11Window.overlay = True`, a frameless desktop overlay): documented later.
+- [overlay.md](overlay.md) - a frameless desktop overlay (`Dx11Window.overlay = True`).

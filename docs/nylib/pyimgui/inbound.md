@@ -37,7 +37,9 @@ thread.
 - `inputPolicy` (`pyimgui.InputPolicy.Auto`/`CaptureAll`/`PassAll`, default
   `Auto`): `Auto` swallows mouse/keyboard only while ImGui itself wants it
   (`io.WantCaptureMouse`/`WantCaptureKeyboard`); `CaptureAll` always swallows;
-  `PassAll` never swallows (ImGui still sees input, the game does too).
+  `PassAll` never calls ImGui's handler for buttons, wheel or keyboard, so the
+  game gets them and ImGui does not (it still sees everything else, cursor
+  moves included).
 - `viewportsEnable` (`Dx11Inbound`/`Dx12Inbound` only, default `True`): set to
   `False` to keep ImGui windows inside the game's window instead of floating
   as their own OS windows.
