@@ -13,6 +13,11 @@ START_OVERLAY_TYPES_NAMESPACE
         py::enum_<OverlayZOrder>(m, "OverlayZOrder")
             .value("AboveTarget", OverlayZOrder::AboveTarget)
             .value("Topmost", OverlayZOrder::Topmost);
+
+        py::enum_<GamepadPolicy>(m, "GamepadPolicy")
+            .value("WhenForeground", GamepadPolicy::WhenForeground)
+            .value("Always", GamepadPolicy::Always)
+            .value("Never", GamepadPolicy::Never);
     }
 }
 END_OVERLAY_TYPES_NAMESPACE

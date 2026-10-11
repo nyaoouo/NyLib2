@@ -23,9 +23,17 @@ START_OVERLAY_TYPES_NAMESPACE
         Topmost = 1,
     };
 
-    // Register InputPolicy and OverlayZOrder on `m` (the top-level pyimgui
-    // module). Must be called exactly once (DllMain.cpp, core only): both
-    // enums are shared across py::module_local() frontend classes.
+    enum class GamepadPolicy
+    {
+        WhenForeground = 0,
+        Always = 1,
+        Never = 2,
+    };
+
+    // Register InputPolicy, OverlayZOrder and GamepadPolicy on `m` (the
+    // top-level pyimgui module). Must be called exactly once (DllMain.cpp,
+    // core only): all three are shared across py::module_local() frontend
+    // classes.
     void pybind_setup_OverlayTypes(py::module_ m);
 }
 END_OVERLAY_TYPES_NAMESPACE

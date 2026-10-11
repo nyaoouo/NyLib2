@@ -1689,9 +1689,13 @@ def patch_frontend_module_stubs(output_dir, module_name):
     if package_stub.is_file() and flat_stub.is_file():
         flat_stub.unlink()
     data = module_stub.read_text(encoding='utf-8')
-    # _RenderBase.inputPolicy is defined on core pyimgui.InputPolicy; stubgen
-    # may not resolve the cross-module type and emit typing.Any instead.
-    data = _patch_field_stub_types(data, {'_RenderBase': {'inputPolicy': 'pyimgui.InputPolicy'}})
+    # _RenderBase.inputPolicy/gamepadPolicy are defined on core pyimgui
+    # enums; stubgen may not resolve the cross-module type and emit
+    # typing.Any instead.
+    data = _patch_field_stub_types(data, {'_RenderBase': {
+        'inputPolicy': 'pyimgui.InputPolicy',
+        'gamepadPolicy': 'pyimgui.GamepadPolicy',
+    }})
     if module_key == 'dx9':
         data = re.sub(
             r"__all__: list\[str\] = \[[^\]]*\]",

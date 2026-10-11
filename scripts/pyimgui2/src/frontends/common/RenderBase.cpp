@@ -76,6 +76,11 @@ START_M_IMGUI_IMPL_NAMESPACE
         this->inputPolicy = (int)policy;
     }
 
+    void RenderBase::SetGamepadPolicy(OVERLAY_TYPES_NAMESPACE::GamepadPolicy policy)
+    {
+        this->gamepadPolicy = (int)policy;
+    }
+
     void RenderBase::ProcessCallBeforeFrameOnce(py::object self)
     {
         auto gstate = PyGILState_Ensure();
@@ -252,6 +257,9 @@ START_M_IMGUI_IMPL_NAMESPACE
             .def_property("inputPolicy",
                            [](RenderBase &self) { return (OVERLAY_TYPES_NAMESPACE::InputPolicy)(int)self.inputPolicy.load(); },
                            &RenderBase::SetInputPolicy)
+            .def_property("gamepadPolicy",
+                           [](RenderBase &self) { return (OVERLAY_TYPES_NAMESPACE::GamepadPolicy)(int)self.gamepadPolicy.load(); },
+                           &RenderBase::SetGamepadPolicy)
             .def("CallBeforeFrameOnce", [](RenderBase &self, py::function func) { self.callBeforeFrameOnce.push_back(func); })
             .def("Close", &RenderBase::Close)
             .def("UpdateTrayIconInfo", &RenderBase::UpdateTrayIconInfo, py::arg("tooltip"), py::arg("iconPath") = L"")
