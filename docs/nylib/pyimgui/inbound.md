@@ -43,3 +43,6 @@ thread.
 - `viewportsEnable` (`Dx11Inbound`/`Dx12Inbound` only, default `True`): set to
   `False` to keep ImGui windows inside the game's window instead of floating
   as their own OS windows.
+- `gamepadPolicy` (`pyimgui.GamepadPolicy`, default `WhenForeground`): the
+  gamepad feeds ImGui only while the game window is foreground; `Always` for
+  the old behaviour; `Never` to ignore it; none under `PassAll`.

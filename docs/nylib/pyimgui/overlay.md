@@ -103,11 +103,13 @@ Keys go to whichever window is the foreground window, under every policy:
 the overlay can neither take keys from the game nor hand them to it. Clicking
 an overlay window makes the overlay the foreground window, so keys then go to
 the overlay - and not to the game - until you click back into the game; under
-`PassAll` the overlay ignores them, but the game still does not get them. The
-overlay reads the gamepad only while it is the foreground window (and not
-under `PassAll`); a controller button already held in the game when you click
-into the overlay reads as a fresh press on the next frame, which can
-immediately activate whatever widget has focus.
+`PassAll` the overlay ignores them, but the game still does not get them. With
+the default `gamepadPolicy` (`WhenForeground`) the overlay reads the gamepad
+only while it is the foreground window; with `Always` it reads the gamepad on
+every frame, with `Never` on none, and under `PassAll` never. A controller
+button already held in the game when you click into the overlay reads as a
+fresh press on the next frame, which can immediately activate whatever widget
+has focus.
 
 While a popup is open, the whole canvas captures mouse input - even outside
 any ImGui window - until the popup closes, so a click meant for the game
@@ -135,3 +137,5 @@ current DPI context instead.
   target is found/lost.
 - `targetHwnd` / `targetPid` (read-only): the current target, 0 when none.
 - `inputPolicy` (`InputPolicy`, default `Auto`): see Click-through above.
+- `gamepadPolicy` (`GamepadPolicy`, default `WhenForeground`): see
+  Click-through above.

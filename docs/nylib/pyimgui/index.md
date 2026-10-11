@@ -45,6 +45,20 @@ The build copies its outputs into `nylib/`, so these docs import
 when `scripts/pyimgui2` is on `sys.path` (the demo does this); use one name per
 process, never both.
 
+## Gamepad
+
+`gamepadPolicy` (`pyimgui.GamepadPolicy`, default `WhenForeground`) controls
+whether ImGui reads a connected gamepad. Under the default, ImGui reads the
+gamepad only while the window it draws into is the foreground window, so a
+background window no longer reacts to a controller by default; `Always`
+reads the gamepad on every frame, and `Never` on none; `NavEnableGamepad`
+stays on regardless. Inbound and the overlay never read the gamepad under
+`inputPolicy = PassAll`, whatever `gamepadPolicy` says. With `Always`, ImGui
+also reads the gamepad on frames nobody sees - for example while an overlay's
+target is minimized - so a press can activate a focused widget out of sight.
+When the gate opens while a pad button is already held - for example the
+window becomes foreground - ImGui sees a fresh press on that frame.
+
 ## Next
 
 - [inbound.md](inbound.md) - draw inside another process's own D3D/GL/VK renderer.
