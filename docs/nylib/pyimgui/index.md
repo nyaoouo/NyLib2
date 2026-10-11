@@ -59,6 +59,50 @@ target is minimized - so a press can activate a focused widget out of sight.
 When the gate opens while a pad button is already held - for example the
 window becomes foreground - ImGui sees a fresh press on that frame.
 
+## Fonts
+
+`win32_font` finds system fonts through DirectWrite and loads them into ImGui's
+font atlas. `AutoInstall(locale=None, size_pixels=16.0)` merges one font per
+script (Latin, the locale's script, the other CJK and non-Latin scripts, emoji)
+into a single `ImFont`; `AutoInstallChain(families, ...)` merges the named
+families in order; `AutoInstallFamily(family, ...)` puts one family in front of
+the automatic chain. Each returns the merged `ImFont`, or `None` when nothing
+matched.
+
+The atlas belongs to the ImGui context, which `Serve()` (or the inbound hook)
+creates, so install fonts from `CallBeforeFrameOnce`; it can be queued before
+`Serve()`:
+
+```python
+from nylib.pyimgui import Dx11Window, win32_font
+
+fonts = {}
+
+def load_fonts():
+    fonts['ui'] = win32_font.AutoInstall(locale='zh-CN', size_pixels=16.0)
+
+wnd = Dx11Window(render)
+wnd.CallBeforeFrameOnce(load_fonts)
+wnd.Serve()
+```
+
+An install with no context, or from inside the render callback (between
+`NewFrame()` and `Render()`), raises `RuntimeError`. Install only on the render
+thread: a call from another thread is not detected and races the frame.
+Installed before the first frame, the font is the first in the atlas and
+becomes the default font; use `imgui_ctx.PushFont(font)` to switch fonts for a
+block. A font installed after the first frame needs
+`wnd.InvalidateDeviceObjects()`, called in the same `CallBeforeFrameOnce`
+callback, so the backend uploads the rebuilt atlas texture.
+
+Every script font contributes all of its glyphs, so the atlas grows with
+`size_pixels` (`AutoInstall` is about 4096x4096 at 16 px). An install that
+would exceed 16384 pixels on a side widens the atlas; if it still does not fit,
+the install removes the fonts it added and raises `RuntimeError`. DX10 caps
+textures at 8192 pixels on a side, and D3D11/D3D12 also cap one texture's size
+in bytes - as low as 128 MiB (a 4096x8192 atlas) on devices with little
+dedicated video memory - so keep `size_pixels` lower there.
+
 ## Next
 
 - [inbound.md](inbound.md) - draw inside another process's own D3D/GL/VK renderer.
