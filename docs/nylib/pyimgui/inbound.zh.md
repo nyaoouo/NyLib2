@@ -30,13 +30,14 @@ renderer.Detach()
 
 你的 `renderCallback` 总是在拥有游戏呈现调用的线程上运行 - 只能从那里调用 `pyimgui`/`pyimgui.esp`，不能从其他线程调用。
 
-<!-- dt:section id="knobs-0" hash="a3c9f08dcfc4" -->
+<!-- dt:section id="knobs-0" hash="9c55b1d9a68b" -->
 ## 常用设置
 
-- `inputPolicy` （`pyimgui.InputPolicy.Auto`/`CaptureAll`/`PassAll`，默认值为
+- `inputPolicy` （`pyimgui.InputPolicy.Auto`/`CaptureAll`/`PassAll`，默认
   `Auto`）：`Auto` 仅在 ImGui 自身需要时才捕获鼠标/键盘
   （`io.WantCaptureMouse`/`WantCaptureKeyboard`）；`CaptureAll` 总是捕获；
-  `PassAll` 从不捕获（ImGui 仍然能看到输入，游戏也是）。
-- `viewportsEnable` （仅适用于 `Dx11Inbound`/`Dx12Inbound`，默认值为
-  `True`）：设置为 `False` 以将 ImGui 窗口保持在游戏窗口内，而不是作为
-  独立的 OS 窗口浮动。
+  `PassAll` 从不调用 ImGui 的按钮、滚轮或键盘处理程序，所以游戏获得它们而
+  ImGui 不获得（它仍然能看到其他一切，包括光标移动）。
+- `viewportsEnable` （仅适用于 `Dx11Inbound`/`Dx12Inbound`，默认 `True`）：
+  设置为 `False` 以将 ImGui 窗口保持在游戏窗口内，而不是作为独立的 OS 窗口
+  浮动。

@@ -52,9 +52,9 @@ wnd.Serve()
 相同的扩展也可以作为顶层 `pyimgui` 导入（演示就是这样做的）；
 每个进程使用一个名称，永远不要同时使用两个。
 
-<!-- dt:section id="next-0" hash="e866af0038ba" -->
+<!-- dt:section id="next-0" hash="03f1565c2acf" -->
 ## 下一步
 
 - [inbound.md](inbound.md) - 在另一个进程自己的 D3D/GL/VK 渲染器内绘制。
 - [esp.md](esp.md) - 世界到屏幕投影和 ESP 绘制辅助工具。
-- overlay 模式（`Dx11Window.overlay = True`，无框架桌面叠加层）：稍后记录。
+- [overlay.md](overlay.md) - 无框架桌面叠加层（`Dx11Window.overlay = True`）。
