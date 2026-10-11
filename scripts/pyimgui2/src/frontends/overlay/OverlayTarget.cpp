@@ -60,12 +60,14 @@ START_M_IMGUI_IMPL_NAMESPACE
             RECT client{};
             if (!GetClientRect(this->hwnd, &client))
                 return false;
-            POINT a{client.left, client.top};
-            POINT b{client.right, client.bottom};
-            if (!ClientToScreen(this->hwnd, &a) || !ClientToScreen(this->hwnd, &b))
+            POINT origin{client.left, client.top};
+            if (!ClientToScreen(this->hwnd, &origin))
                 return false;
-            // A mirrored (right-to-left) window maps its client origin to the right edge.
-            rect = RECT{(std::min)(a.x, b.x), (std::min)(a.y, b.y), (std::max)(a.x, b.x), (std::max)(a.y, b.y)};
+            LONG width = client.right - client.left;
+            LONG height = client.bottom - client.top;
+            // Map one point only: from a DPI-unaware thread the far corner comes back unscaled; RTL maps the origin to the right edge.
+            LONG left = (GetWindowLongPtrW(this->hwnd, GWL_EXSTYLE) & WS_EX_LAYOUTRTL) ? origin.x - width : origin.x;
+            rect = RECT{left, origin.y, left + width, origin.y + height};
             return true;
         }
 
