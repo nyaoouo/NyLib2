@@ -96,12 +96,17 @@ block. A font installed after the first frame needs
 callback, so the backend uploads the rebuilt atlas texture.
 
 Every script font contributes all of its glyphs, so the atlas grows with
-`size_pixels` (`AutoInstall` is about 4096x4096 at 16 px). An install that
-would exceed 16384 pixels on a side widens the atlas; if it still does not fit,
-the install removes the fonts it added and raises `RuntimeError`. DX10 caps
-textures at 8192 pixels on a side, and D3D11/D3D12 also cap one texture's size
-in bytes - as low as 128 MiB (a 4096x8192 atlas) on devices with little
-dedicated video memory - so keep `size_pixels` lower there.
+`size_pixels`: `AutoInstall(locale='zh-CN')` is about 4096x4096 (64 MiB) at
+16 px, 4096x8192 (128 MiB) at 24 px and 4096x16384 (256 MiB) at 32 px. The
+backends upload the atlas at 4 bytes per pixel and D3D11/D3D12 only guarantee
+128 MiB per texture, so installs are limited to 16384 pixels per side and
+128 MiB by default. An install over the side limit first widens the atlas; if
+the atlas still breaks a limit, the install removes the fonts it added and
+raises `RuntimeError`. `win32_font.SetAtlasLimits(max_side=None, max_mib=None)`
+changes the limits for the process (`None` keeps a limit) and
+`GetAtlasLimits()` returns `(max_side, max_mib)`: raise `max_mib` for larger
+CJK sizes on a GPU with enough video memory, and set `max_side=8192` under
+DX10.
 
 ## Next
 
