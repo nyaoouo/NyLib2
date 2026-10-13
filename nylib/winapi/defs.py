@@ -160,6 +160,16 @@ class PEB(ctypes.Structure):
         ("ImageBaseAddress", ctypes.c_void_p),
         ("Ldr", ctypes.c_void_p),
         ("ProcessParameters", ctypes.c_void_p),
+        ("SubSystemData", ctypes.c_void_p),
+        ("ProcessHeap", ctypes.c_void_p),
+        ("FastPebLock", ctypes.c_void_p),
+        ("AtlThunkSListPtr", ctypes.c_void_p),
+        ("IFEOKey", ctypes.c_void_p),
+        ("CrossProcessFlags", ctypes.c_uint32),
+        ("KernelCallbackTable", ctypes.c_void_p),
+        ("SystemReserved", ctypes.c_uint32),
+        ("AtlThunkSListPtr32", ctypes.c_uint32),
+        ("ApiSetMap", ctypes.c_void_p),
     ]
 
 
@@ -186,6 +196,186 @@ class RTL_USER_PROCESS_PARAMETERS(ctypes.Structure):
         ("ImagePathName", UNICODE_STRING),
         ("CommandLine", UNICODE_STRING),
         ("Environment", ctypes.c_void_p),
+    ]
+
+
+class IMAGE_DOS_HEADER(ctypes.Structure):
+    _fields_ = [
+        ("e_magic", ctypes.c_uint16),
+        ("e_cblp", ctypes.c_uint16),
+        ("e_cp", ctypes.c_uint16),
+        ("e_crlc", ctypes.c_uint16),
+        ("e_cparhdr", ctypes.c_uint16),
+        ("e_minalloc", ctypes.c_uint16),
+        ("e_maxalloc", ctypes.c_uint16),
+        ("e_ss", ctypes.c_uint16),
+        ("e_sp", ctypes.c_uint16),
+        ("e_csum", ctypes.c_uint16),
+        ("e_ip", ctypes.c_uint16),
+        ("e_cs", ctypes.c_uint16),
+        ("e_lfarlc", ctypes.c_uint16),
+        ("e_ovno", ctypes.c_uint16),
+        ("e_res", ctypes.c_uint16 * 4),
+        ("e_oemid", ctypes.c_uint16),
+        ("e_oeminfo", ctypes.c_uint16),
+        ("e_res2", ctypes.c_uint16 * 10),
+        ("e_lfanew", ctypes.c_int32),
+    ]
+
+
+class IMAGE_FILE_HEADER(ctypes.Structure):
+    _fields_ = [
+        ("Machine", ctypes.c_uint16),
+        ("NumberOfSections", ctypes.c_uint16),
+        ("TimeDateStamp", ctypes.c_uint32),
+        ("PointerToSymbolTable", ctypes.c_uint32),
+        ("NumberOfSymbols", ctypes.c_uint32),
+        ("SizeOfOptionalHeader", ctypes.c_uint16),
+        ("Characteristics", ctypes.c_uint16),
+    ]
+
+
+class IMAGE_DATA_DIRECTORY(ctypes.Structure):
+    _fields_ = [
+        ("VirtualAddress", ctypes.c_uint32),
+        ("Size", ctypes.c_uint32),
+    ]
+
+
+class IMAGE_OPTIONAL_HEADER32(ctypes.Structure):
+    _fields_ = [
+        ("Magic", ctypes.c_uint16),
+        ("MajorLinkerVersion", ctypes.c_uint8),
+        ("MinorLinkerVersion", ctypes.c_uint8),
+        ("SizeOfCode", ctypes.c_uint32),
+        ("SizeOfInitializedData", ctypes.c_uint32),
+        ("SizeOfUninitializedData", ctypes.c_uint32),
+        ("AddressOfEntryPoint", ctypes.c_uint32),
+        ("BaseOfCode", ctypes.c_uint32),
+        ("BaseOfData", ctypes.c_uint32),
+        ("ImageBase", ctypes.c_uint32),
+        ("SectionAlignment", ctypes.c_uint32),
+        ("FileAlignment", ctypes.c_uint32),
+        ("MajorOperatingSystemVersion", ctypes.c_uint16),
+        ("MinorOperatingSystemVersion", ctypes.c_uint16),
+        ("MajorImageVersion", ctypes.c_uint16),
+        ("MinorImageVersion", ctypes.c_uint16),
+        ("MajorSubsystemVersion", ctypes.c_uint16),
+        ("MinorSubsystemVersion", ctypes.c_uint16),
+        ("Win32VersionValue", ctypes.c_uint32),
+        ("SizeOfImage", ctypes.c_uint32),
+        ("SizeOfHeaders", ctypes.c_uint32),
+        ("CheckSum", ctypes.c_uint32),
+        ("Subsystem", ctypes.c_uint16),
+        ("DllCharacteristics", ctypes.c_uint16),
+        ("SizeOfStackReserve", ctypes.c_uint32),
+        ("SizeOfStackCommit", ctypes.c_uint32),
+        ("SizeOfHeapReserve", ctypes.c_uint32),
+        ("SizeOfHeapCommit", ctypes.c_uint32),
+        ("LoaderFlags", ctypes.c_uint32),
+        ("NumberOfRvaAndSizes", ctypes.c_uint32),
+        ("DataDirectory", IMAGE_DATA_DIRECTORY * 16),
+    ]
+
+
+class IMAGE_OPTIONAL_HEADER64(ctypes.Structure):
+    _fields_ = [
+        ("Magic", ctypes.c_uint16),
+        ("MajorLinkerVersion", ctypes.c_uint8),
+        ("MinorLinkerVersion", ctypes.c_uint8),
+        ("SizeOfCode", ctypes.c_uint32),
+        ("SizeOfInitializedData", ctypes.c_uint32),
+        ("SizeOfUninitializedData", ctypes.c_uint32),
+        ("AddressOfEntryPoint", ctypes.c_uint32),
+        ("BaseOfCode", ctypes.c_uint32),
+        ("ImageBase", ctypes.c_uint64),
+        ("SectionAlignment", ctypes.c_uint32),
+        ("FileAlignment", ctypes.c_uint32),
+        ("MajorOperatingSystemVersion", ctypes.c_uint16),
+        ("MinorOperatingSystemVersion", ctypes.c_uint16),
+        ("MajorImageVersion", ctypes.c_uint16),
+        ("MinorImageVersion", ctypes.c_uint16),
+        ("MajorSubsystemVersion", ctypes.c_uint16),
+        ("MinorSubsystemVersion", ctypes.c_uint16),
+        ("Win32VersionValue", ctypes.c_uint32),
+        ("SizeOfImage", ctypes.c_uint32),
+        ("SizeOfHeaders", ctypes.c_uint32),
+        ("CheckSum", ctypes.c_uint32),
+        ("Subsystem", ctypes.c_uint16),
+        ("DllCharacteristics", ctypes.c_uint16),
+        ("SizeOfStackReserve", ctypes.c_uint64),
+        ("SizeOfStackCommit", ctypes.c_uint64),
+        ("SizeOfHeapReserve", ctypes.c_uint64),
+        ("SizeOfHeapCommit", ctypes.c_uint64),
+        ("LoaderFlags", ctypes.c_uint32),
+        ("NumberOfRvaAndSizes", ctypes.c_uint32),
+        ("DataDirectory", IMAGE_DATA_DIRECTORY * 16),
+    ]
+
+
+class IMAGE_NT_HEADERS32(ctypes.Structure):
+    _fields_ = [
+        ("Signature", ctypes.c_uint32),
+        ("FileHeader", IMAGE_FILE_HEADER),
+        ("OptionalHeader", IMAGE_OPTIONAL_HEADER32),
+    ]
+
+
+class IMAGE_NT_HEADERS64(ctypes.Structure):
+    _fields_ = [
+        ("Signature", ctypes.c_uint32),
+        ("FileHeader", IMAGE_FILE_HEADER),
+        ("OptionalHeader", IMAGE_OPTIONAL_HEADER64),
+    ]
+
+
+class IMAGE_EXPORT_DIRECTORY(ctypes.Structure):
+    _fields_ = [
+        ("Characteristics", ctypes.c_uint32),
+        ("TimeDateStamp", ctypes.c_uint32),
+        ("MajorVersion", ctypes.c_uint16),
+        ("MinorVersion", ctypes.c_uint16),
+        ("Name", ctypes.c_uint32),
+        ("Base", ctypes.c_uint32),
+        ("NumberOfFunctions", ctypes.c_uint32),
+        ("NumberOfNames", ctypes.c_uint32),
+        ("AddressOfFunctions", ctypes.c_uint32),
+        ("AddressOfNames", ctypes.c_uint32),
+        ("AddressOfNameOrdinals", ctypes.c_uint32),
+    ]
+
+
+class API_SET_NAMESPACE(ctypes.Structure):
+    # schema version 6 (Windows 10+); all offsets are relative to the namespace base
+    _fields_ = [
+        ("Version", ctypes.c_uint32),
+        ("Size", ctypes.c_uint32),
+        ("Flags", ctypes.c_uint32),
+        ("Count", ctypes.c_uint32),
+        ("EntryOffset", ctypes.c_uint32),
+        ("HashOffset", ctypes.c_uint32),
+        ("HashFactor", ctypes.c_uint32),
+    ]
+
+
+class API_SET_NAMESPACE_ENTRY(ctypes.Structure):
+    _fields_ = [
+        ("Flags", ctypes.c_uint32),
+        ("NameOffset", ctypes.c_uint32),
+        ("NameLength", ctypes.c_uint32),
+        ("HashedLength", ctypes.c_uint32),
+        ("ValueOffset", ctypes.c_uint32),
+        ("ValueCount", ctypes.c_uint32),
+    ]
+
+
+class API_SET_VALUE_ENTRY(ctypes.Structure):
+    _fields_ = [
+        ("Flags", ctypes.c_uint32),
+        ("NameOffset", ctypes.c_uint32),
+        ("NameLength", ctypes.c_uint32),
+        ("ValueOffset", ctypes.c_uint32),
+        ("ValueLength", ctypes.c_uint32),
     ]
 
 

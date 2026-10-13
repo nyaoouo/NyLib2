@@ -1,3 +1,4 @@
+import bisect
 import contextlib
 import ctypes
 import functools
@@ -423,30 +424,23 @@ class Process:
             if isinstance(dll, str): dll = self.get_ldr_data(dll).DllBase
             if isinstance(func_name, bytes): func_name = func_name.decode('utf-8')
             if isinstance(func_name, str) and func_name.startswith('#'): func_name = int(func_name[1:])
-            opt = dll + self.read_u32(dll + 0x3C) + 0x18
-            dir_rva, dir_size = struct.unpack('<2I', self.read(opt + (0x70 if self.read_u16(opt) == 0x20B else 0x60), 8))
-            if not dir_rva: raise KeyError(f'module {dll:#x} has no export directory')
-            name_rva, ord_base, n_funcs, n_names, funcs_rva, names_rva, ords_rva = struct.unpack('<7I', self.read(dll + dir_rva + 0xC, 28))
+            nt = self.read(p_nt := dll + self.read(dll, winapi.IMAGE_DOS_HEADER).e_lfanew, winapi.IMAGE_NT_HEADERS64)
+            if nt.OptionalHeader.Magic != 0x20B: nt = self.read(p_nt, winapi.IMAGE_NT_HEADERS32)  # PE32
+            exp_dir = nt.OptionalHeader.DataDirectory[0]  # IMAGE_DIRECTORY_ENTRY_EXPORT
+            if not exp_dir.VirtualAddress: raise KeyError(f'module {dll:#x} has no export directory')
+            exp = self.read(dll + exp_dir.VirtualAddress, winapi.IMAGE_EXPORT_DIRECTORY)
             if isinstance(func_name, int):
-                idx = func_name - ord_base
+                idx = func_name - exp.Base
             else:
-                target, image_end, idx = func_name.encode('utf-8') + b'\0', dll + self.read_u32(opt + 0x38), -1
-                names = self.read(dll + names_rva, n_names * 4)
-                lo, hi = 0, n_names
-                while lo < hi:  # export names are sorted, same binary search as the loader
-                    mid = (lo + hi) // 2
-                    p_name = dll + int.from_bytes(names[mid * 4:mid * 4 + 4], 'little')
-                    if (name := self.read(p_name, min(len(target), image_end - p_name))) == target:
-                        idx = self.read_u16(dll + ords_rva + mid * 2)
-                        break
-                    if name < target:
-                        lo = mid + 1
-                    else:
-                        hi = mid
-            if not 0 <= idx < n_funcs or not (rva := self.read_u32(dll + funcs_rva + idx * 4)):
+                target, image_end = func_name.encode('utf-8') + b'\0', dll + nt.OptionalHeader.SizeOfImage
+                names = self.read(dll + exp.AddressOfNames, ctypes.c_uint32 * exp.NumberOfNames)
+                name_at = lambda rva: self.read(dll + rva, min(len(target), image_end - dll - rva))
+                i = bisect.bisect_left(names, target, key=name_at)  # export names are sorted, same binary search as the loader
+                idx = self.read_u16(dll + exp.AddressOfNameOrdinals + i * 2) if i < len(names) and name_at(names[i]) == target else -1
+            if not 0 <= idx < exp.NumberOfFunctions or not (rva := self.read_u32(dll + exp.AddressOfFunctions + idx * 4)):
                 raise KeyError(f'export {func_name!r} not found in module {dll:#x}')
-            if not dir_rva <= rva < dir_rva + dir_size: return dll + rva
-            mod_name = self.read_bytes_zero_trim(dll + name_rva).decode('utf-8').lower()
+            if not exp_dir.VirtualAddress <= rva < exp_dir.VirtualAddress + exp_dir.Size: return dll + rva
+            mod_name = self.read_bytes_zero_trim(dll + exp.Name).decode('utf-8').lower()
             fwd_dll, _, fwd_func = self.read_bytes_zero_trim(dll + rva).decode('utf-8').partition('.')
             if not (fwd_dll := fwd_dll.lower()).endswith('.dll'): fwd_dll += '.dll'
             if fwd_dll.startswith(('api-', 'ext-')): fwd_dll = self._resolve_api_set(fwd_dll, mod_name)
@@ -459,19 +453,16 @@ class Process:
 
     def _resolve_api_set(self, name: str, importer: str = '') -> str:
         if (m := getattr(self, '_api_set_map', None)) is None:
-            p_map = self.read_ptr(self.process_basic_information.PebBaseAddress + 0x68)  # PEB.ApiSetMap (x64)
-            m = self._api_set_map = self.read(p_map, self.read_u32(p_map + 4))
-        if (version := struct.unpack_from('<I', m)[0]) != 6: raise KeyError(f'unsupported api set schema {version}')
+            p_map = self.peb.ApiSetMap
+            m = self._api_set_map = self.read(p_map, self.read(p_map, winapi.API_SET_NAMESPACE).Size)
+        if (ns := winapi.API_SET_NAMESPACE.from_buffer_copy(m)).Version != 6: raise KeyError(f'unsupported api set schema {ns.Version}')
         u16 = lambda off, size: m[off:off + size].decode('utf-16-le').lower()
         key = name.removesuffix('.dll').rpartition('-')[0]
-        count, entry_off = struct.unpack_from('<2I', m, 0xC)
-        for i in range(count):
-            _, n_off, _, n_hashed, v_off, v_cnt = struct.unpack_from('<6I', m, entry_off + i * 0x18)
-            if u16(n_off, n_hashed) != key: continue
+        for entry in (winapi.API_SET_NAMESPACE_ENTRY * ns.Count).from_buffer_copy(m, ns.EntryOffset):
+            if u16(entry.NameOffset, entry.HashedLength) != key: continue
             host = ''
-            for j in range(v_cnt):  # value 0 is the default host, later ones are per-importer exceptions
-                _, i_off, i_len, h_off, h_len = struct.unpack_from('<5I', m, v_off + j * 0x14)
-                if j == 0 or i_len and u16(i_off, i_len) == importer: host = u16(h_off, h_len)
+            for j, value in enumerate((winapi.API_SET_VALUE_ENTRY * entry.ValueCount).from_buffer_copy(m, entry.ValueOffset)):  # value 0 is the default host, later ones are per-importer exceptions
+                if j == 0 or value.NameLength and u16(value.NameOffset, value.NameLength) == importer: host = u16(value.ValueOffset, value.ValueLength)
             if host: return host
             break
         raise KeyError(f'api set {name!r} has no host')
