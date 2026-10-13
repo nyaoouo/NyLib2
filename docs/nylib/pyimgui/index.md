@@ -5,6 +5,8 @@ GL3/VK frontends. Each frontend has a standalone-window class and an injected
 "inbound" class for drawing inside another process's own renderer (see
 [inbound.md](inbound.md)).
 
+Keywords: Dear ImGui, imgui, pyimgui, Dx9Window, Dx11Window, Dx12Window, Dx11Inbound, Dx12Inbound, inbound, overlay, ESP, DirectX, DX11, DX12, OpenGL3, Vulkan, render hook, in-process overlay, pybind11
+
 ## Build
 
 The compiled `.pyd` is CPython-ABI-specific and not shipped; build it from a

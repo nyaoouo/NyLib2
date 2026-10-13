@@ -2,6 +2,8 @@
 
 `nylib.ue` reads the reflection data of Unreal Engine games (UE 4.25+ and UE5, Windows x64).
 
+Keywords: Unreal Engine, UE4, UE5, reflection, dump, Unreal.attach, snapshot, Dumper-7, GObjects, FName, UObject, UFunction, offsets, idmap, IDA import, pyi stubs, game modding, runtime objects
+
 - [Dump](dump.md): find the engine globals and offsets, walk every class, struct, enum and function, and write a versioned snapshot folder plus Dumper-7-format exports (the GObjects dumps, an `.idmap`, the game's main module as a PE file).
 - [Runtime](runtime.md): attach to the running game and use its objects from Python: read members, write them (opt-in), call UFunctions (opt-in).
 - [IDA](ida.md): import a snapshot's names, types and comments into IDA 9.x.

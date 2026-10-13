@@ -37,6 +37,7 @@ nylib/                       importable package
   logging.py                 color console logging, multiline + std->file tee
   mono/                      Unity / Mono runtime inspector
   pattern.py                 IDA-style "AA BB ?? CC" scanner
+  pdb/                       PDB read/write via Microsoft DIA (own build step)
   process/                   `Process` class - memory R/W, module enum, scan
   pyimgui/                   stub package - native `.pyd` built by the user
   structs/                   PDB / DWARF struct helpers
@@ -61,7 +62,7 @@ scripts/                     dev-only tools (NOT installed; not in the wheel)
 
 pyproject.toml               package metadata + PyInstaller entry point
 readme.md                    user-facing intro, feature map & examples
-docs/nylib/ue/               usage docs, English with `*.zh.md` reading copies
+docs/nylib/                  per-module docs, English with `*.zh.md` reading copies
 license.txt                  GPL v3
 .agent-memory/               local-only notes for AI agents (git-ignored)
 ```
@@ -77,23 +78,54 @@ development tool and is only available from a checkout.
 Treat this section as the public API map. Imports shown are the
 canonical entry points.
 
+### Module index
+
+| Module | What it is | Keywords | Doc |
+| --- | --- | --- | --- |
+| `nylib.process` | Remote process memory R/W, module enum, and function calls | Process, RemoteCall, read memory, write memory, DLL injection, PEB, pattern scan | [docs/nylib/process.md](docs/nylib/process.md) |
+| `nylib.pattern` | IDA-style byte-pattern scanner for PE files and process memory | StaticPatternSearcher, CachedRawMemoryPatternScanner, pattern matching, AOB scan, sig scan, signature scanning | [docs/nylib/pattern.md](docs/nylib/pattern.md) |
+| `nylib.pdb` | Read PDB files via Microsoft DIA; write PDB files from a model | PDB, DIA, Session, find_symbols, find_type, export_pdb, write_pdb | [docs/nylib/pdb.md](docs/nylib/pdb.md) |
+| `nylib.ctype` | Declarative C-like structures with local or remote-process accessors | CData, Struct, Pointer, Accessor, bit field, remote memory | [docs/nylib/ctype.md](docs/nylib/ctype.md) |
+| `nylib.winapi` | Typed ctypes wrappers for kernel32 / ntdll / user32 / ... | Win32 API, ctypes, kernel32, ntdll, OpenProcess, ReadProcessMemory, NTSTATUS | [docs/nylib/winapi.md](docs/nylib/winapi.md) |
+| `nylib.winutils` | High-level Win32 helpers: process, PE, pipes, RPC, drivers, toolchain | process, PE exports, PE unmap, pipe, RPC, driver, inline hook, MSVC | [docs/nylib/winutils/index.md](docs/nylib/winutils/index.md) |
+| `nylib.winutils.breakpoint` | x64 HW/SW breakpoint primitive (VEH + debugger backends) | hardware breakpoints, debug registers, memory trap, BP_E, BreakPoint, VEH | [docs/nylib/winutils/breakpoint.md](docs/nylib/winutils/breakpoint.md) |
+| `nylib.winutils.sign` | Authenticode signing/verification, driver cross-cert signing | SigningService, VerificationService, Authenticode, driver signing, cross-cert, MSCVStore | [docs/nylib/winutils/sign.md](docs/nylib/winutils/sign.md) |
+| `nylib.winutils.python_loader` | In-process Python loader injected via named pipe | inject, python, remote process, PyConfig, pipe RPC | [docs/nylib/winutils/python_loader.md](docs/nylib/winutils/python_loader.md) |
+| `nylib.winutils.python_hijack` | Proxy DLL that runs Python when a hijacked DLL loads | DLL proxy, DLL hijacking, export forwarding, pefile, create_src | [docs/nylib/winutils/python_hijack.md](docs/nylib/winutils/python_hijack.md) |
+| `nylib.hook` | Microsoft Detours wrapper for function hooking | Hook, create_hook, detour, trampoline, function interception, Win32 API hooking | [docs/nylib/hook.md](docs/nylib/hook.md) |
+| `nylib.pyimgui` | Direct Dear ImGui bindings (standalone windows + injected overlays) | Dear ImGui, imgui, Dx11Window, Dx11Inbound, overlay, DirectX, Vulkan | [docs/nylib/pyimgui/index.md](docs/nylib/pyimgui/index.md) |
+| `nylib.imguiutils` | Dear ImGui widgets: alerts, file dialog, window manager, debug view | message box, file dialog, window manager, Dear ImGui widgets, memory debugger, debug view | [docs/nylib/imguiutils.md](docs/nylib/imguiutils.md) |
+| `nylib.mono` | Runtime inspector for Mono / IL2CPP games | mono, il2cpp, unity, MonoClass, MonoMethod, runtime inspection | [docs/nylib/mono.md](docs/nylib/mono.md) |
+| `nylib.utils` | Catch-all: lazy pip install, asm, event loop, downloads, archive packing | pip, install, keystone, capstone, event loop, download, pack, archive | [docs/nylib/utils.md](docs/nylib/utils.md) |
+| `nylib.logging` | Color console logging with file rotation and custom verbosity levels | install, std2file, color console, log to file, file rotation, custom log levels | [docs/nylib/logging.md](docs/nylib/logging.md) |
+| `nylib.vmware_wp` | Control VMware Workstation Pro (power, snapshots, guest, REST) | Vmrun, Vmcli, WorkstationRest, VmwareConfig, snapshot, guest command | [docs/nylib/vmware_wp.md](docs/nylib/vmware_wp.md) |
+| `nylib.ue` | Unreal Engine reflection dumper + runtime object access | Unreal Engine, UE4, UE5, reflection, dump, Unreal.attach, GObjects | [docs/nylib/ue/index.md](docs/nylib/ue/index.md) |
+| `nylib.structs` | PDB / ad-hoc remote-process data structures | ExStruct, ExField, ExPtr, ExArr, remote struct | [docs/nylib/misc.md](docs/nylib/misc.md) |
+| `nylib.tkinter_` | Styled tkinter widgets (CSS-like styling, borderless windows) | Div, Button, Label, BorderlessWindow, tkinter widgets, CSS styling | [docs/nylib/misc.md](docs/nylib/misc.md) |
+| `nylib.__pyinstaller` | PyInstaller hooks for freezing nylib into bundles | PyInstaller, freeze, hidden imports, hook discovery | [docs/nylib/misc.md](docs/nylib/misc.md) |
+
 ### `nylib.process`
+
+Docs: [docs/nylib/process.md](docs/nylib/process.md)
 
 ```python
 from nylib.process import Process
 ```
 
-- `Process.from_name(name)` / `Process.from_id(pid)` - construct from a
+- `Process.from_name(name)` / `Process(pid)` - construct from a
   process name (bytes or str) or PID.
 - `Process.current` - the calling process.
 - Memory: `alloc`, `free`, `read(addr, type)`, `write(addr, value)`,
   `virtual_query`, `virtual_protect`, `iter_memory_region`,
   `alloc_near`.
-- Modules: `enum_ldr_data()`, `get_module(name)`, `base_address`.
+- Modules: `enum_ldr_data()`, `get_ldr_data(name)`, `base_ldr_data`.
+- Exports: `get_proc_address(dll, func_name)`, `enum_exports(dll)`.
 - Scanning: cached `CachedRawMemoryPatternScanner` and
   `StaticPatternSearcher` via `Process` helpers (see `pattern.py`).
 
 ### `nylib.winapi`
+
+Docs: [docs/nylib/winapi.md](docs/nylib/winapi.md)
 
 Typed `ctypes` wrappers around the Win32 surface used internally:
 `kernel32`, `ntdll`, `user32`, `advapi32`, `shell32`, `msvcrt`, `ole32`,
@@ -106,6 +138,8 @@ from nylib.winapi import OpenProcess, ReadProcessMemory, MEMORY_BASIC_INFORMATIO
 ```
 
 ### `nylib.winutils`
+
+Docs: [docs/nylib/winutils/index.md](docs/nylib/winutils/index.md)
 
 High-level Win32 helpers; subpackages are loaded lazily.
 
@@ -133,6 +167,8 @@ in-process side.
 
 ### `nylib.hook`
 
+Docs: [docs/nylib/hook.md](docs/nylib/hook.md)
+
 Microsoft Detours wrapper:
 
 ```python
@@ -146,6 +182,8 @@ from nylib.hook import Hook, create_hook
   `nylib.hook.detours`; ship it next to the binary when freezing.
 
 ### `nylib.winutils.breakpoint`
+
+Docs: [docs/nylib/winutils/breakpoint.md](docs/nylib/winutils/breakpoint.md)
 
 x64 hardware/software breakpoint primitive (in-process, local only):
 
@@ -173,6 +211,8 @@ bp.uninstall()
   See `scripts/breakpoint_demo/` for runnable smoke scripts.
 
 ### `nylib.winutils.sign`
+
+Docs: [docs/nylib/winutils/sign.md](docs/nylib/winutils/sign.md)
 
 Dependency-free Authenticode signing / verification over `mssign32` +
 `crypt32` + `wintrust` (no `signtool.exe` needed):
@@ -204,22 +244,47 @@ PyInstaller data file via `hook-nylib.winutils.sign.py`.
 
 ### `nylib.pattern`
 
+Docs: [docs/nylib/pattern.md](docs/nylib/pattern.md)
+
 IDA-flavoured byte-pattern scanner used by `Process`:
 
 ```python
 from nylib.pattern import CachedRawMemoryPatternScanner, StaticPatternSearcher
-scanner = StaticPatternSearcher.from_pe(pe_path)
+scanner = StaticPatternSearcher(pe_path)
 for addr in scanner.search('48 8B ?? ?? ?? ?? ?? 48 8B ??'):
     ...
 ```
 
+### `nylib.pdb`
+
+Docs: [docs/nylib/pdb.md](docs/nylib/pdb.md)
+
+Read PDB files through Microsoft DIA, and write PDB files from a plain Python
+model. The extension needs a one-time build:
+
+```bash
+python scripts/pdb/build.py
+```
+
+```python
+from nylib.pdb import Session, SymTag
+
+with Session.from_pe('C:/Windows/System32/user32.dll') as s:
+    for sym in s.find_symbols('MessageBox*', tag=SymTag.PublicSymbol):
+        print(sym.name, hex(sym.rva))
+```
+
 ### `nylib.ctype`
+
+Docs: [docs/nylib/ctype.md](docs/nylib/ctype.md)
 
 Drop-in `ctypes`-style declarative structures that read/write through
 an *accessor* - usually `CAccessorProcess(process)` so the same struct
 definition works on local memory and on another process's memory.
 
 ### `nylib.pyimgui` (build-it-yourself)
+
+Docs: [docs/nylib/pyimgui/index.md](docs/nylib/pyimgui/index.md)
 
 Direct Dear ImGui bindings produced from the C++ headers. **The
 compiled `.pyd` files are not shipped** - they are CPython-ABI-specific
@@ -261,6 +326,8 @@ See `scripts/pyimgui2/pyimgui_test.py` for a runnable demo.
 
 ### `nylib.imguiutils`
 
+Docs: [docs/nylib/imguiutils.md](docs/nylib/imguiutils.md)
+
 Higher-level pyimgui widgets that depend on the user having a working
 `nylib.pyimgui`:
 
@@ -278,6 +345,8 @@ Higher-level pyimgui widgets that depend on the user having a working
 
 ### `nylib.mono`
 
+Docs: [docs/nylib/mono.md](docs/nylib/mono.md)
+
 Tools for inspecting Unity / Mono games at runtime:
 
 - `defines/` - typed handles for `MonoDomain`, `MonoImage`, `MonoClass`,
@@ -287,6 +356,8 @@ Tools for inspecting Unity / Mono games at runtime:
   `nylib.pyimgui`.
 
 ### `nylib.utils`
+
+Docs: [docs/nylib/utils.md](docs/nylib/utils.md)
 
 Catch-all for non-Win32 helpers. The notable ones:
 
@@ -306,6 +377,8 @@ Catch-all for non-Win32 helpers. The notable ones:
 
 ### `nylib.logging`
 
+Docs: [docs/nylib/logging.md](docs/nylib/logging.md)
+
 Drop-in `logging` setup. `nylib.logging.install(...)` enables ANSI color on
 the Windows console, adds `Verbose1..3` levels below `DEBUG`, reflows
 multi-line messages / tracebacks so every line carries the prefix, and can
@@ -314,6 +387,8 @@ tee to a size-capped, zip-archiving file. `std2file(...)` redirects
 has no console).
 
 ### `nylib.vmware_wp`
+
+Docs: [docs/nylib/vmware_wp.md](docs/nylib/vmware_wp.md)
 
 Control VMware Workstation Pro from Python - power, snapshots, guest
 commands, and the Workstation REST API - through one synchronous,
@@ -370,6 +445,8 @@ with Unreal.attach('TRIANGLE_STRATEGY-Win64-Shipping.exe', dump=result.path) as 
   `ue_dumps/_captures/`.
 
 ### `nylib.structs`, `nylib.tkinter_`, `nylib.__pyinstaller`
+
+Docs: [docs/nylib/misc.md](docs/nylib/misc.md)
 
 - `structs/` - PDB-derived and ad-hoc binary struct definitions.
 - `tkinter_/` - small additions on top of stdlib `tkinter`.

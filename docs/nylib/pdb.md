@@ -2,6 +2,8 @@
 
 Read PDB files through Microsoft DIA, and write PDB files from a plain Python model.
 
+Keywords: PDB, DIA, msdia140, Session, SymTag, find_symbols, find_type, describe, symbol server, symsrv, MOZILLA_SYMBOLS, _NT_SYMBOL_PATH, export_pdb, write_pdb, pe_info, RSDS, CodeView, debug symbols, read pdb, write pdb
+
 | Part | What it does | Needs the compiled extension |
 |---|---|---|
 | `Session` | read symbols and types | yes |
