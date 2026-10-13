@@ -119,7 +119,7 @@ High-level Win32 helpers; subpackages are loaded lazily.
 | `winutils.driver` | service-control (`SCManager`, `Service`) helpers for loading kernel drivers |
 | `winutils.inline_hook` | hot-patch trampoline based on `keystone-engine` + `capstone` |
 | `winutils.pe_unmap` | rebuild an in-memory PE back to its on-disk layout |
-| `winutils.pe_exports` | in-memory PE export-table walker (`read_exports`), ctypes-only |
+| `winutils.pe_exports` | PE export-table reader: `ExportTable` over any `Process` (backs `Process.get_proc_address` / `enum_exports`); `read_exports(base)` for this process, never raises |
 | `winutils.version` | PE version resource + shell file properties (`get_file_version_info`, `get_file_properties`) |
 | `winutils.pipe`, `winutils.pipe_rpc` | named-pipe transport plus a tiny RPC layer (used by `python_loader` host <-> guest) |
 | `winutils.python_hijack` | build a stub DLL that proxies a real DLL and runs Python on attach |

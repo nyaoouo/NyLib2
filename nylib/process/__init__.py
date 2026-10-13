@@ -1,4 +1,3 @@
-import bisect
 import contextlib
 import ctypes
 import functools
@@ -9,6 +8,7 @@ from .namespace import Namespace
 from ..pattern import CachedRawMemoryPatternScanner, StaticPatternSearcher
 from .. import ctype as m_ctype
 from .. import winapi, winutils
+from ..winutils.pe_exports import Export, ExportTable
 
 _T = typing.TypeVar('_T')
 
@@ -424,24 +424,12 @@ class Process:
             if isinstance(dll, str): dll = self.get_ldr_data(dll).DllBase
             if isinstance(func_name, bytes): func_name = func_name.decode('utf-8')
             if isinstance(func_name, str) and func_name.startswith('#'): func_name = int(func_name[1:])
-            nt = self.read(p_nt := dll + self.read(dll, winapi.IMAGE_DOS_HEADER).e_lfanew, winapi.IMAGE_NT_HEADERS64)
-            if nt.OptionalHeader.Magic != 0x20B: nt = self.read(p_nt, winapi.IMAGE_NT_HEADERS32)  # PE32
-            exp_dir = nt.OptionalHeader.DataDirectory[0]  # IMAGE_DIRECTORY_ENTRY_EXPORT
-            if not exp_dir.VirtualAddress: raise KeyError(f'module {dll:#x} has no export directory')
-            exp = self.read(dll + exp_dir.VirtualAddress, winapi.IMAGE_EXPORT_DIRECTORY)
-            if isinstance(func_name, int):
-                idx = func_name - exp.Base
-            else:
-                target, image_end = func_name.encode('utf-8') + b'\0', dll + nt.OptionalHeader.SizeOfImage
-                names = self.read(dll + exp.AddressOfNames, ctypes.c_uint32 * exp.NumberOfNames)
-                name_at = lambda rva: self.read(dll + rva, min(len(target), image_end - dll - rva))
-                i = bisect.bisect_left(names, target, key=name_at)  # export names are sorted, same binary search as the loader
-                idx = self.read_u16(dll + exp.AddressOfNameOrdinals + i * 2) if i < len(names) and name_at(names[i]) == target else -1
-            if not 0 <= idx < exp.NumberOfFunctions or not (rva := self.read_u32(dll + exp.AddressOfFunctions + idx * 4)):
+            table = ExportTable(self, dll)
+            if (target := table.target(func_name - table.header.Base if isinstance(func_name, int) else table.find(func_name))) is None:
                 raise KeyError(f'export {func_name!r} not found in module {dll:#x}')
-            if not exp_dir.VirtualAddress <= rva < exp_dir.VirtualAddress + exp_dir.Size: return dll + rva
-            mod_name = self.read_bytes_zero_trim(dll + exp.Name).decode('utf-8').lower()
-            fwd_dll, _, fwd_func = self.read_bytes_zero_trim(dll + rva).decode('utf-8').partition('.')
+            if isinstance(target, int): return target
+            mod_name = table.name.lower()
+            fwd_dll, _, fwd_func = target.partition('.')
             if not (fwd_dll := fwd_dll.lower()).endswith('.dll'): fwd_dll += '.dll'
             if fwd_dll.startswith(('api-', 'ext-')): fwd_dll = self._resolve_api_set(fwd_dll, mod_name)
             try:
@@ -450,6 +438,10 @@ class Process:
                 raise KeyError(f'forwarder target {fwd_dll!r} (from {mod_name}!{func_name}) not loaded') from None
             func_name = fwd_func
         raise KeyError(f'forwarder chain too long at {dll!r}!{func_name!r}')
+
+    def enum_exports(self, dll: str | int) -> typing.Iterator[Export]:
+        """Yield every export of `dll` (module name or base); forwarders are not resolved."""
+        yield from ExportTable(self, self.get_ldr_data(dll).DllBase if isinstance(dll, str) else dll)
 
     def _resolve_api_set(self, name: str, importer: str = '') -> str:
         if (m := getattr(self, '_api_set_map', None)) is None:
