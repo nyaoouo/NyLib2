@@ -150,11 +150,12 @@ def _expand_cab(cab_path, dest_path) -> None:
     try:
         try:
             r = subprocess.run([_expand_exe_path(), str(cab_path), tmp_name],
-                                capture_output=True, text=True)
+                                capture_output=True)  # bytes: localized output may not decode with the locale codec
         except FileNotFoundError as e:
             raise RuntimeError(f'CAB expander not found at {_expand_exe_path()!r}') from e
         if r.returncode != 0:
-            raise RuntimeError(f'expand.exe failed (rc={r.returncode}): {r.stderr or r.stdout}')
+            err = (r.stderr or r.stdout).decode('mbcs', errors='replace')
+            raise RuntimeError(f'expand.exe failed (rc={r.returncode}): {err}')
         os.replace(tmp_name, dest_path)
     except BaseException:
         try:
