@@ -2,13 +2,15 @@
 
 <!-- dt:meta v="1" lang="zh" source="index.md" -->
 
-<!-- dt:section id="__preamble__" hash="8ed673a10f0f" -->
+<!-- dt:section id="__preamble__" hash="de89338dd055" -->
 # nylib.pyimgui
 
-Dear ImGui 1.91.5-docking 的 Python 直接绑定，包含 DX9/DX10/DX11/DX12/
-GL3/VK 前端。每个前端都有一个独立窗口类和一个注入的
-"inbound" 类，用于在另一个进程自己的渲染器内进行绘制（参见
+直接 Dear ImGui 1.91.5-docking 的 Python 绑定，具有 DX9/DX10/DX11/DX12/
+GL3/VK 前端。每个前端都有一个独立窗口类和一个注入的 "inbound" 类，
+用于在另一个进程自己的渲染器内绘制（参见
 [inbound.md](inbound.md)）。
+
+关键词: Dear ImGui, imgui, pyimgui, Dx9Window, Dx11Window, Dx12Window, Dx11Inbound, Dx12Inbound, inbound, overlay, ESP, DirectX, DX11, DX12, OpenGL3, Vulkan, render hook, in-process overlay, pybind11
 
 <!-- dt:section id="build-0" hash="b7381ce1ed6c" -->
 ## 构建

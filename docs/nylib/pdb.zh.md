@@ -2,18 +2,20 @@
 
 <!-- dt:meta v="1" lang="zh" source="pdb.md" -->
 
-<!-- dt:section id="__preamble__" hash="75bb652351d8" -->
+<!-- dt:section id="__preamble__" hash="f29f4dcde640" -->
 # nylib.pdb
 
 通过 Microsoft DIA 读取 PDB 文件，并从纯 Python 模型写入 PDB 文件。
 
-| 部分 | 功能 | 需要编译的扩展 |
+关键词: PDB, DIA, msdia140, Session, SymTag, find_symbols, find_type, describe, symbol server, symsrv, MOZILLA_SYMBOLS, _NT_SYMBOL_PATH, export_pdb, write_pdb, pe_info, RSDS, CodeView, debug symbols, read pdb, write pdb
+
+| 部分 | 它的作用 | 需要编译的扩展 |
 |---|---|---|
-| `Session` | 读取符号和类型 | 是 |
-| `export.export_pdb` | PDB -> 模型 | 是 |
-| `model` | 模型、JSON 加载/保存、验证 | 否 |
-| `writer.write_pdb` | 模型 -> PDB | 否 |
-| `pe_info` | 读取 PE 的机器类型、节和 RSDS 条目 | 否 |
+| `Session` | 读取符号和类型 | yes |
+| `export.export_pdb` | PDB -> model | yes |
+| `model` | 模型、JSON 加载/保存、验证 | no |
+| `writer.write_pdb` | model -> PDB | no |
+| `pe_info` | 读取 PE 的机器、节和 RSDS 条目 | no |
 
 <!-- dt:section id="build-the-extension-0" hash="78cdbf266c26" -->
 ## 构建扩展

@@ -17,6 +17,8 @@ runtime tooling on **Windows x64**.
 > AI coding agents should read [`AGENTS.md`](AGENTS.md) for the full API map and
 > working conventions.
 
+Per-module quick starts and task recipes live under [`docs/nylib/`](docs/nylib/).
+
 ---
 
 ## Install
@@ -43,21 +45,22 @@ pip install ".[full]"   # all of the above
 
 ## Feature map
 
-| Area | Module | What you get |
-| --- | --- | --- |
-| Process / memory | `nylib.process` | attach by name/PID, read/write/alloc, module enum, region scan |
-| Pattern scanning | `nylib.pattern` | IDA-style `"48 8B ?? ??"` scanner (live memory or static PE) |
-| Remote ctypes | `nylib.ctype` | declarative structs that read/write through a process accessor |
-| Function hooking | `nylib.hook` | Microsoft Detours wrapper (`Hook`, `@create_hook`) |
-| Breakpoints | `nylib.winutils.breakpoint` | x64 HW/SW breakpoints (VEH + debugger backends) |
-| Injection | `nylib.winutils.python_loader` / `python_hijack` | run arbitrary Python inside a third-party process |
-| Code signing | `nylib.winutils.sign` | Authenticode + kernel-driver cross-cert signing, no `signtool` |
-| Dear ImGui | `nylib.pyimgui` | direct ImGui bindings, standalone windows + injected overlays |
-| ImGui widgets | `nylib.imguiutils` | alerts, file dialog, window manager, and a full debug view |
-| Unity / Mono | `nylib.mono` | runtime inspector for Mono/IL2CPP-style games |
-| Unreal Engine | `nylib.ue` | UE4.25+/UE5 reflection dumper (snapshots, Dumper-7-format exports, IDA importer), runtime objects with opt-in writes and UFunction calls |
-| VMware | `nylib.vmware_wp` | drive VMware Workstation Pro (power/snapshots/guest/REST) |
-| Misc | `nylib.utils`, `nylib.logging` | lazy pip, asm, eventloop, color logging, ... |
+| Area | Module | What you get | Docs |
+| --- | --- | --- | --- |
+| Process / memory | `nylib.process` | attach by name/PID, read/write/alloc, module enum, region scan | [docs/nylib/process.md](docs/nylib/process.md) |
+| Pattern scanning | `nylib.pattern` | IDA-style `"48 8B ?? ??"` scanner (live memory or static PE) | [docs/nylib/pattern.md](docs/nylib/pattern.md) |
+| PDB symbols | `nylib.pdb` | read PDB files via Microsoft DIA; write PDB files from a model | [docs/nylib/pdb.md](docs/nylib/pdb.md) |
+| Remote ctypes | `nylib.ctype` | declarative structs that read/write through a process accessor | [docs/nylib/ctype.md](docs/nylib/ctype.md) |
+| Function hooking | `nylib.hook` | Microsoft Detours wrapper (`Hook`, `@create_hook`) | [docs/nylib/hook.md](docs/nylib/hook.md) |
+| Breakpoints | `nylib.winutils.breakpoint` | x64 HW/SW breakpoints (VEH + debugger backends) | [docs/nylib/winutils/breakpoint.md](docs/nylib/winutils/breakpoint.md) |
+| Injection | `nylib.winutils.python_loader` / `python_hijack` | run arbitrary Python inside a third-party process | [docs/nylib/winutils/python_loader.md](docs/nylib/winutils/python_loader.md) |
+| Code signing | `nylib.winutils.sign` | Authenticode + kernel-driver cross-cert signing, no `signtool` | [docs/nylib/winutils/sign.md](docs/nylib/winutils/sign.md) |
+| Dear ImGui | `nylib.pyimgui` | direct ImGui bindings, standalone windows + injected overlays | [docs/nylib/pyimgui/index.md](docs/nylib/pyimgui/index.md) |
+| ImGui widgets | `nylib.imguiutils` | alerts, file dialog, window manager, and a full debug view | [docs/nylib/imguiutils.md](docs/nylib/imguiutils.md) |
+| Unity / Mono | `nylib.mono` | runtime inspector for Mono/IL2CPP-style games | [docs/nylib/mono.md](docs/nylib/mono.md) |
+| Unreal Engine | `nylib.ue` | UE4.25+/UE5 reflection dumper (snapshots, Dumper-7-format exports, IDA importer), runtime objects with opt-in writes and UFunction calls | [docs/nylib/ue/index.md](docs/nylib/ue/index.md) |
+| VMware | `nylib.vmware_wp` | drive VMware Workstation Pro (power/snapshots/guest/REST) | [docs/nylib/vmware_wp.md](docs/nylib/vmware_wp.md) |
+| Misc | `nylib.utils`, `nylib.logging` | lazy pip, asm, eventloop, color logging, ... | [docs/nylib/utils.md](docs/nylib/utils.md), [docs/nylib/logging.md](docs/nylib/logging.md) |
 
 ---
 
@@ -72,7 +75,7 @@ from nylib.process import Process
 run_admin()          # relaunch elevated if needed
 enable_privilege()   # SeDebugPrivilege
 
-proc = Process.from_name('notepad.exe')   # or Process.from_id(1234)
+proc = Process.from_name('notepad.exe')   # or Process(1234)
 for ldr in proc.enum_ldr_data():          # enumerate loaded modules
     print(ldr.FullDllName.remote_value(proc))
 ```
@@ -88,7 +91,7 @@ for hit in scanner.search('48 8B ?? ?? ?? ?? ?? 48 8B ??'):
     ...
 
 # static scan straight off the PE on disk
-searcher = StaticPatternSearcher.from_pe(r'C:\path\to\game.exe')
+searcher = StaticPatternSearcher(r'C:\path\to\game.exe')
 for addr in searcher.search('48 8B ?? ?? ?? ?? ?? 48 8B ??'):
     ...
 ```
@@ -129,7 +132,7 @@ def render():
     imgui.End()
 
 wnd = Dx11Window(render)
-# wnd.overlay = True      # frameless, topmost, click-through desktop overlay (DX11/DX12)
+# overlay mode: set wnd.overlay to True for a frameless, topmost, click-through desktop overlay (DX11/DX12)
 wnd.Serve()
 ```
 

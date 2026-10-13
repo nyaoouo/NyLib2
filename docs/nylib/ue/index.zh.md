@@ -2,18 +2,20 @@
 
 <!-- dt:meta v="1" lang="zh" source="index.md" -->
 
-<!-- dt:section id="__preamble__" hash="2abf00b74f9a" -->
+<!-- dt:section id="__preamble__" hash="1181229a0cd3" -->
 # nylib.ue
 
-`nylib.ue` 读取 Unreal Engine 游戏(UE 4.25+ 和 UE5,Windows x64)的反射数据。
+`nylib.ue` 读取虚幻引擎游戏的反射数据（UE 4.25+ 和 UE5，Windows x64）。
 
-- [Dump](dump.md):找到引擎全局变量和偏移量,遍历每个 class、struct、enum 和 function,写出一个带版本号的快照文件夹以及 Dumper-7 格式的导出(GObjects 转储、一个 `.idmap`、以 PE 文件形式保存的游戏主模块)。
-- [Runtime](runtime.md):附加到正在运行的游戏,从 Python 中使用其对象:读取成员、写入它们(可选)、调用 UFunction(可选)。
-- [IDA](ida.md):将快照的名称、类型和注释导入 IDA 9.x。
-- [Stubs](stubs.md):为快照的类型写出 `.pyi` stub,供编辑器补全使用。
+关键词: Unreal Engine, UE4, UE5, reflection, dump, Unreal.attach, snapshot, Dumper-7, GObjects, FName, UObject, UFunction, offsets, idmap, IDA import, pyi stubs, game modding, runtime objects
 
-默认情况下它在游戏外部(另一个进程)工作,也可以在游戏内部工作(注入的 Python)。
-详细信息在代码及其 docstring 中;这些页面只展示如何使用它。
+- [Dump](dump.md)：找到引擎全局变量和偏移量，遍历每个类、结构体、枚举和函数，并写入一个版本控制的快照文件夹以及 Dumper-7 格式的导出文件（GObjects 转储、`.idmap`、游戏的主模块作为 PE 文件）。
+- [Runtime](runtime.md)：附加到运行中的游戏并从 Python 使用其对象：读取成员、写入成员（可选）、调用 UFunctions（可选）。
+- [IDA](ida.md)：将快照的名称、类型和注释导入到 IDA 9.x。
+- [Stubs](stubs.md)：为编辑器补全写入快照类型的 `.pyi` 存根。
+
+默认情况下，它从游戏外部（另一个进程）工作，也可以从游戏内部（注入的 Python）工作。
+详情在代码及其文档字符串中；这些页面只展示如何使用它。
 
 <!-- dt:section id="prerequisites-0" hash="750d67c0b068" -->
 ## 前置条件
