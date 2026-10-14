@@ -88,7 +88,7 @@ canonical entry points.
 | `nylib.ctype` | Declarative C-like structures with local or remote-process accessors | CData, Struct, Pointer, Accessor, bit field, remote memory | [docs/nylib/ctype.md](docs/nylib/ctype.md) |
 | `nylib.winapi` | Typed ctypes wrappers for kernel32 / ntdll / user32 / ... | Win32 API, ctypes, kernel32, ntdll, OpenProcess, ReadProcessMemory, NTSTATUS | [docs/nylib/winapi.md](docs/nylib/winapi.md) |
 | `nylib.winutils` | High-level Win32 helpers: process, PE, pipes, RPC, drivers, toolchain | process, PE exports, PE unmap, PE map, pipe, RPC, driver, inline hook, MSVC | [docs/nylib/winutils/index.md](docs/nylib/winutils/index.md) |
-| `nylib.winutils.pe_map` | Pure PE image planning, host contracts, and local or cross-process DLL mapping | parse_image, MapHost, Process.current, RemoteProcessHost, InstallTier, LoadedImage | [docs/nylib/winutils/pe_map.md](docs/nylib/winutils/pe_map.md) |
+| `nylib.winutils.pe_map` | Pure PE image planning, host contracts, local or cross-process DLL mapping, and optional post-attach block discard | parse_image, MapHost, Process.current, RemoteProcessHost, InstallTier, SectSkip, LoadedImage | [docs/nylib/winutils/pe_map.md](docs/nylib/winutils/pe_map.md) |
 | `nylib.winutils.breakpoint` | x64 HW/SW breakpoint primitive (VEH + debugger backends) | hardware breakpoints, debug registers, memory trap, BP_E, BreakPoint, VEH | [docs/nylib/winutils/breakpoint.md](docs/nylib/winutils/breakpoint.md) |
 | `nylib.winutils.sign` | Authenticode signing/verification, driver cross-cert signing | SigningService, VerificationService, Authenticode, driver signing, cross-cert, MSCVStore | [docs/nylib/winutils/sign.md](docs/nylib/winutils/sign.md) |
 | `nylib.winutils.python_loader` | In-process Python loader injected via named pipe | inject, python, remote process, PyConfig, pipe RPC | [docs/nylib/winutils/python_loader.md](docs/nylib/winutils/python_loader.md) |
@@ -154,7 +154,7 @@ High-level Win32 helpers; subpackages are loaded lazily.
 | `winutils.driver` | service-control (`SCManager`, `Service`) helpers for loading kernel drivers |
 | `winutils.inline_hook` | hot-patch trampoline based on `keystone-engine` + `capstone` |
 | `winutils.pe_unmap` | rebuild an in-memory PE back to its on-disk layout |
-| `winutils.pe_map` | parse/plan a PE without process access; map an AMD64 DLL from bytes with a local or remote `Process` host (`MINIMAL`/`RUNTIME`/`STRICT`) - see [pe_map.md](docs/nylib/winutils/pe_map.md) |
+| `winutils.pe_map` | parse/plan a PE without process access; map an AMD64 DLL from bytes with a local or remote `Process` host (`MINIMAL`/`RUNTIME`/`STRICT`); optionally request post-attach block discard with `SectSkip` - see [pe_map.md](docs/nylib/winutils/pe_map.md) |
 | `winutils.pe_exports` | PE export-table reader: `ExportTable` over any `Process` (backs `Process.get_proc_address` / `enum_exports`); `read_exports(base)` for this process, never raises |
 | `winutils.version` | PE version resource + shell file properties (`get_file_version_info`, `get_file_properties`) |
 | `winutils.pipe`, `winutils.pipe_rpc` | named-pipe transport plus a tiny RPC layer (used by `python_loader` host <-> guest) |

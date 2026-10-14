@@ -5,9 +5,11 @@ from .core import (
     PEFormatError, ParsedImage, RelocFixup, SectionPlan, TlsPlan, UnwindEntry,
     UnsupportedImageError, build_plan, parse_image,
 )
+from .loader import BlockDiscardError, MappedBlock, SectSkip
 
 __all__ = [
     'DataDirectory', 'ExportSymbol', 'ImagePlan', 'ImportRequest', 'ImportSymbol',
     'LoadConfigPlan', 'PEFormatError', 'ParsedImage', 'RelocFixup', 'SectionPlan',
     'TlsPlan', 'UnwindEntry', 'UnsupportedImageError', 'build_plan', 'parse_image',
+    'BlockDiscardError', 'MappedBlock', 'SectSkip',
 ]

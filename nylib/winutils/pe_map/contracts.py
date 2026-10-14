@@ -17,6 +17,12 @@ class IImageMemory(typing.Protocol):
     def flush(self, address: int, size: int) -> None: ...
 
 
+class IImageDiscard(typing.Protocol):
+    """Decommit whole pages inside a mapped image."""
+
+    def discard(self, address: int, size: int) -> None: ...
+
+
 class IModuleResolver(typing.Protocol):
     """Acquire and release dependencies in the target address space."""
 
@@ -62,3 +68,4 @@ class MapHost:
     modules: IModuleResolver
     runtime: IImageRuntime
     machine: int
+    discarder: IImageDiscard | None = None

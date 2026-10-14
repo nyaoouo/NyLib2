@@ -1,12 +1,13 @@
 """Local and cross-process hosts for the PE image loader."""
 
 import ctypes
+import typing
 
 from ... import winapi
 from ...process import Process
 from .contracts import ICrtGlue, IImageMemory, MapHost
-from .core import TlsPlan, UnsupportedImageError
-from .loader import InstallTier, LoadedImage, load as load_with_host
+from .core import ImagePlan, TlsPlan, UnsupportedImageError
+from .loader import InstallTier, LoadedImage, MappedBlock, SectSkip, load as load_with_host
 
 
 class _ProcessHostBase:
@@ -18,7 +19,7 @@ class _ProcessHostBase:
         return cls(process)
 
     def as_host(self) -> MapHost:
-        return MapHost(self, self, self, 0x8664)
+        return MapHost(self, self, self, 0x8664, self)
 
     def alloc(self, size: int, preferred: int = 0) -> int:
         if preferred:
@@ -30,6 +31,9 @@ class _ProcessHostBase:
 
     def free(self, address: int) -> None:
         self.process.free(address)
+
+    def discard(self, address: int, size: int) -> None:
+        self.process.free(address, size)
 
     def read(self, address: int, size: int) -> bytes:
         return self.process.read(address, size)
@@ -132,11 +136,11 @@ class RemoteProcessHost(_ProcessHostBase):
 
 def load(image_bytes: bytes | bytearray | memoryview, *, tier: InstallTier = InstallTier.MINIMAL,
          process: Process | None = None, host: LocalProcessHost | RemoteProcessHost | None = None,
-         crt_glue: ICrtGlue | None = None) -> LoadedImage:
+         crt_glue: ICrtGlue | None = None, on_block: typing.Callable[[ImagePlan, MappedBlock], None] | None = None) -> LoadedImage:
     """Map a DLL using Process.current or a caller-owned remote Process."""
     if process is not None and host is not None:
         raise ValueError('pass either process or host, not both')
     if host is None:
         process = Process.current if process is None else process
         host = LocalProcessHost(process) if process is Process.current else RemoteProcessHost(process)
-    return load_with_host(image_bytes, tier=tier, host=host.as_host(), crt_glue=crt_glue)
+    return load_with_host(image_bytes, tier=tier, host=host.as_host(), crt_glue=crt_glue, on_block=on_block)

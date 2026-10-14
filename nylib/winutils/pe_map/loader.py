@@ -1,9 +1,11 @@
 """Host-independent PE image installation and lifecycle."""
 
+import dataclasses
 import enum
 import hashlib
+import typing
 
-from .core import ImagePlan, PEFormatError, UnsupportedImageError, build_plan, parse_image
+from .core import ImagePlan, PEFormatError, SectionPlan, UnsupportedImageError, build_plan, parse_image
 from .contracts import ICrtGlue, MapHost, NoopCrtGlue
 
 
@@ -11,6 +13,30 @@ class InstallTier(enum.IntEnum):
     MINIMAL = 1
     RUNTIME = 2
     STRICT = 3
+
+
+class SectSkip(Exception):
+    """Request post-attach discard of the current mapped block."""
+
+
+@dataclasses.dataclass(frozen=True)
+class MappedBlock:
+    kind: str
+    name: str
+    index: int | None
+    rva: int
+    size: int
+    address: int
+    section: SectionPlan | None
+
+
+class BlockDiscardError(RuntimeError):
+    """A discard operation failed after the DLL attached; ``loaded`` remains active."""
+
+    def __init__(self, loaded: 'LoadedImage', block: MappedBlock):
+        self.loaded = loaded
+        self.block = block
+        super().__init__(f'failed to discard mapped block {block.name!r} at RVA {block.rva:#x}')
 
 
 class LoadedImage:
@@ -37,6 +63,7 @@ class LoadedImage:
         self._tls_token: object = None
         self._modules: list[object] = []
         self._active = True
+        self.discarded_blocks: tuple[MappedBlock, ...] = ()
 
     @property
     def active(self) -> bool:
@@ -193,8 +220,65 @@ def _protect_image(host: MapHost, plan: ImagePlan) -> None:
     host.memory.flush(base, image.size_of_image)
 
 
+def _mapped_blocks(plan: ImagePlan) -> tuple[MappedBlock, ...]:
+    image, base = plan.image, plan.target_base
+    headers_size = (image.size_of_headers + 0xfff) & ~0xfff
+    blocks = [MappedBlock('headers', '<headers>', None, 0, headers_size, base, None)]
+    blocks.extend(MappedBlock('section', section.name, index, section.target_rva, section.mapped_size,
+                              base + section.target_rva, section) for index, section in enumerate(image.sections))
+    return tuple(blocks)
+
+
+def _required_ranges(plan: ImagePlan) -> typing.Iterator[tuple[int, int, str]]:
+    image = plan.image
+    if image.entry_rva:
+        yield image.entry_rva, 1, 'DLL entry'
+    for symbol in image.exports:
+        if symbol.forwarder is None and symbol.rva:
+            yield symbol.rva, 1, 'direct export'
+    for request in image.imports + image.delay_imports:
+        for symbol in request.symbols:
+            yield symbol.thunk_rva, image.pointer_size, 'import address table'
+        if request.module_handle_rva:
+            yield request.module_handle_rva, image.pointer_size, 'delay-import module handle'
+    if image.tls:
+        yield image.directories[9].rva, image.directories[9].size, 'TLS directory'
+        yield image.tls.index_rva, 4, 'TLS index'
+        if image.tls.template_size:
+            yield image.tls.template_rva, image.tls.template_size, 'TLS template'
+        for callback in image.tls.callbacks:
+            yield callback, 1, 'TLS callback'
+    if image.unwind:
+        yield image.directories[3].rva, image.directories[3].size, 'unwind table'
+        for entry in image.unwind:
+            yield entry.info_rva, 1, 'unwind information'
+    if image.load_config and image.load_config.security_cookie_rva is not None:
+        yield image.load_config.security_cookie_rva, image.pointer_size, 'security cookie'
+
+
+def _requested_discards(plan: ImagePlan, host: MapHost,
+                        on_block: typing.Callable[[ImagePlan, MappedBlock], None] | None) -> tuple[MappedBlock, ...]:
+    if on_block is None: return ()
+    requested = []
+    for block in _mapped_blocks(plan):
+        try:
+            on_block(plan, block)
+        except SectSkip:
+            requested.append(block)
+    if requested and host.discarder is None:
+        raise UnsupportedImageError('host has no mapped-block discard capability')
+    for block in requested:
+        if block.rva % 0x1000 or block.size % 0x1000 or block.rva + block.size > plan.image.size_of_image:
+            raise UnsupportedImageError(f'mapped block {block.name!r} is not page-aligned inside the image')
+        for rva, size, reason in _required_ranges(plan):
+            if rva < block.rva + block.size and block.rva < rva + size:
+                raise UnsupportedImageError(f'mapped block {block.name!r} contains {reason}')
+    return tuple(requested)
+
+
 def load(image_bytes: bytes | bytearray | memoryview, *, tier: InstallTier = InstallTier.MINIMAL,
-         host: MapHost, crt_glue: ICrtGlue | None = None) -> LoadedImage:
+         host: MapHost, crt_glue: ICrtGlue | None = None,
+         on_block: typing.Callable[[ImagePlan, MappedBlock], None] | None = None) -> LoadedImage:
     """Map and attach an AMD64 DLL through a caller-provided host."""
     tier = InstallTier(tier)
     image = parse_image(image_bytes)
@@ -227,7 +311,14 @@ def load(image_bytes: bytes | bytearray | memoryview, *, tier: InstallTier = Ins
             loaded._entry_started = True
             if not host.runtime.call(loaded.entry_point, base, 1, 0):
                 raise RuntimeError('DLL entry rejected process attach')
-        return loaded
+        requested = _requested_discards(plan, host, on_block)
     except Exception:
         loaded.unload()
         raise
+    for block in requested:
+        try:
+            host.discarder.discard(block.address, block.size)
+        except Exception as exc:
+            raise BlockDiscardError(loaded, block) from exc
+        loaded.discarded_blocks += (block,)
+    return loaded
