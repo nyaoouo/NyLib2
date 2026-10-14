@@ -2,17 +2,17 @@
 
 <!-- dt:meta v="1" lang="zh" source="index.md" -->
 
-<!-- dt:section id="__preamble__" hash="2f472322d2dd" -->
+<!-- dt:section id="__preamble__" hash="7d06cc5fbf23" -->
 # nylib.winutils
 
-Windows 工具库：进程枚举、PE 检查、管道、RPC、驱动程序、内联挂钩和工具链管理。
+Windows 工具库：进程枚举、PE 检查与映射、管道、RPC、驱动程序、内联挂钩和工具链管理。
 
-关键词: process, version, PE, PE exports, PE unmap, pipe, RPC, IPC, driver, service, MSVC, toolchain, inline hook, PDB, Win32
+关键词: process, version, PE, PE exports, PE unmap, PE map, memory DLL, pipe, RPC, IPC, driver, service, MSVC, toolchain, inline hook, PDB, Win32
 
-<!-- dt:section id="quick-start-0" hash="622a1ac3b385" -->
+<!-- dt:section id="quick-start-0" hash="db609d128e3c" -->
 ## 快速开始
 
-直接从 `nylib.winutils` 导入；子包 `breakpoint`、`sign`、`python_loader`、`python_hijack` 有各自的页面。
+直接从 `nylib.winutils` 导入；子包 `breakpoint`、`sign`、`python_loader`、`python_hijack` 和 `pe_map` 有各自的页面。
 
 ```python
 from nylib.winutils import iter_processes
@@ -77,6 +77,18 @@ disk = pe_unmap(memory)
 if disk:
     with open('out.exe', 'wb') as f:
         f.write(disk)
+```
+
+<!-- dt:section id="pe-map-0" hash="9fd908dec395" -->
+## PE 映射
+
+验证 DLL 字节并在当前进程中映射 AMD64 DLL。解析器和 Host 契约与 `Process.current` 实现分离。安装层次、Host 契约和限制详见 [pe_map.zh.md](pe_map.zh.md)。
+
+```python
+from nylib.winutils.pe_map.process import InstallTier, load
+
+with load(dll_bytes, tier=InstallTier.RUNTIME) as image:
+    result = image.call_export('add', 3, 4)
 ```
 
 <!-- dt:section id="pipe-0" hash="9c6a28213099" -->
@@ -177,7 +189,7 @@ hook = InlineHook(p, b'\\x90\\x90', addr=0x401000)
 hook.enabled = True
 ```
 
-<!-- dt:section id="notes-0" hash="2e425b80fe50" -->
+<!-- dt:section id="notes-0" hash="379210aa4c10" -->
 ## 注释
 
 - `iter_processes()` 通过 ToolHelp32 API 枚举本地进程。
@@ -186,4 +198,4 @@ hook.enabled = True
 - `read_exports(base)` 仅读取此进程且不抛出异常；改用 `Process.enum_exports(dll)`。
 - `ExportTable(process, base)` 通过 `ReadProcessMemory` 在任何进程上工作。
 - 命名管道仅限本地每台机器。
-- 子包：[breakpoint.md](breakpoint.md)、[sign.md](sign.md)、[python_loader.md](python_loader.md)、[python_hijack.md](python_hijack.md)。
+- 子包：[breakpoint.md](breakpoint.md)、[sign.md](sign.md)、[python_loader.md](python_loader.md)、[python_hijack.md](python_hijack.md)、[pe_map.zh.md](pe_map.zh.md)。

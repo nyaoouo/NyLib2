@@ -1,12 +1,12 @@
 # nylib.winutils
 
-Windows utilities: process enumeration, PE inspection, pipes, RPC, drivers, inline hooks, and toolchain management.
+Windows utilities: process enumeration, PE inspection and mapping, pipes, RPC, drivers, inline hooks, and toolchain management.
 
-Keywords: process, version, PE, PE exports, PE unmap, pipe, RPC, IPC, driver, service, MSVC, toolchain, inline hook, PDB, Win32
+Keywords: process, version, PE, PE exports, PE unmap, PE map, memory DLL, pipe, RPC, IPC, driver, service, MSVC, toolchain, inline hook, PDB, Win32
 
 ## Quick start
 
-Import directly from `nylib.winutils`; subpackages `breakpoint`, `sign`, `python_loader`, `python_hijack` have their own pages.
+Import directly from `nylib.winutils`; subpackages `breakpoint`, `sign`, `python_loader`, `python_hijack`, and `pe_map` have their own pages.
 
 ```python
 from nylib.winutils import iter_processes
@@ -67,6 +67,17 @@ disk = pe_unmap(memory)
 if disk:
     with open('out.exe', 'wb') as f:
         f.write(disk)
+```
+
+## PE Map
+
+Validate and map an AMD64 DLL from bytes in the current process. The parser and host contracts are separate from the `Process.current` implementation. See [pe_map.md](pe_map.md) for installation tiers, host contracts, and limitations.
+
+```python
+from nylib.winutils.pe_map.process import InstallTier, load
+
+with load(dll_bytes, tier=InstallTier.RUNTIME) as image:
+    result = image.call_export('add', 3, 4)
 ```
 
 ## Pipe
@@ -168,5 +179,5 @@ hook.enabled = True
 - `read_exports(base)` reads only this process and never raises; use `Process.enum_exports(dll)` instead.
 - `ExportTable(process, base)` works on any process via `ReadProcessMemory`.
 - Named pipes are local per-machine only.
-- Subpackages: [breakpoint.md](breakpoint.md), [sign.md](sign.md), [python_loader.md](python_loader.md), [python_hijack.md](python_hijack.md).
+- Subpackages: [breakpoint.md](breakpoint.md), [sign.md](sign.md), [python_loader.md](python_loader.md), [python_hijack.md](python_hijack.md), [pe_map.md](pe_map.md).
 

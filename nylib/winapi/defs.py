@@ -345,6 +345,66 @@ class IMAGE_EXPORT_DIRECTORY(ctypes.Structure):
     ]
 
 
+class IMAGE_IMPORT_DESCRIPTOR(ctypes.Structure):
+    _fields_ = [
+        ("OriginalFirstThunk", ctypes.c_uint32),
+        ("TimeDateStamp", ctypes.c_uint32),
+        ("ForwarderChain", ctypes.c_uint32),
+        ("Name", ctypes.c_uint32),
+        ("FirstThunk", ctypes.c_uint32),
+    ]
+
+
+class IMAGE_BASE_RELOCATION(ctypes.Structure):
+    _fields_ = [
+        ("VirtualAddress", ctypes.c_uint32),
+        ("SizeOfBlock", ctypes.c_uint32),
+    ]
+
+
+class IMAGE_DELAYLOAD_DESCRIPTOR(ctypes.Structure):
+    _fields_ = [
+        ("Attributes", ctypes.c_uint32),
+        ("Name", ctypes.c_uint32),
+        ("ModuleHandle", ctypes.c_uint32),
+        ("DelayImportAddressTable", ctypes.c_uint32),
+        ("DelayImportNameTable", ctypes.c_uint32),
+        ("BoundDelayImportTable", ctypes.c_uint32),
+        ("UnloadDelayImportTable", ctypes.c_uint32),
+        ("TimeStamp", ctypes.c_uint32),
+    ]
+
+
+class IMAGE_TLS_DIRECTORY64(ctypes.Structure):
+    _fields_ = [
+        ("StartAddressOfRawData", ctypes.c_uint64),
+        ("EndAddressOfRawData", ctypes.c_uint64),
+        ("AddressOfIndex", ctypes.c_uint64),
+        ("AddressOfCallbacks", ctypes.c_uint64),
+        ("SizeOfZeroFill", ctypes.c_uint32),
+        ("Characteristics", ctypes.c_uint32),
+    ]
+
+
+class IMAGE_TLS_DIRECTORY32(ctypes.Structure):
+    _fields_ = [
+        ("StartAddressOfRawData", ctypes.c_uint32),
+        ("EndAddressOfRawData", ctypes.c_uint32),
+        ("AddressOfIndex", ctypes.c_uint32),
+        ("AddressOfCallbacks", ctypes.c_uint32),
+        ("SizeOfZeroFill", ctypes.c_uint32),
+        ("Characteristics", ctypes.c_uint32),
+    ]
+
+
+class RUNTIME_FUNCTION(ctypes.Structure):
+    _fields_ = [
+        ("BeginAddress", ctypes.c_uint32),
+        ("EndAddress", ctypes.c_uint32),
+        ("UnwindData", ctypes.c_uint32),
+    ]
+
+
 class API_SET_NAMESPACE(ctypes.Structure):
     # schema version 6 (Windows 10+); all offsets are relative to the namespace base
     _fields_ = [
