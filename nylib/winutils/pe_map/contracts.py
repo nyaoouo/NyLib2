@@ -29,6 +29,7 @@ class IModuleResolver(typing.Protocol):
 class IImageRuntime(typing.Protocol):
     """Invoke code and manage TLS/unwind state in the mapped image's context."""
 
+    supports_tls_process_callbacks: bool
     supports_static_tls: bool
     supports_tls_thread_lifecycle: bool
     def call(self, address: int, *args: int) -> int: ...

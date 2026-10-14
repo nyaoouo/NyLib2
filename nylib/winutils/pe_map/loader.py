@@ -118,6 +118,8 @@ def _check_tier(plan: ImagePlan, tier: InstallTier, host: MapHost) -> None:
     if tier == InstallTier.MINIMAL:
         if image.tls or image.unwind or image.delay_imports or image.load_config:
             raise UnsupportedImageError('image requires RUNTIME tier features')
+    if image.tls and not getattr(host.runtime, 'supports_tls_process_callbacks', True):
+        raise UnsupportedImageError('host does not support TLS process callbacks')
     if image.tls and (image.tls.template_size or image.tls.zero_fill) and not host.runtime.supports_static_tls:
         raise UnsupportedImageError('host does not support static TLS templates')
     if tier == InstallTier.STRICT and image.tls and not host.runtime.supports_tls_thread_lifecycle:

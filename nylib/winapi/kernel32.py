@@ -2,6 +2,7 @@ from .utils import *
 
 _dll = ctypes.WinDLL('kernel32.dll')
 GetCurrentProcess = def_win_api(_dll.GetCurrentProcess, ctypes.c_void_p, (), error_zero=True)
+IsWow64Process = def_win_api(_dll.IsWow64Process, ctypes.c_bool, (ctypes.c_void_p, ctypes.POINTER(ctypes.c_long)), error_zero=True)
 CreateToolhelp32Snapshot = def_win_api(_dll.CreateToolhelp32Snapshot, HANDLE, (ctypes.c_ulong, ctypes.c_ulong), error_val=INVALID_HANDLE_VALUE)
 Process32First = def_win_api(_dll.Process32First, ctypes.c_bool, (ctypes.c_void_p, ctypes.c_void_p), error_zero=True)
 Process32Next = def_win_api(_dll.Process32Next, ctypes.c_bool, (ctypes.c_void_p, ctypes.c_void_p), error_zero=True)

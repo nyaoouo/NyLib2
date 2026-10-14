@@ -71,13 +71,22 @@ if disk:
 
 ## PE Map
 
-Validate and map an AMD64 DLL from bytes in the current process. The parser and host contracts are separate from the `Process.current` implementation. See [pe_map.md](pe_map.md) for installation tiers, host contracts, and limitations.
+Validate and map an AMD64 DLL from bytes in the current process or another `Process`. The parser and host contracts are separate from both Process adapters. See [pe_map.md](pe_map.md) for installation tiers, target requirements, and limitations.
 
 ```python
+from nylib.process import Process
 from nylib.winutils.pe_map.process import InstallTier, load
 
 with load(dll_bytes, tier=InstallTier.RUNTIME) as image:
     result = image.call_export('add', 3, 4)
+
+# needs: an initialized AMD64 target with the DLL's imports already loaded
+target = Process(child_pid)
+try:
+    with load(dll_bytes, process=target, tier=InstallTier.RUNTIME) as image:
+        result = target.call(image.get_export('add'), 3, 4)
+finally:
+    target.close()
 ```
 
 ## Pipe

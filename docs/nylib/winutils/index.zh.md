@@ -79,16 +79,25 @@ if disk:
         f.write(disk)
 ```
 
-<!-- dt:section id="pe-map-0" hash="9fd908dec395" -->
+<!-- dt:section id="pe-map-0" hash="ed71a2983935" -->
 ## PE 映射
 
-验证 DLL 字节并在当前进程中映射 AMD64 DLL。解析器和 Host 契约与 `Process.current` 实现分离。安装层次、Host 契约和限制详见 [pe_map.zh.md](pe_map.zh.md)。
+验证 DLL 字节并将 AMD64 DLL 映射到当前进程或另一个 `Process`。解析器和 Host 契约与两种 Process 适配器分离。安装层次、目标要求和限制详见 [pe_map.zh.md](pe_map.zh.md)。
 
 ```python
+from nylib.process import Process
 from nylib.winutils.pe_map.process import InstallTier, load
 
 with load(dll_bytes, tier=InstallTier.RUNTIME) as image:
     result = image.call_export('add', 3, 4)
+
+# needs: an initialized AMD64 target with the DLL's imports already loaded
+target = Process(child_pid)
+try:
+    with load(dll_bytes, process=target, tier=InstallTier.RUNTIME) as image:
+        result = target.call(image.get_export('add'), 3, 4)
+finally:
+    target.close()
 ```
 
 <!-- dt:section id="pipe-0" hash="9c6a28213099" -->

@@ -1,4 +1,4 @@
-"""Pure PE image planning; current-process execution lives in ``process``."""
+"""Pure PE image planning; local and remote execution live in ``process``."""
 
 from .core import (
     DataDirectory, ExportSymbol, ImagePlan, ImportRequest, ImportSymbol, LoadConfigPlan,

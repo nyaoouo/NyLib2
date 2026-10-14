@@ -53,7 +53,7 @@ pip install ".[full]"   # all of the above
 | Remote ctypes | `nylib.ctype` | declarative structs that read/write through a process accessor | [docs/nylib/ctype.md](docs/nylib/ctype.md) |
 | Function hooking | `nylib.hook` | Microsoft Detours wrapper (`Hook`, `@create_hook`) | [docs/nylib/hook.md](docs/nylib/hook.md) |
 | Breakpoints | `nylib.winutils.breakpoint` | x64 HW/SW breakpoints (VEH + debugger backends) | [docs/nylib/winutils/breakpoint.md](docs/nylib/winutils/breakpoint.md) |
-| PE mapping | `nylib.winutils.pe_map` | pure PE planning and current-process DLL loading from bytes | [docs/nylib/winutils/pe_map.md](docs/nylib/winutils/pe_map.md) |
+| PE mapping | `nylib.winutils.pe_map` | pure PE planning and local or cross-process DLL loading from bytes | [docs/nylib/winutils/pe_map.md](docs/nylib/winutils/pe_map.md) |
 | Injection | `nylib.winutils.python_loader` / `python_hijack` | run arbitrary Python inside a third-party process | [docs/nylib/winutils/python_loader.md](docs/nylib/winutils/python_loader.md) |
 | Code signing | `nylib.winutils.sign` | Authenticode + kernel-driver cross-cert signing, no `signtool` | [docs/nylib/winutils/sign.md](docs/nylib/winutils/sign.md) |
 | Dear ImGui | `nylib.pyimgui` | direct ImGui bindings, standalone windows + injected overlays | [docs/nylib/pyimgui/index.md](docs/nylib/pyimgui/index.md) |
