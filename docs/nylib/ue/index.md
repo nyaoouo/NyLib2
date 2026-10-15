@@ -2,9 +2,9 @@
 
 `nylib.ue` reads the reflection data of Unreal Engine games (UE 4.25+ and UE5, Windows x64).
 
-Keywords: Unreal Engine, UE4, UE5, reflection, dump, Unreal.attach, snapshot, Dumper-7, GObjects, FName, UObject, UFunction, offsets, idmap, IDA import, pyi stubs, game modding, runtime objects
+Keywords: Unreal Engine, UE4, UE5, reflection, dump, Unreal.attach, snapshot, Dumper-7, GObjects, FName, UObject, UFunction, offsets, idmap, usmap, IDA import, pyi stubs, game modding, runtime objects
 
-- [Dump](dump.md): find the engine globals and offsets, walk every class, struct, enum and function, and write a versioned snapshot folder plus Dumper-7-format exports (the GObjects dumps, an `.idmap`, the game's main module as a PE file).
+- [Dump](dump.md): find the engine globals and offsets, walk every class, struct, enum and function, and write a versioned snapshot folder plus Dumper-7-format exports (the GObjects dumps, an `.idmap`, a `.usmap`, the game's main module as a PE file).
 - [Runtime](runtime.md): attach to the running game and use its objects from Python: read members, write them (opt-in), call UFunctions (opt-in).
 - [IDA](ida.md): import a snapshot's names, types and comments into IDA 9.x.
 - [Stubs](stubs.md): write `.pyi` stubs of a snapshot's types for editor completion.
@@ -52,7 +52,7 @@ The snapshot stays usable without the game: [load it](dump.md#load-a-snapshot), 
 ## Tested with
 
 - PalServer (UE 5.1, build 25247047), TRIANGLE STRATEGY (UE 4.27, build 11410614) and FrostBound (UE 5.4, build 24486464).
-- Dumps: verified on captures of all three, and live against Dumper-7 on all three; the internal (injected) dump live on PalServer.
+- Dumps: verified on captures of all three, and live against Dumper-7 on all three; the internal (injected) dump live on PalServer; the `.usmap` export matches Dumper-7's on captures of all three.
 - The IDA importer, runtime reads, call parameter layouts, `--allow-calls` targets and stubs: checked on captures of all three; the importer applied in IDA 9.3.
 - Live on FrostBound (main menu): runtime reads through both type sources, one property write (restored), one remote-thread UFunction call, and `dump --allow-calls` with all three features, checked against Dumper-7's output for the same build.
 - Not yet verified on a real game: `attach_current` and `calls='any-thread'`; runtime sessions and `--allow-calls` on PalServer and TRIANGLE STRATEGY; calls with inputs or with string, array or FText outputs.
