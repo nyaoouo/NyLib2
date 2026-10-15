@@ -18,7 +18,7 @@ from . import profiles
 from . import remote_calls
 from . import scan
 from . import store
-from .exports import DEFAULT_EXPORTS, EXPORT_SPECS
+from .exports import EXPORT_SPECS
 from ..winutils import process as winutils_process
 from ..winutils.version import get_file_version_info
 
@@ -30,7 +30,7 @@ UNREADABLE_FAIL = 0.05  # share of walked objects that fails a dump
 UNREADABLE_WARN = 0.001
 UE_EXE_RE = re.compile(r'-(?:Win64|WinGDK)-(?:Shipping|Test|DebugGame)(?:-Cmd)?\.exe$', re.IGNORECASE)
 IMAGE_EXPORT = 'image'  # (7-c) the main-module image (I6); a dump-only format
-DEFAULT_DUMP_EXPORTS = DEFAULT_EXPORTS + (IMAGE_EXPORT,)  # (7-c) dump's default: idmap, gobjects, gobjects-props, image
+DEFAULT_DUMP_EXPORTS = ('idmap', 'gobjects', 'gobjects-props', IMAGE_EXPORT, 'usmap')  # (7-c) dump's default: image before usmap
 
 _ROOT_OBJS = {'Off': 'off', 'Settings': 'settings', 'PropertySizes': 'property_sizes', 'FNameEntry': 'names'}
 _ROW_NAMES = {
@@ -587,8 +587,6 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, a
             raise ValueError(f'unknown export format {fmt!r}')
         if fmt not in fmts:
             fmts.append(fmt)
-    if 'usmap' in fmts:  # reject before opening the target
-        raise NotImplementedError('the usmap writer is not implemented yet')
     features = remote_calls.parse_features(allow_calls)  # errors before any root or target access
     if log_file is not None and not isinstance(log_file, (str, os.PathLike)):
         raise TypeError(f'log_file must be str, os.PathLike or None, got {type(log_file).__name__}')

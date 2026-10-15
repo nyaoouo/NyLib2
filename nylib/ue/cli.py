@@ -123,7 +123,7 @@ def _build_parser() -> argparse.ArgumentParser:
                     help='output root (default: .\\ue_dumps or env NYLIB_UE_OUT)')
     pd.add_argument('--exports', dest='exports', default=None,
                      help="formats written with the snapshot: idmap, gobjects, gobjects-props, image (the game's "
-                          'main module as a PE file), usmap (default: idmap,gobjects,gobjects-props,image; '
+                          "main module as a PE file), usmap (default: idmap,gobjects,gobjects-props,image,usmap; "
                           '"none" writes the snapshot only)')
     pd.add_argument('--allow-calls', dest='allow_calls', nargs='?', const=_ALLOW_CALLS_DEFAULT, default=None,
                      help='append-string, game-info, text; no value means all three. Each makes a call in the game '
@@ -135,7 +135,7 @@ def _build_parser() -> argparse.ArgumentParser:
     pe = sub.add_parser('export', help='write another format from an existing snapshot; the game is not needed')
     pe.add_argument('snapshot')
     pe.add_argument('--format', dest='format', required=True, choices=sorted(_EXPORT_NAMES),
-                     help='idmap, gobjects, gobjects-props, usmap (not implemented yet)')
+                     help='idmap, gobjects, gobjects-props, usmap')
     pe.add_argument('--out', dest='out', default=None, type=_nonempty,
                     help='output file (default: the format\'s place in the snapshot)')
     common(pe)
@@ -352,15 +352,6 @@ def _finish_error(e: Exception, json_mode: bool, *, target, log_file: str, logge
         print(f'error: unexpected {type(e).__name__}: {message} (details: {log_file})', file=sys.stderr)
     for line in fix_lines:
         print(line, file=sys.stderr)
-    return exit_code
-
-
-def _print_early_error(message: str, json_mode: bool, exit_code: int, *, err_type='NotImplementedError') -> int:
-    """A usage-level failure before logging is set up (M2): still one JSON document under --json."""
-    if json_mode:
-        _print_json({'ok': False, 'error': {'type': err_type, 'message': message, 'exit': exit_code}})
-    else:
-        print(f'error: {message}', file=sys.stderr)
     return exit_code
 
 
@@ -651,8 +642,6 @@ def _cmd_dump(args, _open_target=None) -> int:
         except ValueError as e:
             print(f'{PROG} dump: error: {e}', file=sys.stderr)
             return 2
-        if 'usmap' in exports:  # reject before opening the target
-            return _print_early_error('the usmap writer is not implemented yet', args.json, 1)
     features = ()
     if args.allow_calls is not None:
         try:
