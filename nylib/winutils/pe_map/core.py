@@ -213,7 +213,7 @@ class _Reader:
 
 
 def parse_image(image: bytes | bytearray | memoryview) -> ParsedImage:
-    """Parse a PE DLL from bytes and return source-independent metadata."""
+    """Parse a PE image from bytes and return source-independent metadata."""
     reader = _Reader(image)
     data = reader.data
     if len(data) < 0x40 or data[:2].tobytes() != b'MZ':
@@ -224,8 +224,6 @@ def parse_image(image: bytes | bytearray | memoryview) -> ParsedImage:
     machine, section_count, _, _, _, optional_size, characteristics = reader.unpack(pe_offset + 4, '<HHIIIHH')
     if not 0 < section_count <= _MAX_SECTIONS:
         raise PEFormatError(f'invalid section count {section_count}')
-    if not characteristics & 0x2000:
-        raise UnsupportedImageError('only DLL images are supported')
     optional_offset = pe_offset + 24
     if optional_offset + optional_size > len(data):
         raise PEFormatError('truncated optional header')
