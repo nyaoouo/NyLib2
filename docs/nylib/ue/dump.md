@@ -25,12 +25,13 @@ print(result.counts, result.unverified, result.warnings, result.export_paths)
 
 ## Exports
 
-`dump(exports=...)` defaults to all four; `exports=()` writes the snapshot only.
+`dump(exports=...)` defaults to all five; `exports=()` writes the snapshot only.
 
 - `gobjects`: `GObjects-Dump.txt`, Dumper-7's object list.
 - `gobjects-props`: `GObjects-Dump-WithProperties.txt`, the same with properties.
 - `idmap`: `IDAMappings/<stem>.idmap`, Dumper-7's IDA mappings (V1).
 - `image`: `image/<exe>`, the game's main module as a PE file whose ImageBase is the runtime base. It holds the game's code: do not share a snapshot folder that contains it.
+- `usmap`: `Mappings/<stem>.usmap`, Dumper-7's type mappings for `.usmap` readers (FModel, CUE4Parse), uncompressed.
 
 ## Calls during a dump (`allow_calls`)
 

@@ -29,15 +29,16 @@ print(result.counts, result.unverified, result.warnings, result.export_paths)
 - 输出：`<out>/<GameName>/<YYYYmmdd-HHMMSS>/`。根目录为 `out=`，否则为环境变量 `NYLIB_UE_OUT`，否则为当前目录下的 `.\ue_dumps`。在游戏内部没有默认值：必须传入 `out=` 或设置 `NYLIB_UE_OUT`。
 - Profile：`<out>/profiles/` 下 `[match] exe` 匹配目标的 TOML 文件会被自动使用（或传入 `profile=`）；`nylib.ue.pipeline.write_profile(report)` 会为该构建写出一个固定 GObjects 和 GNames 的 profile。Profile 永远不能启用调用。
 
-<!-- dt:section id="exports-0" hash="6c7943cdb8e3" -->
+<!-- dt:section id="exports-0" hash="41472624ebf8" -->
 ## 导出项（Exports）
 
-`dump(exports=...)` 默认导出全部四项；`exports=()` 只写出快照（snapshot）。
+`dump(exports=...)` 默认导出全部五项；`exports=()` 只写出快照（snapshot）。
 
 - `gobjects`：`GObjects-Dump.txt`，Dumper-7 的对象列表。
 - `gobjects-props`：`GObjects-Dump-WithProperties.txt`，同上但带属性。
 - `idmap`：`IDAMappings/<stem>.idmap`，Dumper-7 的 IDA 映射（V1）。
 - `image`：`image/<exe>`，游戏主模块的 PE 文件，其 ImageBase 为运行时基址。它包含游戏的代码：不要共享包含它的快照文件夹。
+- `usmap`：`Mappings/<stem>.usmap`，Dumper-7 格式的类型映射，供 `.usmap` 读取器（FModel、CUE4Parse）使用，未压缩。
 
 <!-- dt:section id="calls-during-a-dump-allow-calls-0" hash="b41c07bda7be" -->
 ## 转储过程中的调用 (`allow_calls`)

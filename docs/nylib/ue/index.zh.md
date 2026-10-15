@@ -2,14 +2,14 @@
 
 <!-- dt:meta v="1" lang="zh" source="index.md" -->
 
-<!-- dt:section id="__preamble__" hash="1181229a0cd3" -->
+<!-- dt:section id="__preamble__" hash="777aa19dbed4" -->
 # nylib.ue
 
 `nylib.ue` 读取虚幻引擎游戏的反射数据（UE 4.25+ 和 UE5，Windows x64）。
 
-关键词: Unreal Engine, UE4, UE5, reflection, dump, Unreal.attach, snapshot, Dumper-7, GObjects, FName, UObject, UFunction, offsets, idmap, IDA import, pyi stubs, game modding, runtime objects
+关键词: Unreal Engine, UE4, UE5, reflection, dump, Unreal.attach, snapshot, Dumper-7, GObjects, FName, UObject, UFunction, offsets, idmap, usmap, IDA import, pyi stubs, game modding, runtime objects
 
-- [Dump](dump.md)：找到引擎全局变量和偏移量，遍历每个类、结构体、枚举和函数，并写入一个版本控制的快照文件夹以及 Dumper-7 格式的导出文件（GObjects 转储、`.idmap`、游戏的主模块作为 PE 文件）。
+- [Dump](dump.md)：找到引擎全局变量和偏移量，遍历每个类、结构体、枚举和函数，并写入一个版本控制的快照文件夹以及 Dumper-7 格式的导出文件（GObjects 转储、`.idmap`、`.usmap`、游戏的主模块作为 PE 文件）。
 - [Runtime](runtime.md)：附加到运行中的游戏并从 Python 使用其对象：读取成员、写入成员（可选）、调用 UFunctions（可选）。
 - [IDA](ida.md)：将快照的名称、类型和注释导入到 IDA 9.x。
 - [Stubs](stubs.md)：为编辑器补全写入快照类型的 `.pyi` 存根。
@@ -57,11 +57,11 @@ with Unreal.attach(exe, dump=result.path) as ue:  # read-only session, types fro
 - 在 remote-thread 调用期间按 Ctrl+C 可能导致游戏崩溃。
 - 向已经加载了相同 `python3XY.dll` 的游戏注入 Python 会使其崩溃。缺失的 `python_loader.dll` 会在首次使用时构建,这需要 MSVC,且当 MSVC 缺失时会下载并安装 Visual Studio Build Tools;可以提前用 `python -m nylib.winutils.python_loader build` 构建一次。
 
-<!-- dt:section id="tested-with-0" hash="d4505dfe67d0" -->
+<!-- dt:section id="tested-with-0" hash="43748d48395b" -->
 ## 测试环境
 
 - PalServer（UE 5.1，build 25247047）、TRIANGLE STRATEGY（UE 4.27，build 11410614）和 FrostBound（UE 5.4，build 24486464）。
-- Dumps：已在三者的捕获（captures）上验证，也针对 Dumper-7 在三者上进行了实时对比；内部（注入式）dump 在 PalServer 上实时验证。
+- Dumps：已在三者的捕获（captures）上验证，也针对 Dumper-7 在三者上进行了实时对比；内部（注入式）dump 在 PalServer 上实时验证；`.usmap` 导出在三者的捕获上与 Dumper-7 的一致。
 - IDA 导入器、运行时读取、调用参数布局、`--allow-calls` 目标与 stub：已在三者的捕获上检查，该导入器已在 IDA 9.3 中应用。
 - 在 FrostBound（主菜单）上实时验证：通过两种类型来源进行运行时读取、一次属性写入（已还原）、一次远程线程 UFunction 调用，以及对全部三项功能使用 `dump --allow-calls`，并与 Dumper-7 针对同一 build 的输出进行了比对。
 - 尚未在真实游戏中验证：`attach_current` 与 `calls='any-thread'`；在 PalServer 和 TRIANGLE STRATEGY 上的运行时会话与 `--allow-calls`；带输入参数或带字符串、数组或 FText 输出的调用。
