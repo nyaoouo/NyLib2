@@ -1,5 +1,5 @@
 """Dumper-7 usmap writer: literal port of MappingGenerator.cpp @ ea0dab3, streamed over one pass
-of `snapshot.types()` under a 32 MiB memory bound.
+of `snapshot.types()`.
 
 Compression 0 only; record order is the snapshot's path order, not Dumper-7's launch order.
 """
@@ -43,8 +43,8 @@ def _check_out_dir(out_dir):
 
 
 def _referenced_name(path: str) -> str:
-    """A referenced type's name: `path`'s last segment after its last '.' or ':' (GetName())."""
-    return _LAST_SEGMENT_RE.search(path).group()
+    """A referenced type's name: `strip_path` of `path`'s last segment after its last '.' or ':' (GetName())."""
+    return strip_path(_LAST_SEGMENT_RE.search(path).group())
 
 
 def _property_bit(p) -> int:
@@ -64,7 +64,7 @@ def _enum_member_name(raw: str, first_c_by_name: dict) -> str:
 
 
 class _Writer:
-    """Holds the writer's whole state: the name table and the two section buffers."""
+    """Holds the name table (deduplicated, first-use order) and the missing-reference count/sample."""
 
     def __init__(self):
         self.names: dict[str, int] = {}
@@ -90,7 +90,7 @@ class _Writer:
             self.missing_sample = f'{record_path}.{prop_name}'
 
 
-def _encode_type(pt: PropType | None, w: _Writer, record_path: str) -> bytes:
+def _encode_type(pt: PropType | None, w: _Writer, record_path: str, prop_name: str) -> bytes:
     if pt is None:
         return bytes((_UNKNOWN_CODE,))
     if pt.kind == 'ByteProperty' and pt.enum is not None:
@@ -100,24 +100,25 @@ def _encode_type(pt: PropType | None, w: _Writer, record_path: str) -> bytes:
     if code is None:
         return bytes((_UNKNOWN_CODE,))
     if pt.kind == 'ArrayProperty':
-        return bytes((code,)) + _encode_type(pt.inner, w, record_path)
+        return bytes((code,)) + _encode_type(pt.inner, w, record_path, prop_name)
     if pt.kind == 'SetProperty':
-        return bytes((code,)) + _encode_type(pt.element, w, record_path)
+        return bytes((code,)) + _encode_type(pt.element, w, record_path, prop_name)
     if pt.kind == 'OptionalProperty':
-        return bytes((code,)) + _encode_type(pt.value, w, record_path)
+        return bytes((code,)) + _encode_type(pt.value, w, record_path, prop_name)
     if pt.kind == 'MapProperty':
-        return bytes((code,)) + _encode_type(pt.key, w, record_path) + _encode_type(pt.value, w, record_path)
+        return (bytes((code,)) + _encode_type(pt.key, w, record_path, prop_name)
+                + _encode_type(pt.value, w, record_path, prop_name))
     if pt.kind == 'StructProperty':
         if pt.struct is None:
-            w.note_missing(record_path, '<struct>')
+            w.note_missing(record_path, prop_name)
             idx = w.name_index('None', record_path)
         else:
             idx = w.name_index(_referenced_name(pt.struct), record_path)
         return bytes((code,)) + struct.pack('<i', idx)
     if pt.kind == 'EnumProperty':
-        underlying = _encode_type(pt.underlying, w, record_path)
+        underlying = _encode_type(pt.underlying, w, record_path, prop_name)
         if pt.enum is None:
-            w.note_missing(record_path, '<enum>')
+            w.note_missing(record_path, prop_name)
             idx = w.name_index('None', record_path)
         else:
             idx = w.name_index(_referenced_name(pt.enum), record_path)
@@ -151,7 +152,7 @@ def _encode_struct(rec, w: _Writer) -> bytes:
     for p in kept:
         pname_idx = w.name_index(p.name, rec.path)
         prop_buf += struct.pack('<HBi', index & 0xFFFF, p.array_dim & 0xFF, pname_idx)
-        prop_buf += _encode_type(p.type, w, rec.path)
+        prop_buf += _encode_type(p.type, w, rec.path, p.name)
         index += p.array_dim
     buf = bytearray(struct.pack('<iiHH', name_idx, super_idx, index & 0xFFFF, len(kept) & 0xFFFF))
     buf += prop_buf
