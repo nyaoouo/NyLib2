@@ -123,7 +123,7 @@ def _build_parser() -> argparse.ArgumentParser:
                     help='output root (default: .\\ue_dumps or env NYLIB_UE_OUT)')
     pd.add_argument('--exports', dest='exports', default=None,
                      help="formats written with the snapshot: idmap, gobjects, gobjects-props, image (the game's "
-                          "main module as a PE file), usmap (default: idmap,gobjects,gobjects-props,image,usmap; "
+                          'main module as a PE file), usmap (default: idmap,gobjects,gobjects-props,image,usmap; '
                           '"none" writes the snapshot only)')
     pd.add_argument('--allow-calls', dest='allow_calls', nargs='?', const=_ALLOW_CALLS_DEFAULT, default=None,
                      help='append-string, game-info, text; no value means all three. Each makes a call in the game '

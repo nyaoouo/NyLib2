@@ -30,7 +30,7 @@ UNREADABLE_FAIL = 0.05  # share of walked objects that fails a dump
 UNREADABLE_WARN = 0.001
 UE_EXE_RE = re.compile(r'-(?:Win64|WinGDK)-(?:Shipping|Test|DebugGame)(?:-Cmd)?\.exe$', re.IGNORECASE)
 IMAGE_EXPORT = 'image'  # (7-c) the main-module image (I6); a dump-only format
-DEFAULT_DUMP_EXPORTS = ('idmap', 'gobjects', 'gobjects-props', IMAGE_EXPORT, 'usmap')  # (7-c) dump's default: image before usmap
+DEFAULT_DUMP_EXPORTS = ('idmap', 'gobjects', 'gobjects-props', IMAGE_EXPORT, 'usmap')  # dump's default: image before usmap
 
 _ROOT_OBJS = {'Off': 'off', 'Settings': 'settings', 'PropertySizes': 'property_sizes', 'FNameEntry': 'names'}
 _ROW_NAMES = {
