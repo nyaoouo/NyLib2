@@ -39,6 +39,9 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         ID3D12Device *Device() const;
         D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle(UINT slot) const;
         UINT64 GpuHandle(UINT slot) const;
+        // Records the copy and the barrier on the store's upload context, submits them and waits for them; needs no GIL.
+        // Sets inFlight once submitted and clears it once the copy completed; while it stays set, the caller leaks the copy's resources.
+        void Upload(const D3D12_TEXTURE_COPY_LOCATION &dst, const D3D12_TEXTURE_COPY_LOCATION &src, const D3D12_RESOURCE_BARRIER &barrier, bool &inFlight);
 
     private:
         struct Entry
@@ -47,8 +50,14 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             UINT slot;
             UINT64 value;
         };
+        struct UploadContext;
+
+        std::shared_ptr<UploadContext> AcquireUploadContext();
+        void ForgetUploadContext(const std::shared_ptr<UploadContext> &context) noexcept;
 
         std::mutex mutex;
+        std::mutex uploadMutex;                       // serializes uploads on the context; never held together with mutex
+        std::shared_ptr<UploadContext> uploadContext; // created by the first upload; guarded by mutex
         std::atomic<bool> open{true};
         bool leaky = false;
         ID3D12Device *device;

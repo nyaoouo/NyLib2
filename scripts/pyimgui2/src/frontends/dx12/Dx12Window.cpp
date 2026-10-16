@@ -28,6 +28,29 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         };
     }
 
+    // The queue, allocator, list and fence that a store's uploads reuse; released with the last reference unless leaked.
+    struct Dx12TextureStore::UploadContext
+    {
+        ID3D12CommandQueue *queue = nullptr;
+        ID3D12CommandAllocator *allocator = nullptr;
+        ID3D12GraphicsCommandList *list = nullptr;
+        ID3D12Fence *fence = nullptr;
+        HANDLE event = nullptr;
+        UINT64 fenceValue = 0; // last signaled; guarded by uploadMutex
+        std::atomic<bool> leaked{false};
+
+        ~UploadContext()
+        {
+            if (this->leaked)
+                return;
+            for (IUnknown *object : std::initializer_list<IUnknown *>{this->list, this->allocator, this->queue, this->fence})
+                if (object != nullptr)
+                    object->Release();
+            if (this->event != nullptr)
+                CloseHandle(this->event);
+        }
+    };
+
     Dx12TextureStore::Dx12TextureStore(ID3D12Device *device, ID3D12DescriptorHeap *heap, DWORD renderThread) : device(device), heap(heap), renderThread(renderThread)
     {
         this->device->AddRef();
@@ -139,12 +162,16 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 
     void Dx12TextureStore::Close(bool gpuIdle) noexcept
     {
+        std::shared_ptr<UploadContext> context;
         {
             std::lock_guard<std::mutex> lock(this->mutex);
             if (!this->open)
                 return;
             this->open = false;
             this->leaky = !gpuIdle;
+            context = std::move(this->uploadContext);
+            if (context != nullptr && !gpuIdle)
+                context->leaked = true;
             if (gpuIdle)
                 for (std::vector<Entry> *list : {&this->pending, &this->retired})
                     for (Entry &entry : *list)
@@ -185,6 +212,112 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         return this->gpuStart + (UINT64)slot * this->increment;
     }
 
+    std::shared_ptr<Dx12TextureStore::UploadContext> Dx12TextureStore::AcquireUploadContext()
+    {
+        {
+            std::lock_guard<std::mutex> lock(this->mutex);
+            if (!this->open)
+                _throw_("no D3D12 device; the session of this texture has ended");
+            if (this->uploadContext != nullptr)
+                return this->uploadContext;
+        }
+        auto context = std::make_shared<UploadContext>();
+        D3D12_COMMAND_QUEUE_DESC queueDesc = {};
+        queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+        HRESULT hr = this->device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&context->queue));
+        if (hr != S_OK)
+            _throwV_("Failed to create command queue with error code {}", hr);
+        hr = this->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&context->allocator));
+        if (hr != S_OK)
+            _throwV_("Failed to create command allocator with error code {}", hr);
+        hr = this->device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, context->allocator, nullptr, IID_PPV_ARGS(&context->list));
+        if (hr != S_OK)
+            _throwV_("Failed to create command list with error code {}", hr);
+        hr = context->list->Close();
+        if (hr != S_OK)
+            _throwV_("Failed to close command list with error code {}", hr);
+        hr = this->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&context->fence));
+        if (hr != S_OK)
+            _throwV_("Failed to create fence with error code {}", hr);
+        context->event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        if (context->event == nullptr)
+            _throw_("Failed to create event");
+
+        std::lock_guard<std::mutex> lock(this->mutex);
+        if (!this->open)
+            _throw_("no D3D12 device; the session of this texture has ended");
+        if (this->uploadContext == nullptr)
+            this->uploadContext = context;
+        return this->uploadContext;
+    }
+
+    void Dx12TextureStore::ForgetUploadContext(const std::shared_ptr<UploadContext> &context) noexcept
+    {
+        std::shared_ptr<UploadContext> forgotten;
+        std::lock_guard<std::mutex> lock(this->mutex);
+        if (this->uploadContext == context)
+            forgotten = std::move(this->uploadContext);
+    }
+
+    void Dx12TextureStore::Upload(const D3D12_TEXTURE_COPY_LOCATION &dst, const D3D12_TEXTURE_COPY_LOCATION &src, const D3D12_RESOURCE_BARRIER &barrier, bool &inFlight)
+    {
+        std::shared_ptr<UploadContext> context = this->AcquireUploadContext();
+        try
+        {
+            std::lock_guard<std::mutex> lock(this->uploadMutex);
+            if (!this->open)
+                _throw_("no D3D12 device; the session of this texture has ended");
+            if (context->leaked)
+                _throwV_("Texture upload: another upload on this context timed out after {} ms or failed; retry the call", UPLOAD_TIMEOUT_MS);
+            HRESULT hr = context->allocator->Reset();
+            if (hr != S_OK)
+                _throwV_("Failed to reset command allocator with error code {}", hr);
+            hr = context->list->Reset(context->allocator, nullptr);
+            if (hr != S_OK)
+                _throwV_("Failed to reset command list with error code {}", hr);
+            context->list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+            context->list->ResourceBarrier(1, &barrier);
+            hr = context->list->Close();
+            if (hr != S_OK)
+                _throwV_("Failed to close command list with error code {}", hr);
+            {
+                LogicScope ownSubmit;
+                context->queue->ExecuteCommandLists(1, (ID3D12CommandList *const *)&context->list);
+            }
+            inFlight = true;
+            try
+            {
+                UINT64 value = ++context->fenceValue;
+                hr = context->queue->Signal(context->fence, value);
+                if (hr != S_OK)
+                    _throwV_("Failed to signal fence with error code {}", hr);
+                hr = context->fence->SetEventOnCompletion(value, context->event);
+                if (hr != S_OK)
+                    _throwV_("Failed to set the upload fence event with error code {}", hr);
+                ULONGLONG deadline = GetTickCount64() + UPLOAD_TIMEOUT_MS;
+                while (context->fence->GetCompletedValue() < value)
+                {
+                    ULONGLONG now = GetTickCount64();
+                    if (now >= deadline)
+                        _throwV_("Texture upload timed out after {} ms; its upload objects are leaked", UPLOAD_TIMEOUT_MS);
+                    if (WaitForSingleObject(context->event, (DWORD)(deadline - now)) == WAIT_FAILED)
+                        _throwV_("Failed to wait for the upload fence with error code {}", GetLastError());
+                }
+            }
+            catch (...)
+            {
+                context->leaked = true; // still under uploadMutex: no later upload may reset the busy allocator
+                throw;
+            }
+            inFlight = false;
+        }
+        catch (...)
+        {
+            this->ForgetUploadContext(context);
+            throw;
+        }
+    }
+
     Dx12TextureHelper::Dx12TextureHelper(std::shared_ptr<Dx12TextureStore> store) : store(std::move(store))
     {
     }
@@ -217,34 +350,28 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 
     namespace
     {
-        // The objects of one texture upload; released on scope exit unless leaked.
+        // The resources of one texture upload; released on scope exit unless leaked.
         struct UploadObjects
         {
             ID3D12Resource *texture = nullptr;
             ID3D12Resource *uploadBuffer = nullptr;
-            ID3D12Fence *fence = nullptr;
-            HANDLE event = nullptr;
-            ID3D12CommandQueue *cmdQueue = nullptr;
-            ID3D12CommandAllocator *cmdAlloc = nullptr;
-            ID3D12GraphicsCommandList *cmdList = nullptr;
             bool leaked = false;
 
             ~UploadObjects()
             {
                 if (this->leaked)
                     return;
-                for (IUnknown *object : std::initializer_list<IUnknown *>{this->cmdList, this->cmdAlloc, this->cmdQueue, this->fence, this->uploadBuffer, this->texture})
+                for (IUnknown *object : std::initializer_list<IUnknown *>{this->uploadBuffer, this->texture})
                     if (object != nullptr)
                         object->Release();
-                if (this->event != nullptr)
-                    CloseHandle(this->event);
             }
         };
 
-        // Copies RGBA8 rows (imageWidth*4 bytes every srcPitch) into upload.texture on a private queue and waits for the copy.
-        // After a submit that did not complete, leaks every object.
-        void UploadTexture(ID3D12Device *device, UploadObjects &upload, const unsigned char *imageData, int imageWidth, int imageHeight, UINT srcPitch)
+        // Copies RGBA8 rows (imageWidth*4 bytes every srcPitch) into upload.texture on the store's upload context and waits for the copy.
+        // After a submit that did not complete, leaks both resources.
+        void UploadTexture(Dx12TextureStore &store, UploadObjects &upload, const unsigned char *imageData, int imageWidth, int imageHeight, UINT srcPitch)
         {
+            ID3D12Device *device = store.Device();
             D3D12_HEAP_PROPERTIES props = {};
             props.Type = D3D12_HEAP_TYPE_DEFAULT;
 
@@ -310,46 +437,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
             barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
-            hr = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&upload.fence));
-            if (hr != S_OK)
-                _throwV_("Failed to create fence with error code {}", hr);
-            upload.event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-            if (upload.event == nullptr)
-                _throw_("Failed to create event");
-
-            D3D12_COMMAND_QUEUE_DESC queueDesc = {};
-            queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-            hr = device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&upload.cmdQueue));
-            if (hr != S_OK)
-                _throwV_("Failed to create command queue with error code {}", hr);
-
-            hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&upload.cmdAlloc));
-            if (hr != S_OK)
-                _throwV_("Failed to create command allocator with error code {}", hr);
-
-            hr = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, upload.cmdAlloc, nullptr, IID_PPV_ARGS(&upload.cmdList));
-            if (hr != S_OK)
-                _throwV_("Failed to create command list with error code {}", hr);
-
-            upload.cmdList->CopyTextureRegion(&dstLocation, 0, 0, 0, &srcLocation, nullptr);
-            upload.cmdList->ResourceBarrier(1, &barrier);
-            hr = upload.cmdList->Close();
-            if (hr != S_OK)
-                _throwV_("Failed to close command list with error code {}", hr);
-            {
-                LogicScope ownSubmit;
-                upload.cmdQueue->ExecuteCommandLists(1, (ID3D12CommandList *const *)&upload.cmdList);
-            }
-            upload.leaked = true;
-            hr = upload.cmdQueue->Signal(upload.fence, 1);
-            if (hr != S_OK)
-                _throwV_("Failed to signal fence with error code {}", hr);
-            hr = upload.fence->SetEventOnCompletion(1, upload.event);
-            if (hr != S_OK)
-                _throwV_("Failed to set the upload fence event with error code {}", hr);
-            if (WaitForSingleObject(upload.event, UPLOAD_TIMEOUT_MS) != WAIT_OBJECT_0 && upload.fence->GetCompletedValue() < 1)
-                _throwV_("Texture upload timed out after {} ms; its upload objects are leaked", UPLOAD_TIMEOUT_MS);
-            upload.leaked = false;
+            store.Upload(dstLocation, srcLocation, barrier, upload.leaked);
         }
 
         struct UploadedTexture
@@ -367,7 +455,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             UploadObjects upload;
             try
             {
-                UploadTexture(store.Device(), upload, rgba, width, height, pitch);
+                UploadTexture(store, upload, rgba, width, height, pitch);
             }
             catch (...)
             {
