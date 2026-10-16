@@ -1866,6 +1866,7 @@ def generate(backends, debug=0, with_stubs=True):
                 src_dir / 'ImguiCtx.cpp',
                 src_dir / 'OverlayQueries.cpp',
                 src_dir / 'OverlayTypes.cpp',
+                src_dir / 'TextureDecode.cpp',
                 src_dir / 'UnhandledException.cpp',
                 src_dir / 'Win32Font.cpp',
             ])),
