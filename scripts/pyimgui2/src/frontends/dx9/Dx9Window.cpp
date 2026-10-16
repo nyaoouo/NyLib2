@@ -188,6 +188,8 @@ START_M_IMGUI_IMPL_DX9_NAMESPACE
 
             this->ProcessCallBeforeFrameOnce(py::cast(this));
 
+            if (this->invalidatePending.exchange(false))
+                ImGui_ImplDX9_InvalidateDeviceObjects();
             ImGui_ImplDX9_NewFrame();
             ImGui_ImplWin32_NewFrame();
             this->GateGamepad(false);
@@ -537,6 +539,8 @@ START_M_IMGUI_IMPL_DX9_NAMESPACE
             return;
         }
 
+        if (this->invalidatePending.exchange(false))
+            ImGui_ImplDX9_InvalidateDeviceObjects();
         ImGui_ImplDX9_NewFrame();
         ImGui_ImplWin32_NewFrame();
         this->GateGamepad(this->inputPolicy.load() == (int)OVERLAY_TYPES_NAMESPACE::InputPolicy::PassAll);
@@ -582,8 +586,8 @@ START_M_IMGUI_IMPL_DX9_NAMESPACE
     {
         pybind_setup_mImguiImpl_RenderBase(m);
         py::class_<Dx9Render, RenderBase>(m, "_Dx9Render", py::dynamic_attr(), py::module_local())
-            .def_static("InvalidateDeviceObjects", []() { ImGui_ImplDX9_InvalidateDeviceObjects(); })
-            .def_static("CreateDeviceObjects", []() { return ImGui_ImplDX9_CreateDeviceObjects(); });
+            .def_static("InvalidateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); })
+            .def_static("CreateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); return true; });
         py::class_<Dx9Window, Dx9Render>(m, "Dx9Window", py::dynamic_attr(), py::module_local())
             .def(py::init<std::optional<py::function>>(), py::arg("renderCallback") = py::none())
             .def_readwrite("ClearColor", &Dx9Window::ClearColor)

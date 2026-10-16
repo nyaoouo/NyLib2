@@ -224,6 +224,8 @@ START_M_IMGUI_IMPL_NAMESPACE
                 py::object self = py::cast(this, py::return_value_policy::reference);
                 this->ProcessCallBeforeFrameOnce(self);
             }
+            if (this->invalidatePending.exchange(false))
+                ImGui_ImplDX11_InvalidateDeviceObjects();
             ImGui_ImplDX11_NewFrame();
             ImGui_ImplWin32_NewFrame();
             this->GateGamepad(false);
@@ -347,6 +349,8 @@ START_M_IMGUI_IMPL_NAMESPACE
 
             void NewFrame() override
             {
+                if (this->window.invalidatePending.exchange(false))
+                    ImGui_ImplDX11_InvalidateDeviceObjects();
                 ImGui_ImplDX11_NewFrame();
             }
 
@@ -739,6 +743,8 @@ START_M_IMGUI_IMPL_NAMESPACE
         // ImGui asserts when ViewportsEnable is first set on frame 1, so an assignment then waits one frame.
         if (ImGui::GetFrameCount() != 1 && this->viewportsDirty.exchange(false))
             SetViewportsFlag(this->viewportsEnable);
+        if (this->invalidatePending.exchange(false))
+            ImGui_ImplDX11_InvalidateDeviceObjects();
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         this->GateGamepad(this->inputPolicy.load() == (int)OVERLAY_TYPES_NAMESPACE::InputPolicy::PassAll);
@@ -790,15 +796,15 @@ START_M_IMGUI_IMPL_NAMESPACE
         pybind_setup_mImguiImpl_RenderBase(m);
 
         py::class_<Dx11Render, RenderBase>(m, "_Dx11Render", py::dynamic_attr(), py::module_local())
-            .def_static("InvalidateDeviceObjects", []() { ImGui_ImplDX11_InvalidateDeviceObjects(); })
-            .def_static("CreateDeviceObjects", []() { return ImGui_ImplDX11_CreateDeviceObjects(); })
+            .def_static("InvalidateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); })
+            .def_static("CreateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); return true; })
             .def("CreateTexture", &Dx11Render::CreateTexture, py::arg("filename"), py::return_value_policy::take_ownership);
 
         py::class_<Dx11Window, Dx11Render> dx11Window(m, "Dx11Window", py::dynamic_attr(), py::module_local());
         dx11Window.def(py::init<std::optional<py::function>>(), py::arg("renderCallback") = py::none())
             .def_readwrite("ClearColor", &Dx11Window::ClearColor)
-            .def("InvalidateDeviceObjects", [](Dx11Window &) { ImGui_ImplDX11_InvalidateDeviceObjects(); })
-            .def("CreateDeviceObjects", [](Dx11Window &) { return ImGui_ImplDX11_CreateDeviceObjects(); });
+            .def("InvalidateDeviceObjects", [](Dx11Window &self) { self.invalidatePending = true; })
+            .def("CreateDeviceObjects", [](Dx11Window &self) { self.invalidatePending = true; return true; });
         Overlay::BindMembers(dx11Window);
 
         py::class_<Dx11Inbound, Dx11Render>(m, "Dx11Inbound", py::dynamic_attr(), py::module_local())

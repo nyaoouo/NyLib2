@@ -1,5 +1,6 @@
 #include "./RenderBase.h"
 #include <map>
+#include <mutex>
 #include <shellapi.h>
 
 #define WM_TRAYICON (WM_APP + 0x100)
@@ -9,6 +10,8 @@ START_M_IMGUI_IMPL_NAMESPACE
     namespace
     {
         std::map<HWND, RenderBase *> trayWindowMap;
+        std::mutex instancesMutex;
+        std::vector<RenderBase *> instances;
         UINT trayIconId = 1;
         UINT WM_TASKBARCREATED = RegisterWindowMessageW(L"TaskbarCreated");
         HICON defaultTrayIcon = LoadIconW(nullptr, IDI_APPLICATION);
@@ -25,10 +28,16 @@ START_M_IMGUI_IMPL_NAMESPACE
     {
         this->trayIcon = defaultTrayIcon;
         this->SetRenderCallback(renderCallback);
+        std::lock_guard<std::mutex> lock(instancesMutex);
+        instances.push_back(this);
     }
 
     RenderBase::~RenderBase()
     {
+        {
+            std::lock_guard<std::mutex> lock(instancesMutex);
+            std::erase(instances, this);
+        }
         this->RemoveTrayIcon();
         if (this->hwnd != nullptr)
             trayWindowMap.erase(this->hwnd);
@@ -98,6 +107,26 @@ START_M_IMGUI_IMPL_NAMESPACE
         }
         if (gated)
             ImGui::GetIO().BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
+    }
+
+    void RenderBase::RequestInvalidateForCurrentContext()
+    {
+        ImGuiContext *current = ImGui::GetCurrentContext();
+        if (current == nullptr)
+            return;
+        {
+            std::lock_guard<std::mutex> lock(instancesMutex);
+            for (RenderBase *instance : instances)
+            {
+                if (instance->ctx == current)
+                {
+                    instance->invalidatePending = true;
+                    return;
+                }
+            }
+        }
+        const char *name = current->IO.BackendRendererName;
+        _throwV_("No window or inbound of this frontend module owns the current ImGui context (its renderer backend is {})", name ? name : "none");
     }
 
     void RenderBase::ProcessCallBeforeFrameOnce(py::object self)
