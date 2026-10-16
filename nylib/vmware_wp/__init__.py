@@ -16,6 +16,7 @@ from nylib.vmware_wp.errors import (
     VmwareTimeoutError,
 )
 from nylib.vmware_wp.process import ProcessBackend
+from nylib.vmware_wp.kernel_debugger import KernelDebugger
 from nylib.vmware_wp.rest import RestBackend
 from nylib.vmware_wp.results import CommandResult, ProcessResult, RestResult
 from nylib.vmware_wp.vmrun import GuestExecResult, Vmrun, VmrunPowerOp
@@ -46,6 +47,7 @@ __all__ = [
     "ProcessCommandError",
     "RestRequestError",
     "ProcessBackend",
+    "KernelDebugger",
     "RestBackend",
     "CommandResult",
     "ProcessResult",

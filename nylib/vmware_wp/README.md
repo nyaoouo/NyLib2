@@ -37,6 +37,7 @@ vr.power(vmx, "stop", mode="soft")        # graceful shutdown
 | `rest.py` | `RestBackend` — `urllib` wrapper (`request(method, endpoint, *, json_body, headers, data, ...)`). |
 | `vmrun.py` | `Vmrun` (power / snapshots / guest ops / `exec_in_guest`), `VmrunPowerOp`, `GuestExecResult`. |
 | `vmcli.py` | `Vmcli` — `invoke` + `power` / `snapshot` / `serial` helpers. |
+| `kernel_debugger.py` | `KernelDebugger` — Windows guest KD over a VMware serial named pipe. |
 | `rest_api.py` | `WorkstationRest` + endpoint catalog + `render_endpoint`. |
 | `workstation.py` | `Workstation` — fallback-chain facade across providers; `NoProviderError`. |
 | `wincred.py` | Recover encrypted-VM passwords from the Windows Credential Manager. |
@@ -65,6 +66,69 @@ command-line string. `Vmrun.exec_in_guest(..., capture=True)` handles both: it s
 a guest batch file, redirects the whole batch to a temp file, and copies the output back — returning
 a `GuestExecResult(returncode, stdout, command)`. Use `shell=False` to run a program directly, and
 `capture=False` to skip output capture.
+
+## Windows kernel debugging over a named pipe
+
+`KernelDebugger` connects a Windows guest's virtual COM port to WinDbg or KD on the VMware host.
+Run `configure_vmx` while the VM is powered off. It adds a server-side named pipe to an unused COM
+port, preserves the rest of the VMX file, and refuses to replace an existing serial port. `enable_guest`
+requires an administrator account inside the running guest and verifies that both BCDEdit commands
+finished successfully. The debugger process runs on the host and must be elevated.
+The port enables VMware's **Yield CPU on poll** setting so serial polling does not monopolize host CPU.
+
+```python
+import time
+
+from nylib.vmware_wp import KernelDebugger, ProcessCommandError, Vmrun, VmwareConfig
+
+vmx = r"D:\vm\Win11\Win11.vmx"
+vr = Vmrun.from_config(VmwareConfig())
+kd = KernelDebugger(vmx, "win11_kd", serial_port=1)  # COM1
+
+kd.configure_vmx(vmrun=vr)                 # VM must be powered off
+vr.power(vmx, "start")
+for _ in range(60):
+    try:
+        if vr.check_tools_state(vmx).stdout.strip() == "running":
+            break
+    except ProcessCommandError:
+        pass
+    time.sleep(2)
+else:
+    raise TimeoutError("VMware Tools did not become ready within 120 seconds")
+
+kd.enable_guest("administrator", "guest-password", vmrun=vr)
+
+debugger = kd.launch_debugger(
+    r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\windbg.exe",
+    break_on_connect=True,
+    commands="g",
+)
+restart = vr.exec_in_guest(
+    vmx, "administrator", "guest-password",
+    "shutdown /r /t 30 && echo __KD_RESTART_SCHEDULED__", capture=True,
+)
+if restart.returncode or "__KD_RESTART_SCHEDULED__" not in restart.stdout:
+    raise RuntimeError(f"Guest restart was not scheduled: {restart.stdout}")
+```
+
+Wait for the guest restart and debugger connection before issuing more guest commands. After analysis,
+once VMware Tools is running again, call `kd.disable_guest(...)` and reboot or shut down the guest.
+`break_on_connect=True` stops the guest at the initial break; `commands="g"` resumes it automatically.
+Do not close the debugger immediately on connection: the guest may still be stopped at that break.
+
+`debugger_command(executable="kd.exe")` returns the command tuple for a console debugger or an
+external process manager; `launch_debugger(executable="kd.exe")` returns a `subprocess.Popen` without
+waiting for a debugging session to end. Pass `break_on_connect=True` to request an immediate break,
+`commands="..."` for WinDbg/KD startup commands, and `log_path="..."` to write a debugger log.
+The serial transport is `com:pipe,port=\\.\pipe\win11_kd`. VMware's server endpoint creates the pipe
+after VM power-on, so start the debugger after the VM starts and before the guest reboot. If a VMware
+reset drops the session, restart WinDbg/KD.
+
+The VMX configuration and guest BCD are separate changes. BCDEdit may require BitLocker or Secure
+Boot adjustments in the guest; this library does not change those settings. See the
+[Microsoft VM debugging guide](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/attaching-to-a-virtual-machine--kernel-mode-)
+and the [VMware Workstation Pro 17 guide](https://techdocs2-prod.adobecqms.net/content/dam/broadcom/techdocs/us/en/pdf/vmware/desktop-hypervisors/workstation/vmware-workstation-pro-17-0.pdf).
 
 ## Folder copy (archive → transfer → unarchive)
 
