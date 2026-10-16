@@ -9,7 +9,7 @@ from . import imgui
 __all__ = [
     'Convention', 'UE', 'Unity', 'Camera', 'Rgba',
     'get_canvas_draw_list', 'get_canvas_rect', 'world_to_screen', 'project_bounds',
-    'add_corner_box', 'add_health_bar', 'add_text_outlined', 'add_line_3d', 'add_lines_3d',
+    'add_corner_box', 'add_health_bar', 'add_text_outlined', 'add_image_triangle', 'add_line_3d', 'add_lines_3d',
     'add_box_3d', 'add_circle_3d', 'add_bones',
 ]
 
@@ -532,6 +532,37 @@ def add_text_outlined(dl, pos, col: int, text: str, outline: 'int | None' = 0xFF
         for ox, oy in _OUTLINE_OFFSETS:
             dl.AddText(imgui.ImVec2(x + ox, y + oy), outline, text)
     dl.AddText(imgui.ImVec2(x, y), col, text)
+
+
+def _read_texture_id(value, name='texture_id'):
+    v = operator.index(value)
+    if not 0 < v < 1 << 64:
+        raise ValueError(f'{name} must be in (0, 2**64), got {v}')
+    return v
+
+
+def add_image_triangle(dl, texture_id: int, p1, p2, p3, uv1=(0.0, 0.0), uv2=(1.0, 0.0), uv3=(1.0, 1.0),
+                       col: int = 0xFFFFFFFF) -> None:
+    """Draw the triangle p1-p2-p3 sampling texture_id at uv1-uv3, tinted by col.
+
+    A point that is not finite or beyond float32 range draws nothing; texture_id is the backend handle (e.g. Dx11Texture.handle).
+    """
+    tid = _read_texture_id(texture_id)
+    pts = [_read_vec2(p) for p in (p1, p2, p3)]
+    if not all(_in_range(v) for p in pts for v in p):
+        return
+    uvs = []
+    for i, uv in enumerate((uv1, uv2, uv3), start=1):
+        u, v = _read_vec2(uv)
+        if not (_in_range(u) and _in_range(v)):
+            raise ValueError(f'uv{i} must be finite and within float32 range, got {uv}')
+        uvs.append((u, v))
+    col = _read_col(col)
+    dl.PushTextureID(tid)
+    dl.PrimReserve(3, 3)
+    for p, uv in zip(pts, uvs):
+        dl.PrimVtx(imgui.ImVec2(*p), imgui.ImVec2(*uv), col)
+    dl.PopTextureID()
 
 
 def _line_style(cam, col, thickness):
