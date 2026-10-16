@@ -427,6 +427,8 @@ START_M_IMGUI_IMPL_VK_NAMESPACE
 
             this->ProcessCallBeforeFrameOnce(py::cast(this));
 
+            if (this->invalidatePending.exchange(false))
+                ImGui_ImplVulkan_CreateFontsTexture();
             ImGui_ImplVulkan_NewFrame();
             ImGui_ImplWin32_NewFrame();
             this->GateGamepad(false);
@@ -499,9 +501,9 @@ START_M_IMGUI_IMPL_VK_NAMESPACE
     {
         pybind_setup_mImguiImpl_RenderBase(m);
         py::class_<VkRender, RenderBase>(m, "_VkRender", py::dynamic_attr(), py::module_local())
-            .def_static("InvalidateDeviceObjects", []() { ImGui_ImplVulkan_CreateFontsTexture(); })
-            .def_static("CreateFontsTexture", []() { return ImGui_ImplVulkan_CreateFontsTexture(); })
-            .def_static("DestroyFontsTexture", []() { ImGui_ImplVulkan_DestroyFontsTexture(); })
+            .def_static("InvalidateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); })
+            .def_static("CreateFontsTexture", []() { RenderBase::RequestInvalidateForCurrentContext(); return true; })
+            .def_static("DestroyFontsTexture", []() { RenderBase::RequestInvalidateForCurrentContext(); })
             .def_static("SetMinImageCount", [](uint32_t count) { ImGui_ImplVulkan_SetMinImageCount(count); }, py::arg("count"));
         py::class_<VkWindow, VkRender>(m, "VkWindow", py::dynamic_attr(), py::module_local())
             .def(py::init<std::optional<py::function>>(), py::arg("renderCallback") = py::none())

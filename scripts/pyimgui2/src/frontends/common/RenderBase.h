@@ -26,9 +26,10 @@ START_M_IMGUI_IMPL_NAMESPACE
         NOTIFYICONDATAW trayIconData = {};
         HICON trayIcon = nullptr;
         bool inTray = false;
-        ImGuiContext *ctx = nullptr;
+        std::atomic<ImGuiContext *> ctx{nullptr};
         std::atomic<int> inputPolicy{0};   // InputPolicy value; 0 = Auto
         std::atomic<int> gamepadPolicy{0}; // GamepadPolicy value; 0 = WhenForeground
+        std::atomic<bool> invalidatePending{false}; // a requested InvalidateDeviceObjects, applied before the next backend NewFrame
 
         RenderBase(std::optional<py::function> renderCallback = std::nullopt);
         virtual ~RenderBase();
@@ -40,6 +41,7 @@ START_M_IMGUI_IMPL_NAMESPACE
         void SetInputPolicy(OVERLAY_TYPES_NAMESPACE::InputPolicy policy);
         void SetGamepadPolicy(OVERLAY_TYPES_NAMESPACE::GamepadPolicy policy);
         void GateGamepad(bool passAll) noexcept; // hides the gamepad from this frame per gamepadPolicy; passAll hides it always
+        static void RequestInvalidateForCurrentContext(); // flags the current context's owner; no-op without a current context, throws if no instance of this module owns it
         void ProcessCallBeforeFrameOnce(py::object self);
         void ProcessRenderCallback(py::object self);
         void Close();

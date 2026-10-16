@@ -229,6 +229,8 @@ START_M_IMGUI_IMPL_GL3_NAMESPACE
 
             this->ProcessCallBeforeFrameOnce(py::cast(this));
 
+            if (this->invalidatePending.exchange(false))
+                ImGui_ImplOpenGL3_DestroyDeviceObjects();
             ImGui_ImplOpenGL3_NewFrame();
             ImGui_ImplWin32_NewFrame();
             this->GateGamepad(false);
@@ -549,6 +551,8 @@ START_M_IMGUI_IMPL_GL3_NAMESPACE
             return;
         }
 
+        if (this->invalidatePending.exchange(false))
+            ImGui_ImplOpenGL3_DestroyDeviceObjects();
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplWin32_NewFrame();
         this->GateGamepad(this->inputPolicy.load() == (int)OVERLAY_TYPES_NAMESPACE::InputPolicy::PassAll);
@@ -598,11 +602,11 @@ START_M_IMGUI_IMPL_GL3_NAMESPACE
     {
         pybind_setup_mImguiImpl_RenderBase(m);
         py::class_<Gl3Render, RenderBase>(m, "_Gl3Render", py::dynamic_attr(), py::module_local())
-            .def_static("InvalidateDeviceObjects", []() { ImGui_ImplOpenGL3_DestroyDeviceObjects(); })
-            .def_static("CreateDeviceObjects", []() { return ImGui_ImplOpenGL3_CreateDeviceObjects(); })
-            .def_static("DestroyDeviceObjects", []() { ImGui_ImplOpenGL3_DestroyDeviceObjects(); })
-            .def_static("CreateFontsTexture", []() { return ImGui_ImplOpenGL3_CreateFontsTexture(); })
-            .def_static("DestroyFontsTexture", []() { ImGui_ImplOpenGL3_DestroyFontsTexture(); });
+            .def_static("InvalidateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); })
+            .def_static("CreateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); return true; })
+            .def_static("DestroyDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); })
+            .def_static("CreateFontsTexture", []() { RenderBase::RequestInvalidateForCurrentContext(); return true; })
+            .def_static("DestroyFontsTexture", []() { RenderBase::RequestInvalidateForCurrentContext(); });
         py::class_<Gl3Window, Gl3Render>(m, "Gl3Window", py::dynamic_attr(), py::module_local())
             .def(py::init<std::optional<py::function>>(), py::arg("renderCallback") = py::none())
             .def_readwrite("ClearColor", &Gl3Window::ClearColor)

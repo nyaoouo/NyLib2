@@ -504,6 +504,11 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
                 this->ProcessCallBeforeFrameOnce(self);
             }
 
+            if (this->invalidatePending.exchange(false))
+            {
+                this->WaitForLastSubmittedFrame();
+                ImGui_ImplDX12_InvalidateDeviceObjects();
+            }
             ImGui_ImplDX12_NewFrame();
             ImGui_ImplWin32_NewFrame();
             this->GateGamepad(false);
@@ -718,6 +723,11 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 
             void NewFrame() override
             {
+                if (this->window.invalidatePending.exchange(false))
+                {
+                    this->WaitIdle();
+                    ImGui_ImplDX12_InvalidateDeviceObjects();
+                }
                 ImGui_ImplDX12_NewFrame();
             }
 
@@ -1538,6 +1548,8 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         // ImGui asserts when ViewportsEnable is first set on frame 1, so an assignment then waits one frame.
         if (ImGui::GetFrameCount() != 1 && this->viewportsDirty.exchange(false))
             SetViewportsFlag(this->viewportsEnable);
+        if (this->invalidatePending && this->WaitForFence(this->fenceLastSignaledValue, this->fenceEvent, FENCE_TIMEOUT_MS) && this->invalidatePending.exchange(false))
+            ImGui_ImplDX12_InvalidateDeviceObjects();
         ImGui_ImplDX12_NewFrame();
         ImGui_ImplWin32_NewFrame();
         this->GateGamepad(this->inputPolicy.load() == (int)OVERLAY_TYPES_NAMESPACE::InputPolicy::PassAll);
@@ -1621,8 +1633,8 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             .def_property_readonly("size", &Dx12TextureHelper::GetSize);
 
         py::class_<Dx12Render, RenderBase>(m, "Dx12Render", py::dynamic_attr(), py::module_local())
-            .def_static("InvalidateDeviceObjects", []() { ImGui_ImplDX12_InvalidateDeviceObjects(); })
-            .def_static("CreateDeviceObjects", []() { LogicScope ownSubmit; return ImGui_ImplDX12_CreateDeviceObjects(); })
+            .def_static("InvalidateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); })
+            .def_static("CreateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); return true; })
             .def("CreateTexture", [](Dx12Render &self, const char *filename) { return self.CreateTexture(filename); }, py::arg("filename"), py::return_value_policy::take_ownership)
             .def("CreateTexture", [](Dx12Render &self) { return self.CreateTexture(); }, py::return_value_policy::take_ownership);
 
