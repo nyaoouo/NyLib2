@@ -5,6 +5,7 @@
 #include "../overlay/OverlayConfig.h"
 
 #include <atomic>
+#include <mutex>
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include "imgui_impl_win32.h"
@@ -16,18 +17,64 @@
 
 START_M_IMGUI_IMPL_DX12_NAMESPACE
 {
+    // Descriptor slots and deferred releases of one device session; shared by the renderer and its textures.
+    class Dx12TextureStore
+    {
+    public:
+        static UINT const HEAP_SIZE = 4096;
+        static UINT const NULL_SLOT = 1;
+
+        Dx12TextureStore(ID3D12Device *device, ID3D12DescriptorHeap *heap); // AddRefs both and writes the null SRV into NULL_SLOT
+        ~Dx12TextureStore();                                                 // after Close(true) releases device and heap; leaky or never closed: leaks them
+        Dx12TextureStore(const Dx12TextureStore &) = delete;
+        Dx12TextureStore &operator=(const Dx12TextureStore &) = delete;
+
+        UINT Allocate();                                           // RuntimeError "no D3D12 device" when closed, "texture slots" when full
+        void Unallocate(UINT slot) noexcept;                       // returns a slot whose descriptor was never drawn
+        void Retire(ID3D12Resource *resource, UINT slot) noexcept; // any thread; nullptr / 0 allowed
+        void Collect(UINT64 submitted, UINT64 completed) noexcept; // render thread, before the backend NewFrame
+        void Close(bool gpuIdle) noexcept;                         // teardown, unwind guard or open site; idempotent
+        bool IsOpen() const noexcept;                              // lock-free; read on every handle access
+        ID3D12Device *Device() const;
+        D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle(UINT slot) const;
+        UINT64 GpuHandle(UINT slot) const;
+
+    private:
+        struct Entry
+        {
+            ID3D12Resource *resource;
+            UINT slot;
+            UINT64 value;
+        };
+
+        std::mutex mutex;
+        std::atomic<bool> open{true};
+        bool leaky = false;
+        ID3D12Device *device;
+        ID3D12DescriptorHeap *heap;
+        UINT increment;
+        D3D12_CPU_DESCRIPTOR_HANDLE cpuStart;
+        UINT64 gpuStart;
+        std::vector<UINT> freeSlots;
+        UINT nextSlot = NULL_SLOT + 1;
+        std::vector<Entry> pending;
+        std::vector<Entry> retired;
+        std::vector<ID3D12Resource *> releases; // scratch of Collect and Close(true), which never run concurrently
+    };
+
     class Dx12TextureHelper
     {
     public:
-        ID3D12Device *d3dDevice = nullptr;
-        D3D12_CPU_DESCRIPTOR_HANDLE srvCpuHandle = {};
-        D3D12_GPU_DESCRIPTOR_HANDLE srvGpuHandle = {};
+        std::shared_ptr<Dx12TextureStore> store;
         ID3D12Resource *srv = nullptr;
+        UINT slot = 0;
         int width = 0;
         int height = 0;
 
-        Dx12TextureHelper(ID3D12Device *d3dDevice, D3D12_CPU_DESCRIPTOR_HANDLE srvCpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE srvGpuHandle, const char *filename = nullptr);
+        Dx12TextureHelper(std::shared_ptr<Dx12TextureStore> store, const char *filename = nullptr);
         ~Dx12TextureHelper();
+        Dx12TextureHelper(const Dx12TextureHelper &) = delete;
+        Dx12TextureHelper &operator=(const Dx12TextureHelper &) = delete;
 
         void FreeTexture();
         void LoadTextureFromFile(const char *filename);
@@ -44,10 +91,16 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         ID3D12DescriptorHeap *pd3dSrvDescHeap = nullptr;
         ID3D12CommandQueue *pd3dCommandQueue = nullptr;
         ID3D12GraphicsCommandList *pd3dCommandList = nullptr;
+        std::shared_ptr<Dx12TextureStore> textures; // the open session's store; guarded by texturesMutex
+        std::mutex texturesMutex;
 
         Dx12Render(std::optional<py::function> renderCallback = std::nullopt) : RenderBase(renderCallback) {}
 
         Dx12TextureHelper *CreateTexture(const char *filename = nullptr);
+        std::shared_ptr<Dx12TextureStore> OpenTextures();           // the open store, or RuntimeError "no D3D12 device"
+        void InstallTextures();                                     // open site: closes a leftover store leaky, then opens one on pd3dDevice and pd3dSrvDescHeap
+        void CollectTextures(UINT64 submitted, UINT64 completed) noexcept;
+        void CloseTextures(bool gpuIdle) noexcept;
     };
 
     class Dx12Window : public Dx12Render
