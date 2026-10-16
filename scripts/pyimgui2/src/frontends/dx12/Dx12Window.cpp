@@ -479,6 +479,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             _throw_("no D3D12 device; the session of this texture has ended");
         if (!this->store->OnRenderThread())
             _throw_("LoadTextureFromFile: called off the render thread; load textures from the render callback or CallBeforeFrameOnce");
+        TEXTURE_DATA_NAMESPACE::CheckTextureTransform(transform);
         UploadedTexture uploaded;
         {
             py::gil_scoped_release release;
@@ -500,6 +501,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 
     Dx12TextureHelper *Dx12Render::CreateTexture(const char *filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform)
     {
+        TEXTURE_DATA_NAMESPACE::CheckTextureTransform(transform);
         std::unique_ptr<Dx12TextureHelper> helper(new Dx12TextureHelper(this->OpenTextures()));
         if (filename != nullptr)
             helper->LoadTextureFromFile(filename, transform);

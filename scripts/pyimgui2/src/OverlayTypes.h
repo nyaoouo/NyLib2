@@ -35,9 +35,16 @@ START_OVERLAY_TYPES_NAMESPACE
         GrayscaleBT709 = 1,
     };
 
-    // Register InputPolicy, OverlayZOrder, GamepadPolicy and TextureTransform
-    // on `m` (the top-level pyimgui module). Must be called exactly once
-    // (DllMain.cpp, core only): all four are shared across py::module_local()
+    enum class TextureFilter
+    {
+        Point = 0,
+        Linear = 1,
+        Anisotropic = 2,
+    };
+
+    // Register InputPolicy, OverlayZOrder, GamepadPolicy, TextureTransform and
+    // TextureFilter on `m` (the top-level pyimgui module). Must be called exactly
+    // once (DllMain.cpp, core only): all five are shared across py::module_local()
     // frontend classes.
     void pybind_setup_OverlayTypes(py::module_ m);
 }

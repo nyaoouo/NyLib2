@@ -14,7 +14,7 @@
 
 START_M_IMGUI_IMPL_NAMESPACE
 {
-    // Deferred SRV releases of one D3D11 device session; shared by the renderer and its textures.
+    // Deferred SRV releases and the sampler cache of one D3D11 device session; shared by the renderer and its textures.
     class Dx11TextureStore
     {
     public:
@@ -28,8 +28,9 @@ START_M_IMGUI_IMPL_NAMESPACE
         bool OnRenderThread() const noexcept;                // renderThread 0 (inbound): inside our hooked frame
         void Retire(ID3D11ShaderResourceView *srv) noexcept; // any thread; open: deferred, closed: released now (single-threaded: leaked)
         void Collect() noexcept;                             // render thread, before the backend NewFrame
-        void Close() noexcept;                               // teardown, unwind guard or open site; releases pending (single-threaded: leaks); idempotent
+        void Close() noexcept;                               // teardown, unwind guard or open site; releases pending and samplers (single-threaded: leaks); idempotent
         bool IsOpen() const noexcept;                        // lock-free; read on every handle access
+        ID3D11SamplerState *Sampler(OVERLAY_TYPES_NAMESPACE::TextureFilter filter, int anisotropy); // render thread; anisotropy in [1, 16]; cached until Close; RuntimeError on failure
 
     private:
         std::mutex mutex;
@@ -39,6 +40,7 @@ START_M_IMGUI_IMPL_NAMESPACE
         bool singleThreaded;
         std::vector<ID3D11ShaderResourceView *> pending;
         std::vector<ID3D11ShaderResourceView *> releases; // scratch of Collect and Close, which never run concurrently
+        ID3D11SamplerState *samplers[18] = {};            // Point, Linear, then Anisotropic 1..16
     };
 
     class Dx11Texture
@@ -50,7 +52,7 @@ START_M_IMGUI_IMPL_NAMESPACE
         int height = 0;
         int mipLevels = 1;
 
-        Dx11Texture(std::shared_ptr<Dx11TextureStore> store, int width, int height, const unsigned char *rgba, UINT rowPitch); // needs no GIL
+        Dx11Texture(std::shared_ptr<Dx11TextureStore> store, int width, int height, const unsigned char *rgba, UINT rowPitch, bool mips); // needs no GIL
         ~Dx11Texture();
         Dx11Texture(const Dx11Texture &) = delete;
         Dx11Texture &operator=(const Dx11Texture &) = delete;
@@ -75,12 +77,17 @@ START_M_IMGUI_IMPL_NAMESPACE
 
         void CreateRenderTarget();
         void CleanupRenderTarget();
-        Dx11Texture *CreateTexture(const std::string &filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform = std::nullopt);
-        Dx11Texture *CreateTextureFromPixels(int width, int height, py::buffer pixels, long long rowPitch);
+        Dx11Texture *CreateTexture(const std::string &filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform = std::nullopt, bool mips = false);
+        Dx11Texture *CreateTextureFromPixels(int width, int height, py::buffer pixels, long long rowPitch, bool mips);
+        void SetTextureSampler(ImDrawList *drawList, OVERLAY_TYPES_NAMESPACE::TextureFilter filter, int anisotropy); // the draws added after it to drawList, until Reset
+        void ResetTextureSampler(ImDrawList *drawList);                                                             // restores the backend's render state
         std::shared_ptr<Dx11TextureStore> OpenTextures(); // the open store, else RuntimeError "no D3D11 device"; off the render thread RuntimeError "render thread"
         void InstallTextures(DWORD renderThread);         // open site: closes a leftover store, then opens one on pd3dDevice; 0 for inbound
         void CollectTextures() noexcept;
         void CloseTextures() noexcept;
+
+    private:
+        std::shared_ptr<Dx11TextureStore> SamplerScopeStore(ImDrawList *drawList); // frame, session, render-thread and context checks
     };
 
     class Dx11Window : public Dx11Render

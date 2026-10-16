@@ -13,6 +13,7 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #include "./TextureData.h"
+#include "./frontends/common/TextureMips.h"
 
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -86,18 +87,26 @@ START_M_IMGUI_IMPL_NAMESPACE
 
     void Dx11TextureStore::Close() noexcept
     {
+        decltype(this->samplers) closing = {};
         {
             std::lock_guard<std::mutex> lock(this->mutex);
             if (!this->open)
                 return;
             this->open = false;
             this->releases.swap(this->pending);
+            std::memcpy(closing, this->samplers, sizeof(closing));
+            std::memset(this->samplers, 0, sizeof(this->samplers));
         }
         if (this->singleThreaded)
             return;
         for (ID3D11ShaderResourceView *srv : this->releases)
             srv->Release();
         this->releases.clear();
+        for (ID3D11SamplerState *sampler : closing)
+        {
+            if (sampler != nullptr)
+                sampler->Release();
+        }
     }
 
     bool Dx11TextureStore::IsOpen() const noexcept
@@ -105,25 +114,74 @@ START_M_IMGUI_IMPL_NAMESPACE
         return this->open.load();
     }
 
-    Dx11Texture::Dx11Texture(std::shared_ptr<Dx11TextureStore> store, int width, int height, const unsigned char *rgba, UINT rowPitch) : store(std::move(store))
+    ID3D11SamplerState *Dx11TextureStore::Sampler(OVERLAY_TYPES_NAMESPACE::TextureFilter filter, int anisotropy)
     {
+        using OVERLAY_TYPES_NAMESPACE::TextureFilter;
+        int index = filter == TextureFilter::Point ? 0 : filter == TextureFilter::Linear ? 1 : 1 + anisotropy;
+        {
+            std::lock_guard<std::mutex> lock(this->mutex);
+            if (this->open && this->samplers[index] != nullptr)
+                return this->samplers[index];
+        }
+        D3D11_SAMPLER_DESC desc = {};
+        desc.Filter = filter == TextureFilter::Point ? D3D11_FILTER_MIN_MAG_MIP_POINT : filter == TextureFilter::Linear ? D3D11_FILTER_MIN_MAG_MIP_LINEAR : D3D11_FILTER_ANISOTROPIC;
+        desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+        desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+        desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        desc.MaxAnisotropy = filter == TextureFilter::Anisotropic ? (UINT)anisotropy : 1;
+        desc.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
+        desc.MinLOD = 0.0f;
+        desc.MaxLOD = D3D11_FLOAT32_MAX;
+        ID3D11SamplerState *sampler = nullptr;
+        HRESULT hr = this->device->CreateSamplerState(&desc, &sampler);
+        if (FAILED(hr))
+            _throwV_("Failed to create sampler state: {:#x}", (unsigned)hr);
+        ID3D11SamplerState *cached = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(this->mutex);
+            if (this->open)
+            {
+                if (this->samplers[index] == nullptr)
+                    this->samplers[index] = sampler;
+                cached = this->samplers[index];
+            }
+        }
+        if (cached != sampler)
+            sampler->Release();
+        if (cached == nullptr)
+            _throw_("no D3D11 device; the session of this renderer has closed");
+        return cached;
+    }
+
+    Dx11Texture::Dx11Texture(std::shared_ptr<Dx11TextureStore> store, int width, int height, const unsigned char *rgba, UINT rowPitch, bool mips) : store(std::move(store))
+    {
+        TEXTURE_MIPS_NAMESPACE::MipChain chain;
+        if (mips)
+            chain = TEXTURE_MIPS_NAMESPACE::BuildMipChain(rgba, width, height, rowPitch);
+        UINT levels = (UINT)chain.offsets.size() + 1;
+
         D3D11_TEXTURE2D_DESC desc = {};
         desc.Width = width;
         desc.Height = height;
-        desc.MipLevels = 1;
+        desc.MipLevels = levels;
         desc.ArraySize = 1;
         desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
         desc.SampleDesc.Count = 1;
         desc.Usage = D3D11_USAGE_DEFAULT;
         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 
-        D3D11_SUBRESOURCE_DATA subResource = {};
-        subResource.pSysMem = rgba;
-        subResource.SysMemPitch = rowPitch;
+        std::vector<D3D11_SUBRESOURCE_DATA> subResources(levels);
+        subResources[0].pSysMem = rgba;
+        subResources[0].SysMemPitch = rowPitch;
+        for (UINT k = 1; k < levels; k++)
+        {
+            subResources[k].pSysMem = chain.bytes.data() + chain.offsets[k - 1];
+            subResources[k].SysMemPitch = (UINT)chain.widths[k - 1] * 4;
+        }
 
         ID3D11Device *device = this->store->Device();
         ID3D11Texture2D *texture = nullptr;
-        HRESULT hr = device->CreateTexture2D(&desc, &subResource, &texture);
+        HRESULT hr = device->CreateTexture2D(&desc, subResources.data(), &texture);
         if (hr != S_OK)
             _throwV_("Failed to create texture: {}", hr);
 
@@ -137,6 +195,7 @@ START_M_IMGUI_IMPL_NAMESPACE
             _throwV_("Failed to create texture view: {}", hr);
         this->width = width;
         this->height = height;
+        this->mipLevels = (int)levels;
     }
 
     Dx11Texture::~Dx11Texture()
@@ -150,6 +209,7 @@ START_M_IMGUI_IMPL_NAMESPACE
         this->textureView = nullptr;
         this->width = 0;
         this->height = 0;
+        this->mipLevels = 1;
     }
 
     uintptr_t Dx11Texture::GetHandle() const
@@ -556,22 +616,76 @@ START_M_IMGUI_IMPL_NAMESPACE
             store->Close();
     }
 
-    Dx11Texture *Dx11Render::CreateTexture(const std::string &filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform)
+    Dx11Texture *Dx11Render::CreateTexture(const std::string &filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform, bool mips)
     {
+        TEXTURE_DATA_NAMESPACE::CheckTextureTransform(transform);
         std::shared_ptr<Dx11TextureStore> store = this->OpenTextures();
         py::gil_scoped_release release;
         TEXTURE_DATA_NAMESPACE::DecodedPixels image = TEXTURE_DATA_NAMESPACE::DecodeFile(filename);
         TEXTURE_DATA_NAMESPACE::ApplyTransform(image.data.get(), image.width, image.height, transform);
-        return new Dx11Texture(std::move(store), image.width, image.height, image.data.get(), (UINT)image.width * 4);
+        return new Dx11Texture(std::move(store), image.width, image.height, image.data.get(), (UINT)image.width * 4, mips);
     }
 
-    Dx11Texture *Dx11Render::CreateTextureFromPixels(int width, int height, py::buffer pixels, long long rowPitch)
+    Dx11Texture *Dx11Render::CreateTextureFromPixels(int width, int height, py::buffer pixels, long long rowPitch, bool mips)
     {
         TEXTURE_DATA_NAMESPACE::CheckTextureSize(width, height);
         TEXTURE_DATA_NAMESPACE::PixelView view(pixels, width, height, rowPitch);
         std::shared_ptr<Dx11TextureStore> store = this->OpenTextures();
         py::gil_scoped_release release;
-        return new Dx11Texture(std::move(store), width, height, view.Bytes(), view.Pitch());
+        return new Dx11Texture(std::move(store), width, height, view.Bytes(), view.Pitch(), mips);
+    }
+
+    // Binds the sampler stored in the command for the draws after it in this viewport.
+    static void SetSamplerCallback(const ImDrawList *, const ImDrawCmd *cmd)
+    {
+        auto *state = (ImGui_ImplDX11_RenderState *)ImGui::GetPlatformIO().Renderer_RenderState;
+        if (state == nullptr)
+            return;
+        ID3D11SamplerState *sampler = (ID3D11SamplerState *)cmd->UserCallbackData;
+        state->DeviceContext->PSSetSamplers(0, 1, &sampler);
+    }
+
+    std::shared_ptr<Dx11TextureStore> Dx11Render::SamplerScopeStore(ImDrawList *drawList)
+    {
+        ImGuiContext *context = ImGui::GetCurrentContext();
+        if (context == nullptr || !context->WithinFrameScope)
+            _throw_("no frame in progress; call it from the render callback, between NewFrame and Render");
+        std::shared_ptr<Dx11TextureStore> store;
+        {
+            std::lock_guard<std::mutex> lock(this->texturesMutex);
+            store = this->textures;
+        }
+        if (store == nullptr || !store->IsOpen())
+            _throw_("no D3D11 device; the session of this renderer is not open");
+        if (!store->OnRenderThread())
+            _throw_("called off the render thread; set texture samplers from the render callback");
+        if (drawList->_Data != ImGui::GetDrawListSharedData())
+            throw py::value_error("drawList belongs to another ImGui context");
+        return store;
+    }
+
+    void Dx11Render::SetTextureSampler(ImDrawList *drawList, OVERLAY_TYPES_NAMESPACE::TextureFilter filter, int anisotropy)
+    {
+        using OVERLAY_TYPES_NAMESPACE::TextureFilter;
+        std::shared_ptr<Dx11TextureStore> store = this->SamplerScopeStore(drawList);
+        switch (filter)
+        {
+        case TextureFilter::Point:
+        case TextureFilter::Linear:
+        case TextureFilter::Anisotropic:
+            break;
+        default:
+            throw py::value_error(std::format("unknown TextureFilter value: {}", (int)filter));
+        }
+        if (anisotropy < 1 || anisotropy > 16)
+            throw py::value_error(std::format("anisotropy must be in [1, 16], got {}", anisotropy));
+        drawList->AddCallback(&SetSamplerCallback, store->Sampler(filter, anisotropy));
+    }
+
+    void Dx11Render::ResetTextureSampler(ImDrawList *drawList)
+    {
+        this->SamplerScopeStore(drawList);
+        drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
     }
 
     typedef HRESULT(__stdcall *Present)(IDXGISwapChain *, UINT, UINT);
@@ -977,8 +1091,10 @@ START_M_IMGUI_IMPL_NAMESPACE
         py::class_<Dx11Render, RenderBase>(m, "_Dx11Render", py::dynamic_attr(), py::module_local())
             .def_static("InvalidateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); })
             .def_static("CreateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); return true; })
-            .def("CreateTexture", &Dx11Render::CreateTexture, py::arg("filename"), py::kw_only(), py::arg("transform") = py::none(), py::return_value_policy::take_ownership)
-            .def("CreateTextureFromPixels", &Dx11Render::CreateTextureFromPixels, py::arg("width"), py::arg("height"), py::arg("pixels"), py::kw_only(), py::arg("rowPitch") = 0, py::return_value_policy::take_ownership);
+            .def("CreateTexture", &Dx11Render::CreateTexture, py::arg("filename"), py::kw_only(), py::arg("transform") = py::none(), py::arg("mips") = false, py::return_value_policy::take_ownership)
+            .def("CreateTextureFromPixels", &Dx11Render::CreateTextureFromPixels, py::arg("width"), py::arg("height"), py::arg("pixels"), py::kw_only(), py::arg("rowPitch") = 0, py::arg("mips") = false, py::return_value_policy::take_ownership)
+            .def("SetTextureSampler", &Dx11Render::SetTextureSampler, py::arg("drawList").none(false), py::arg("filter"), py::arg("anisotropy") = 16)
+            .def("ResetTextureSampler", &Dx11Render::ResetTextureSampler, py::arg("drawList").none(false));
 
         py::class_<Dx11Window, Dx11Render> dx11Window(m, "Dx11Window", py::dynamic_attr(), py::module_local());
         dx11Window.def(py::init<std::optional<py::function>>(), py::arg("renderCallback") = py::none())

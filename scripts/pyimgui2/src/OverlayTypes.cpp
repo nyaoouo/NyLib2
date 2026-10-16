@@ -21,6 +21,11 @@ START_OVERLAY_TYPES_NAMESPACE
 
         py::enum_<TextureTransform>(m, "TextureTransform")
             .value("GrayscaleBT709", TextureTransform::GrayscaleBT709);
+
+        py::enum_<TextureFilter>(m, "TextureFilter")
+            .value("Point", TextureFilter::Point)
+            .value("Linear", TextureFilter::Linear)
+            .value("Anisotropic", TextureFilter::Anisotropic);
     }
 }
 END_OVERLAY_TYPES_NAMESPACE

@@ -17,6 +17,7 @@ START_TEXTURE_DECODE_NAMESPACE
     // Decodes an image file on any thread; holds the GIL only to read the arguments and create the result.
     static DecodedImage DecodeImageImpl(const std::string &filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform)
     {
+        TEXTURE_DATA_NAMESPACE::CheckTextureTransform(transform);
         TEXTURE_DATA_NAMESPACE::DecodedPixels image;
         {
             py::gil_scoped_release release;

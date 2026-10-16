@@ -93,8 +93,16 @@ START_TEXTURE_DATA_NAMESPACE
         return image;
     }
 
+    // Raises ValueError if transform holds a TextureTransform value pybind11 did not reject; nullopt is valid.
+    // Call this with the GIL held, before releasing it to decode/transform off-thread.
+    inline void CheckTextureTransform(std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform)
+    {
+        if (transform.has_value() && *transform != OVERLAY_TYPES_NAMESPACE::TextureTransform::GrayscaleBT709)
+            throw py::value_error(std::format("unknown TextureTransform value: {}", (int)*transform));
+    }
+
     // Converts tight RGBA8 rows in place: GrayscaleBT709 sets R = G = B = BT.709 luma, alpha unchanged; nullopt does nothing.
-    // Needs no GIL; never pass a caller's Python buffer.
+    // Needs no GIL; never pass a caller's Python buffer. Call CheckTextureTransform first; this does not validate.
     inline void ApplyTransform(unsigned char *rgba, int width, int height, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform)
     {
         if (!transform.has_value() || *transform != OVERLAY_TYPES_NAMESPACE::TextureTransform::GrayscaleBT709)
