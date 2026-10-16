@@ -397,6 +397,8 @@ START_M_IMGUI_IMPL_NAMESPACE
 
     Dx11Texture *Dx11Render::CreateTexture(const char *filename)
     {
+        if (this->pd3dDevice == nullptr)
+            _throw_("CreateTexture: no D3D11 device; call it while Serve() runs (e.g. from CallBeforeFrameOnce) or after the inbound hook drew a frame");
         return new Dx11Texture(this->pd3dDevice, filename);
     }
 

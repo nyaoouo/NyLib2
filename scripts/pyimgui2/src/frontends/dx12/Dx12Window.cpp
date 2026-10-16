@@ -196,6 +196,8 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 
     Dx12TextureHelper *Dx12Render::CreateTexture(const char *filename)
     {
+        if (this->pd3dDevice == nullptr || this->pd3dSrvDescHeap == nullptr)
+            _throw_("CreateTexture: no D3D12 device; call it while Serve() runs (e.g. from CallBeforeFrameOnce) or after the inbound hook drew a frame");
         UINT handleIncrement = this->pd3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         int descriptorIndex = 1;
         D3D12_CPU_DESCRIPTOR_HANDLE srvCpuHandle = this->pd3dSrvDescHeap->GetCPUDescriptorHandleForHeapStart();
