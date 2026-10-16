@@ -4,6 +4,7 @@
 #include "./ImguiCtx.h"
 #include "./OverlayQueries.h"
 #include "./OverlayTypes.h"
+#include "./TextureDecode.h"
 #include "./UnhandledException.h"
 #include "./Win32Font.h"
 
@@ -123,6 +124,7 @@ PYBIND11_MODULE(pyimgui, m) {
     // the user must call `setup_unhandle_exception_filter(...)` explicitly.
     G_UTILS_NAMESPACE::pybind_setup_UnhandledException(m);
     OVERLAY_TYPES_NAMESPACE::pybind_setup_OverlayTypes(m);
+    TEXTURE_DECODE_NAMESPACE::pybind_setup_TextureDecode(m);
     OVERLAY_QUERIES_NAMESPACE::pybind_setup_OverlayQueries(m);
     G_UTILS_NAMESPACE::pybind_setup_gUtils(m.def_submodule("gUtils"));
     auto imgui_m = m.def_submodule("imgui");

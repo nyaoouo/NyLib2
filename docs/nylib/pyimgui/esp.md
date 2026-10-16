@@ -54,6 +54,7 @@ if bounds is not None:
 | `add_box_3d` | the 12 edges of a world-space box |
 | `add_circle_3d` | a world-space circle |
 | `add_bones` | a skeleton from a joint lookup and `(parent, child)` pairs |
+| `add_image_triangle` | one textured triangle, e.g. a piece of a clipped image polygon |
 
 `add_lines_3d` takes an iterable of `(a, b)` pairs or a numpy `(N, 2, 3)`
 array; an array takes a vectorized fast path.

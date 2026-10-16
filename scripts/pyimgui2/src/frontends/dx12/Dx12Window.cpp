@@ -5,8 +5,10 @@
 
 #include <mutex>
 
+#define STBI_WINDOWS_UTF8
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+#include "../../TextureData.h"
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -14,6 +16,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 {
     // Depth of our own render logic, resize handling and submits on this thread; hooks reached from inside it pass through.
     static thread_local int logicDepth = 0;
+    static DWORD const UPLOAD_TIMEOUT_MS = 5000;
 
     namespace
     {
@@ -25,11 +28,298 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         };
     }
 
-    Dx12TextureHelper::Dx12TextureHelper(ID3D12Device *d3dDevice, D3D12_CPU_DESCRIPTOR_HANDLE srvCpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE srvGpuHandle, const char *filename)
-        : d3dDevice(d3dDevice), srvCpuHandle(srvCpuHandle), srvGpuHandle(srvGpuHandle)
+    // The queue, allocator, list and fence that a store's uploads reuse; released with the last reference unless leaked.
+    struct Dx12TextureStore::UploadContext
     {
-        if (filename != nullptr)
-            this->LoadTextureFromFile(filename);
+        ID3D12CommandQueue *queue = nullptr;
+        ID3D12CommandAllocator *allocator = nullptr;
+        ID3D12GraphicsCommandList *list = nullptr;
+        ID3D12Fence *fence = nullptr;
+        HANDLE event = nullptr;
+        UINT64 fenceValue = 0; // last signaled; guarded by uploadMutex
+        std::atomic<bool> leaked{false};
+
+        ~UploadContext()
+        {
+            if (this->leaked)
+                return;
+            for (IUnknown *object : std::initializer_list<IUnknown *>{this->list, this->allocator, this->queue, this->fence})
+                if (object != nullptr)
+                    object->Release();
+            if (this->event != nullptr)
+                CloseHandle(this->event);
+        }
+    };
+
+    Dx12TextureStore::Dx12TextureStore(ID3D12Device *device, ID3D12DescriptorHeap *heap, DWORD renderThread) : device(device), heap(heap), renderThread(renderThread)
+    {
+        this->device->AddRef();
+        this->heap->AddRef();
+        this->increment = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        this->cpuStart = heap->GetCPUDescriptorHandleForHeapStart();
+        this->gpuStart = heap->GetGPUDescriptorHandleForHeapStart().ptr;
+        // Every list holds at most one entry per texture slot, so no push_back below reallocates.
+        this->freeSlots.reserve(HEAP_SIZE);
+        this->pending.reserve(HEAP_SIZE);
+        this->retired.reserve(HEAP_SIZE);
+        this->releases.reserve(HEAP_SIZE);
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC nullDesc = {};
+        nullDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        nullDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        nullDesc.Texture2D.MipLevels = 1;
+        nullDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        device->CreateShaderResourceView(nullptr, &nullDesc, this->CpuHandle(NULL_SLOT));
+    }
+
+    Dx12TextureStore::~Dx12TextureStore()
+    {
+        this->Close(false);
+        if (!this->leaky)
+        {
+            this->heap->Release();
+            this->device->Release();
+        }
+    }
+
+    UINT Dx12TextureStore::Allocate()
+    {
+        std::lock_guard<std::mutex> lock(this->mutex);
+        if (!this->open)
+            _throw_("no D3D12 device; the session of this texture has ended");
+        if (!this->freeSlots.empty())
+        {
+            UINT slot = this->freeSlots.back();
+            this->freeSlots.pop_back();
+            return slot;
+        }
+        if (this->nextSlot >= HEAP_SIZE)
+            _throwV_("all {} texture slots are in use or still retiring", HEAP_SIZE - NULL_SLOT - 1);
+        return this->nextSlot++;
+    }
+
+    void Dx12TextureStore::Unallocate(UINT slot) noexcept
+    {
+        if (slot <= NULL_SLOT || slot >= HEAP_SIZE)
+            return;
+        std::lock_guard<std::mutex> lock(this->mutex);
+        this->freeSlots.push_back(slot);
+    }
+
+    void Dx12TextureStore::Retire(ID3D12Resource *resource, UINT slot) noexcept
+    {
+        if (slot <= NULL_SLOT || slot >= HEAP_SIZE)
+            slot = 0;
+        if (resource == nullptr && slot == 0)
+            return;
+        {
+            std::lock_guard<std::mutex> lock(this->mutex);
+            if (this->open)
+            {
+                this->pending.push_back({resource, slot, 0});
+                return;
+            }
+            if (this->leaky)
+                return;
+            if (slot != 0)
+                this->freeSlots.push_back(slot);
+        }
+        if (resource != nullptr)
+            resource->Release();
+    }
+
+    void Dx12TextureStore::Collect(UINT64 submitted, UINT64 completed) noexcept
+    {
+        {
+            std::lock_guard<std::mutex> lock(this->mutex);
+            if (!this->open)
+                return;
+            for (Entry &entry : this->pending)
+            {
+                entry.value = submitted;
+                this->retired.push_back(entry);
+            }
+            this->pending.clear();
+            size_t kept = 0;
+            for (Entry &entry : this->retired)
+            {
+                if (entry.value > completed)
+                {
+                    this->retired[kept++] = entry;
+                    continue;
+                }
+                if (entry.resource != nullptr)
+                    this->releases.push_back(entry.resource);
+                if (entry.slot != 0)
+                    this->freeSlots.push_back(entry.slot);
+            }
+            this->retired.resize(kept);
+        }
+        for (ID3D12Resource *resource : this->releases)
+            resource->Release();
+        this->releases.clear();
+    }
+
+    void Dx12TextureStore::Close(bool gpuIdle) noexcept
+    {
+        std::shared_ptr<UploadContext> context;
+        {
+            std::lock_guard<std::mutex> lock(this->mutex);
+            if (!this->open)
+                return;
+            this->open = false;
+            this->leaky = !gpuIdle;
+            context = std::move(this->uploadContext);
+            if (context != nullptr && !gpuIdle)
+                context->leaked = true;
+            if (gpuIdle)
+                for (std::vector<Entry> *list : {&this->pending, &this->retired})
+                    for (Entry &entry : *list)
+                        if (entry.resource != nullptr)
+                            this->releases.push_back(entry.resource);
+            this->pending.clear();
+            this->retired.clear();
+        }
+        if (!gpuIdle)
+            return;
+        for (ID3D12Resource *resource : this->releases)
+            resource->Release();
+        this->releases.clear();
+    }
+
+    bool Dx12TextureStore::IsOpen() const noexcept
+    {
+        return this->open.load();
+    }
+
+    bool Dx12TextureStore::OnRenderThread() const noexcept
+    {
+        return this->renderThread != 0 ? GetCurrentThreadId() == this->renderThread : logicDepth > 0;
+    }
+
+    ID3D12Device *Dx12TextureStore::Device() const
+    {
+        return this->device;
+    }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE Dx12TextureStore::CpuHandle(UINT slot) const
+    {
+        return {this->cpuStart.ptr + (SIZE_T)slot * this->increment};
+    }
+
+    UINT64 Dx12TextureStore::GpuHandle(UINT slot) const
+    {
+        return this->gpuStart + (UINT64)slot * this->increment;
+    }
+
+    std::shared_ptr<Dx12TextureStore::UploadContext> Dx12TextureStore::AcquireUploadContext()
+    {
+        {
+            std::lock_guard<std::mutex> lock(this->mutex);
+            if (!this->open)
+                _throw_("no D3D12 device; the session of this texture has ended");
+            if (this->uploadContext != nullptr)
+                return this->uploadContext;
+        }
+        auto context = std::make_shared<UploadContext>();
+        D3D12_COMMAND_QUEUE_DESC queueDesc = {};
+        queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+        HRESULT hr = this->device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&context->queue));
+        if (hr != S_OK)
+            _throwV_("Failed to create command queue with error code {}", hr);
+        hr = this->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&context->allocator));
+        if (hr != S_OK)
+            _throwV_("Failed to create command allocator with error code {}", hr);
+        hr = this->device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, context->allocator, nullptr, IID_PPV_ARGS(&context->list));
+        if (hr != S_OK)
+            _throwV_("Failed to create command list with error code {}", hr);
+        hr = context->list->Close();
+        if (hr != S_OK)
+            _throwV_("Failed to close command list with error code {}", hr);
+        hr = this->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&context->fence));
+        if (hr != S_OK)
+            _throwV_("Failed to create fence with error code {}", hr);
+        context->event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        if (context->event == nullptr)
+            _throw_("Failed to create event");
+
+        std::lock_guard<std::mutex> lock(this->mutex);
+        if (!this->open)
+            _throw_("no D3D12 device; the session of this texture has ended");
+        if (this->uploadContext == nullptr)
+            this->uploadContext = context;
+        return this->uploadContext;
+    }
+
+    void Dx12TextureStore::ForgetUploadContext(const std::shared_ptr<UploadContext> &context) noexcept
+    {
+        std::shared_ptr<UploadContext> forgotten;
+        std::lock_guard<std::mutex> lock(this->mutex);
+        if (this->uploadContext == context)
+            forgotten = std::move(this->uploadContext);
+    }
+
+    void Dx12TextureStore::Upload(const D3D12_TEXTURE_COPY_LOCATION &dst, const D3D12_TEXTURE_COPY_LOCATION &src, const D3D12_RESOURCE_BARRIER &barrier, bool &inFlight)
+    {
+        std::shared_ptr<UploadContext> context = this->AcquireUploadContext();
+        try
+        {
+            std::lock_guard<std::mutex> lock(this->uploadMutex);
+            if (!this->open)
+                _throw_("no D3D12 device; the session of this texture has ended");
+            if (context->leaked)
+                _throwV_("Texture upload: another upload on this context timed out after {} ms or failed; retry the call", UPLOAD_TIMEOUT_MS);
+            HRESULT hr = context->allocator->Reset();
+            if (hr != S_OK)
+                _throwV_("Failed to reset command allocator with error code {}", hr);
+            hr = context->list->Reset(context->allocator, nullptr);
+            if (hr != S_OK)
+                _throwV_("Failed to reset command list with error code {}", hr);
+            context->list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+            context->list->ResourceBarrier(1, &barrier);
+            hr = context->list->Close();
+            if (hr != S_OK)
+                _throwV_("Failed to close command list with error code {}", hr);
+            {
+                LogicScope ownSubmit;
+                context->queue->ExecuteCommandLists(1, (ID3D12CommandList *const *)&context->list);
+            }
+            inFlight = true;
+            try
+            {
+                UINT64 value = ++context->fenceValue;
+                hr = context->queue->Signal(context->fence, value);
+                if (hr != S_OK)
+                    _throwV_("Failed to signal fence with error code {}", hr);
+                hr = context->fence->SetEventOnCompletion(value, context->event);
+                if (hr != S_OK)
+                    _throwV_("Failed to set the upload fence event with error code {}", hr);
+                ULONGLONG deadline = GetTickCount64() + UPLOAD_TIMEOUT_MS;
+                while (context->fence->GetCompletedValue() < value)
+                {
+                    ULONGLONG now = GetTickCount64();
+                    if (now >= deadline)
+                        _throwV_("Texture upload timed out after {} ms; its upload objects are leaked", UPLOAD_TIMEOUT_MS);
+                    if (WaitForSingleObject(context->event, (DWORD)(deadline - now)) == WAIT_FAILED)
+                        _throwV_("Failed to wait for the upload fence with error code {}", GetLastError());
+                }
+            }
+            catch (...)
+            {
+                context->leaked = true; // still under uploadMutex: no later upload may reset the busy allocator
+                throw;
+            }
+            inFlight = false;
+        }
+        catch (...)
+        {
+            this->ForgetUploadContext(context);
+            throw;
+        }
+    }
+
+    Dx12TextureHelper::Dx12TextureHelper(std::shared_ptr<Dx12TextureStore> store) : store(std::move(store))
+    {
     }
 
     Dx12TextureHelper::~Dx12TextureHelper()
@@ -39,18 +329,18 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 
     void Dx12TextureHelper::FreeTexture()
     {
-        if (this->srv != nullptr)
-        {
-            this->srv->Release();
-            this->srv = nullptr;
-        }
+        this->store->Retire(this->srv, this->slot);
+        this->srv = nullptr;
+        this->slot = 0;
         this->width = 0;
         this->height = 0;
     }
 
     uintptr_t Dx12TextureHelper::GetHandle() const
     {
-        return (uintptr_t)this->srvGpuHandle.ptr;
+        if (!this->store->IsOpen())
+            _throw_("handle: session ended; the D3D12 session of this texture has closed");
+        return (uintptr_t)this->store->GpuHandle(this->slot != 0 ? this->slot : Dx12TextureStore::NULL_SLOT);
     }
 
     ImVec2 Dx12TextureHelper::GetSize() const
@@ -58,151 +348,223 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         return ImVec2((float)this->width, (float)this->height);
     }
 
-    void Dx12TextureHelper::LoadTextureFromFile(const char *filename)
+    namespace
     {
-        int imageWidth = 0;
-        int imageHeight = 0;
-        unsigned char *imageData = stbi_load(filename, &imageWidth, &imageHeight, nullptr, 4);
-        if (imageData == nullptr)
-            _throwV_("Failed to load image file {}", filename);
-
-        D3D12_HEAP_PROPERTIES props = {};
-        props.Type = D3D12_HEAP_TYPE_DEFAULT;
-
-        D3D12_RESOURCE_DESC desc = {};
-        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        desc.Width = imageWidth;
-        desc.Height = imageHeight;
-        desc.DepthOrArraySize = 1;
-        desc.MipLevels = 1;
-        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        desc.SampleDesc.Count = 1;
-        desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-
-        ID3D12Resource *texture = nullptr;
-        HRESULT hr = this->d3dDevice->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&texture));
-        if (hr != S_OK)
-            _throwV_("Failed to create texture resource with error code {}", hr);
-
-        UINT uploadPitch = (imageWidth * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u);
-        UINT uploadSize = imageHeight * uploadPitch;
-        D3D12_RESOURCE_DESC uploadDesc = {};
-        uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        uploadDesc.Width = uploadSize;
-        uploadDesc.Height = 1;
-        uploadDesc.DepthOrArraySize = 1;
-        uploadDesc.MipLevels = 1;
-        uploadDesc.Format = DXGI_FORMAT_UNKNOWN;
-        uploadDesc.SampleDesc.Count = 1;
-        uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-
-        D3D12_HEAP_PROPERTIES uploadProps = {};
-        uploadProps.Type = D3D12_HEAP_TYPE_UPLOAD;
-
-        ID3D12Resource *uploadBuffer = nullptr;
-        hr = this->d3dDevice->CreateCommittedResource(&uploadProps, D3D12_HEAP_FLAG_NONE, &uploadDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&uploadBuffer));
-        if (hr != S_OK)
-            _throwV_("Failed to create upload buffer with error code {}", hr);
-
-        void *mapped = nullptr;
-        D3D12_RANGE range = {0, uploadSize};
-        hr = uploadBuffer->Map(0, &range, &mapped);
-        if (hr != S_OK)
-            _throwV_("Failed to map upload buffer with error code {}", hr);
-        for (int y = 0; y < imageHeight; y++)
-            memcpy((void *)((uintptr_t)mapped + y * uploadPitch), imageData + y * imageWidth * 4, imageWidth * 4);
-        uploadBuffer->Unmap(0, &range);
-
-        D3D12_TEXTURE_COPY_LOCATION srcLocation = {};
-        srcLocation.pResource = uploadBuffer;
-        srcLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        srcLocation.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        srcLocation.PlacedFootprint.Footprint.Width = imageWidth;
-        srcLocation.PlacedFootprint.Footprint.Height = imageHeight;
-        srcLocation.PlacedFootprint.Footprint.Depth = 1;
-        srcLocation.PlacedFootprint.Footprint.RowPitch = uploadPitch;
-
-        D3D12_TEXTURE_COPY_LOCATION dstLocation = {};
-        dstLocation.pResource = texture;
-        dstLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-
-        D3D12_RESOURCE_BARRIER barrier = {};
-        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource = texture;
-        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-
-        ID3D12Fence *fence = nullptr;
-        hr = this->d3dDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
-        if (hr != S_OK)
-            _throwV_("Failed to create fence with error code {}", hr);
-        HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-        if (event == nullptr)
-            _throw_("Failed to create event");
-
-        D3D12_COMMAND_QUEUE_DESC queueDesc = {};
-        queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-        ID3D12CommandQueue *cmdQueue = nullptr;
-        hr = this->d3dDevice->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&cmdQueue));
-        if (hr != S_OK)
-            _throwV_("Failed to create command queue with error code {}", hr);
-
-        ID3D12CommandAllocator *cmdAlloc = nullptr;
-        hr = this->d3dDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&cmdAlloc));
-        if (hr != S_OK)
-            _throwV_("Failed to create command allocator with error code {}", hr);
-
-        ID3D12GraphicsCommandList *cmdList = nullptr;
-        hr = this->d3dDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, cmdAlloc, nullptr, IID_PPV_ARGS(&cmdList));
-        if (hr != S_OK)
-            _throwV_("Failed to create command list with error code {}", hr);
-
-        cmdList->CopyTextureRegion(&dstLocation, 0, 0, 0, &srcLocation, nullptr);
-        cmdList->ResourceBarrier(1, &barrier);
-        hr = cmdList->Close();
-        if (hr != S_OK)
-            _throwV_("Failed to close command list with error code {}", hr);
+        // The resources of one texture upload; released on scope exit unless leaked.
+        struct UploadObjects
         {
-            LogicScope ownSubmit;
-            cmdQueue->ExecuteCommandLists(1, (ID3D12CommandList *const *)&cmdList);
+            ID3D12Resource *texture = nullptr;
+            ID3D12Resource *uploadBuffer = nullptr;
+            bool leaked = false;
+
+            ~UploadObjects()
+            {
+                if (this->leaked)
+                    return;
+                for (IUnknown *object : std::initializer_list<IUnknown *>{this->uploadBuffer, this->texture})
+                    if (object != nullptr)
+                        object->Release();
+            }
+        };
+
+        // Copies RGBA8 rows (imageWidth*4 bytes every srcPitch) into upload.texture on the store's upload context and waits for the copy.
+        // After a submit that did not complete, leaks both resources.
+        void UploadTexture(Dx12TextureStore &store, UploadObjects &upload, const unsigned char *imageData, int imageWidth, int imageHeight, UINT srcPitch)
+        {
+            ID3D12Device *device = store.Device();
+            D3D12_HEAP_PROPERTIES props = {};
+            props.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+            D3D12_RESOURCE_DESC desc = {};
+            desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            desc.Width = imageWidth;
+            desc.Height = imageHeight;
+            desc.DepthOrArraySize = 1;
+            desc.MipLevels = 1;
+            desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            desc.SampleDesc.Count = 1;
+            desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+
+            HRESULT hr = device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&upload.texture));
+            if (hr != S_OK)
+                _throwV_("Failed to create texture resource with error code {}", hr);
+
+            UINT uploadPitch = (imageWidth * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u);
+            UINT uploadSize = imageHeight * uploadPitch;
+            D3D12_RESOURCE_DESC uploadDesc = {};
+            uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            uploadDesc.Width = uploadSize;
+            uploadDesc.Height = 1;
+            uploadDesc.DepthOrArraySize = 1;
+            uploadDesc.MipLevels = 1;
+            uploadDesc.Format = DXGI_FORMAT_UNKNOWN;
+            uploadDesc.SampleDesc.Count = 1;
+            uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+            D3D12_HEAP_PROPERTIES uploadProps = {};
+            uploadProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+            hr = device->CreateCommittedResource(&uploadProps, D3D12_HEAP_FLAG_NONE, &uploadDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload.uploadBuffer));
+            if (hr != S_OK)
+                _throwV_("Failed to create upload buffer with error code {}", hr);
+
+            void *mapped = nullptr;
+            D3D12_RANGE range = {0, uploadSize};
+            hr = upload.uploadBuffer->Map(0, &range, &mapped);
+            if (hr != S_OK)
+                _throwV_("Failed to map upload buffer with error code {}", hr);
+            for (int y = 0; y < imageHeight; y++)
+                memcpy((void *)((uintptr_t)mapped + (size_t)y * uploadPitch), imageData + (size_t)y * srcPitch, (size_t)imageWidth * 4);
+            upload.uploadBuffer->Unmap(0, &range);
+
+            D3D12_TEXTURE_COPY_LOCATION srcLocation = {};
+            srcLocation.pResource = upload.uploadBuffer;
+            srcLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            srcLocation.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            srcLocation.PlacedFootprint.Footprint.Width = imageWidth;
+            srcLocation.PlacedFootprint.Footprint.Height = imageHeight;
+            srcLocation.PlacedFootprint.Footprint.Depth = 1;
+            srcLocation.PlacedFootprint.Footprint.RowPitch = uploadPitch;
+
+            D3D12_TEXTURE_COPY_LOCATION dstLocation = {};
+            dstLocation.pResource = upload.texture;
+            dstLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+
+            D3D12_RESOURCE_BARRIER barrier = {};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition.pResource = upload.texture;
+            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+            barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+            store.Upload(dstLocation, srcLocation, barrier, upload.leaked);
         }
-        hr = cmdQueue->Signal(fence, 1);
-        if (hr != S_OK)
-            _throwV_("Failed to signal fence with error code {}", hr);
-        fence->SetEventOnCompletion(1, event);
-        WaitForSingleObject(event, INFINITE);
 
-        cmdList->Release();
-        cmdAlloc->Release();
-        cmdQueue->Release();
-        CloseHandle(event);
-        fence->Release();
-        uploadBuffer->Release();
+        struct UploadedTexture
+        {
+            ID3D12Resource *resource = nullptr;
+            UINT slot = 0;
+            int width = 0;
+            int height = 0;
+        };
 
-        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-        srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        srvDesc.Texture2D.MipLevels = 1;
-        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        this->d3dDevice->CreateShaderResourceView(texture, &srvDesc, this->srvCpuHandle);
+        // Uploads RGBA8 rows into a new resource and slot of the store and writes its SRV; needs no GIL.
+        UploadedTexture UploadToSlot(Dx12TextureStore &store, const unsigned char *rgba, int width, int height, UINT pitch)
+        {
+            UINT slot = store.Allocate();
+            UploadObjects upload;
+            try
+            {
+                UploadTexture(store, upload, rgba, width, height, pitch);
+            }
+            catch (...)
+            {
+                store.Unallocate(slot);
+                throw;
+            }
 
-        this->FreeTexture();
-        this->srv = texture;
-        this->width = imageWidth;
-        this->height = imageHeight;
-        stbi_image_free(imageData);
+            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+            srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            srvDesc.Texture2D.MipLevels = 1;
+            srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            store.Device()->CreateShaderResourceView(upload.texture, &srvDesc, store.CpuHandle(slot));
+            return {std::exchange(upload.texture, nullptr), slot, width, height};
+        }
     }
 
-    Dx12TextureHelper *Dx12Render::CreateTexture(const char *filename)
+    void Dx12TextureHelper::LoadTextureFromFile(const std::string &filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform)
     {
-        UINT handleIncrement = this->pd3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        int descriptorIndex = 1;
-        D3D12_CPU_DESCRIPTOR_HANDLE srvCpuHandle = this->pd3dSrvDescHeap->GetCPUDescriptorHandleForHeapStart();
-        srvCpuHandle.ptr += handleIncrement * descriptorIndex;
-        D3D12_GPU_DESCRIPTOR_HANDLE srvGpuHandle = this->pd3dSrvDescHeap->GetGPUDescriptorHandleForHeapStart();
-        srvGpuHandle.ptr += handleIncrement * descriptorIndex;
-        return new Dx12TextureHelper(this->pd3dDevice, srvCpuHandle, srvGpuHandle, filename);
+        if (!this->store->IsOpen())
+            _throw_("no D3D12 device; the session of this texture has ended");
+        if (!this->store->OnRenderThread())
+            _throw_("LoadTextureFromFile: called off the render thread; load textures from the render callback or CallBeforeFrameOnce");
+        TEXTURE_DATA_NAMESPACE::CheckTextureTransform(transform);
+        UploadedTexture uploaded;
+        {
+            py::gil_scoped_release release;
+            TEXTURE_DATA_NAMESPACE::DecodedPixels image = TEXTURE_DATA_NAMESPACE::DecodeFile(filename);
+            TEXTURE_DATA_NAMESPACE::ApplyTransform(image.data.get(), image.width, image.height, transform);
+            uploaded = UploadToSlot(*this->store, image.data.get(), image.width, image.height, (UINT)image.width * 4);
+        }
+        this->Assign(uploaded.resource, uploaded.slot, uploaded.width, uploaded.height);
+    }
+
+    void Dx12TextureHelper::Assign(ID3D12Resource *resource, UINT slot, int width, int height)
+    {
+        this->store->Retire(this->srv, this->slot);
+        this->srv = resource;
+        this->slot = slot;
+        this->width = width;
+        this->height = height;
+    }
+
+    Dx12TextureHelper *Dx12Render::CreateTexture(const char *filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform)
+    {
+        TEXTURE_DATA_NAMESPACE::CheckTextureTransform(transform);
+        std::unique_ptr<Dx12TextureHelper> helper(new Dx12TextureHelper(this->OpenTextures()));
+        if (filename != nullptr)
+            helper->LoadTextureFromFile(filename, transform);
+        return helper.release();
+    }
+
+    Dx12TextureHelper *Dx12Render::CreateTextureFromPixels(int width, int height, py::buffer pixels, long long rowPitch)
+    {
+        TEXTURE_DATA_NAMESPACE::CheckTextureSize(width, height);
+        TEXTURE_DATA_NAMESPACE::PixelView view(pixels, width, height, rowPitch);
+        std::unique_ptr<Dx12TextureHelper> helper(new Dx12TextureHelper(this->OpenTextures()));
+        UploadedTexture uploaded;
+        {
+            py::gil_scoped_release release;
+            uploaded = UploadToSlot(*helper->store, view.Bytes(), width, height, view.Pitch());
+        }
+        helper->Assign(uploaded.resource, uploaded.slot, uploaded.width, uploaded.height);
+        return helper.release();
+    }
+
+    std::shared_ptr<Dx12TextureStore> Dx12Render::OpenTextures()
+    {
+        std::shared_ptr<Dx12TextureStore> store;
+        {
+            std::lock_guard<std::mutex> lock(this->texturesMutex);
+            store = this->textures;
+        }
+        if (store == nullptr || !store->IsOpen())
+            _throw_("no D3D12 device; call it while Serve() runs (e.g. from CallBeforeFrameOnce) or after the inbound hook drew a frame");
+        if (!store->OnRenderThread())
+            _throw_("called off the render thread; create textures from the render callback or CallBeforeFrameOnce");
+        return store;
+    }
+
+    void Dx12Render::InstallTextures(DWORD renderThread)
+    {
+        this->CloseTextures(false);
+        auto store = std::make_shared<Dx12TextureStore>(this->pd3dDevice, this->pd3dSrvDescHeap, renderThread);
+        std::lock_guard<std::mutex> lock(this->texturesMutex);
+        this->textures = std::move(store);
+    }
+
+    void Dx12Render::CollectTextures(UINT64 submitted, UINT64 completed) noexcept
+    {
+        std::shared_ptr<Dx12TextureStore> store;
+        {
+            std::lock_guard<std::mutex> lock(this->texturesMutex);
+            store = this->textures;
+        }
+        if (store != nullptr)
+            store->Collect(submitted, completed);
+    }
+
+    void Dx12Render::CloseTextures(bool gpuIdle) noexcept
+    {
+        std::shared_ptr<Dx12TextureStore> store;
+        {
+            std::lock_guard<std::mutex> lock(this->texturesMutex);
+            store = std::move(this->textures);
+            this->textures = nullptr;
+        }
+        if (store != nullptr)
+            store->Close(gpuIdle);
     }
 
     Dx12Window::Dx12Window(std::optional<py::function> renderCallback) : Dx12Render(renderCallback)
@@ -289,10 +651,11 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 
         D3D12_DESCRIPTOR_HEAP_DESC srvDesc = {};
         srvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        srvDesc.NumDescriptors = 2;
+        srvDesc.NumDescriptors = Dx12TextureStore::HEAP_SIZE;
         srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if ((hr = this->pd3dDevice->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&this->pd3dSrvDescHeap))) != S_OK)
             _throwV_("Failed to create SRV descriptor heap: {}", hr);
+        this->InstallTextures(GetCurrentThreadId());
 
         D3D12_COMMAND_QUEUE_DESC queueDesc = {};
         queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -333,6 +696,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 
     void Dx12Window::CleanupDeviceD3D()
     {
+        this->CloseTextures(true);
         this->CleanupRenderTarget();
         if (this->pSwapChain)
         {
@@ -455,111 +819,122 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             throw;
         }
 
-        ::ShowWindow(this->hwnd, SW_SHOWDEFAULT);
-        ::UpdateWindow(this->hwnd);
-        ::SetWindowTextA(this->hwnd, this->title.c_str());
-
-        this->ctx = ImGui::CreateContext();
-        ImGuiIO &io = ImGui::GetIO();
-        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-        io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
-        io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-        io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
-        ImGui::StyleColorsLight();
-
-        if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+        try
         {
-            ImGuiStyle &style = ImGui::GetStyle();
-            style.WindowRounding = 0.0f;
-            style.Colors[ImGuiCol_WindowBg].w = 1.0f;
-        }
+            ::ShowWindow(this->hwnd, SW_SHOWDEFAULT);
+            ::UpdateWindow(this->hwnd);
+            ::SetWindowTextA(this->hwnd, this->title.c_str());
 
-        ImGui_ImplWin32_Init(hwnd);
-        ImGui_ImplDX12_Init(this->pd3dDevice, NUM_FRAMES_IN_FLIGHT, DXGI_FORMAT_R8G8B8A8_UNORM, this->pd3dSrvDescHeap, this->pd3dSrvDescHeap->GetCPUDescriptorHandleForHeapStart(), this->pd3dSrvDescHeap->GetGPUDescriptorHandleForHeapStart());
-
-        do
-        {
-            MSG msg;
-            bool done = false;
-            while (::PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE))
-            {
-                ::TranslateMessage(&msg);
-                ::DispatchMessage(&msg);
-                if (msg.message == WM_QUIT)
-                    done = true;
-            }
-            if (done)
-                break;
-
-            if (this->swapChainOccluded && this->pSwapChain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED)
-            {
-                ::Sleep(10);
-                continue;
-            }
-            this->swapChainOccluded = false;
-
-            {
-                py::gil_scoped_acquire gil;
-                py::object self = py::cast(this, py::return_value_policy::reference);
-                this->ProcessCallBeforeFrameOnce(self);
-            }
-
-            if (this->invalidatePending.exchange(false))
-            {
-                this->WaitForLastSubmittedFrame();
-                ImGui_ImplDX12_InvalidateDeviceObjects();
-            }
-            ImGui_ImplDX12_NewFrame();
-            ImGui_ImplWin32_NewFrame();
-            this->GateGamepad(false);
-            ImGui::NewFrame();
-
-            {
-                py::gil_scoped_acquire gil;
-                py::object self = py::cast(this, py::return_value_policy::reference);
-                this->ProcessRenderCallback(self);
-            }
-
-            ImGui::Render();
-
-            FrameContext *frameCtx = this->WaitForNextFrameResources();
-            UINT backBufferIdx = this->pSwapChain->GetCurrentBackBufferIndex();
-            frameCtx->CommandAllocator->Reset();
-
-            D3D12_RESOURCE_BARRIER barrier = {};
-            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            barrier.Transition.pResource = this->mainRenderTargetResource[backBufferIdx];
-            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-            barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-            barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-
-            this->pd3dCommandList->Reset(frameCtx->CommandAllocator, nullptr);
-            this->pd3dCommandList->ResourceBarrier(1, &barrier);
-            auto clearColor = this->ClearColor;
-            const float clearColorWithAlpha[4] = {clearColor.x * clearColor.w, clearColor.y * clearColor.w, clearColor.z * clearColor.w, clearColor.w};
-            this->pd3dCommandList->ClearRenderTargetView(this->mainRenderTargetDescriptor[backBufferIdx], clearColorWithAlpha, 0, nullptr);
-            this->pd3dCommandList->OMSetRenderTargets(1, &this->mainRenderTargetDescriptor[backBufferIdx], FALSE, nullptr);
-            this->pd3dCommandList->SetDescriptorHeaps(1, &this->pd3dSrvDescHeap);
-            ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), this->pd3dCommandList);
-            barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-            barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-            this->pd3dCommandList->ResourceBarrier(1, &barrier);
-            this->pd3dCommandList->Close();
-            this->pd3dCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList *const *)&this->pd3dCommandList);
+            this->ctx = ImGui::CreateContext();
+            ImGuiIO &io = ImGui::GetIO();
+            io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+            io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+            io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+            io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+            ImGui::StyleColorsLight();
 
             if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
             {
-                ImGui::UpdatePlatformWindows();
-                ImGui::RenderPlatformWindowsDefault(nullptr, (void *)this->pd3dCommandList);
+                ImGuiStyle &style = ImGui::GetStyle();
+                style.WindowRounding = 0.0f;
+                style.Colors[ImGuiCol_WindowBg].w = 1.0f;
             }
 
-            HRESULT hr = this->pSwapChain->Present(1, 0);
-            this->swapChainOccluded = (hr == DXGI_STATUS_OCCLUDED);
-            UINT64 fenceValue = this->fenceLastSignaledValue + 1;
-            this->pd3dCommandQueue->Signal(this->fence, fenceValue);
-            this->fenceLastSignaledValue = fenceValue;
-            frameCtx->FenceValue = fenceValue;
-        } while (true);
+            ImGui_ImplWin32_Init(hwnd);
+            ImGui_ImplDX12_Init(this->pd3dDevice, NUM_FRAMES_IN_FLIGHT, DXGI_FORMAT_R8G8B8A8_UNORM, this->pd3dSrvDescHeap, this->pd3dSrvDescHeap->GetCPUDescriptorHandleForHeapStart(), this->pd3dSrvDescHeap->GetGPUDescriptorHandleForHeapStart());
+
+            do
+            {
+                MSG msg;
+                bool done = false;
+                while (::PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE))
+                {
+                    ::TranslateMessage(&msg);
+                    ::DispatchMessage(&msg);
+                    if (msg.message == WM_QUIT)
+                        done = true;
+                }
+                if (done)
+                    break;
+
+                if (this->swapChainOccluded && this->pSwapChain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED)
+                {
+                    this->CollectTextures(this->fenceLastSignaledValue, this->fence->GetCompletedValue());
+                    ::Sleep(10);
+                    continue;
+                }
+                this->swapChainOccluded = false;
+
+                {
+                    py::gil_scoped_acquire gil;
+                    py::object self = py::cast(this, py::return_value_policy::reference);
+                    this->ProcessCallBeforeFrameOnce(self);
+                }
+
+                this->CollectTextures(this->fenceLastSignaledValue, this->fence->GetCompletedValue());
+                if (this->invalidatePending.exchange(false))
+                {
+                    this->WaitForLastSubmittedFrame();
+                    ImGui_ImplDX12_InvalidateDeviceObjects();
+                }
+                ImGui_ImplDX12_NewFrame();
+                ImGui_ImplWin32_NewFrame();
+                this->GateGamepad(false);
+                ImGui::NewFrame();
+
+                {
+                    py::gil_scoped_acquire gil;
+                    py::object self = py::cast(this, py::return_value_policy::reference);
+                    this->ProcessRenderCallback(self);
+                }
+
+                ImGui::Render();
+
+                FrameContext *frameCtx = this->WaitForNextFrameResources();
+                UINT backBufferIdx = this->pSwapChain->GetCurrentBackBufferIndex();
+                frameCtx->CommandAllocator->Reset();
+
+                D3D12_RESOURCE_BARRIER barrier = {};
+                barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                barrier.Transition.pResource = this->mainRenderTargetResource[backBufferIdx];
+                barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+                barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+
+                this->pd3dCommandList->Reset(frameCtx->CommandAllocator, nullptr);
+                this->pd3dCommandList->ResourceBarrier(1, &barrier);
+                auto clearColor = this->ClearColor;
+                const float clearColorWithAlpha[4] = {clearColor.x * clearColor.w, clearColor.y * clearColor.w, clearColor.z * clearColor.w, clearColor.w};
+                this->pd3dCommandList->ClearRenderTargetView(this->mainRenderTargetDescriptor[backBufferIdx], clearColorWithAlpha, 0, nullptr);
+                this->pd3dCommandList->OMSetRenderTargets(1, &this->mainRenderTargetDescriptor[backBufferIdx], FALSE, nullptr);
+                this->pd3dCommandList->SetDescriptorHeaps(1, &this->pd3dSrvDescHeap);
+                ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), this->pd3dCommandList);
+                barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+                barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+                this->pd3dCommandList->ResourceBarrier(1, &barrier);
+                this->pd3dCommandList->Close();
+                this->pd3dCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList *const *)&this->pd3dCommandList);
+
+                if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+                {
+                    ImGui::UpdatePlatformWindows();
+                    ImGui::RenderPlatformWindowsDefault(nullptr, (void *)this->pd3dCommandList);
+                }
+
+                HRESULT hr = this->pSwapChain->Present(1, 0);
+                this->swapChainOccluded = (hr == DXGI_STATUS_OCCLUDED);
+                UINT64 fenceValue = this->fenceLastSignaledValue + 1;
+                this->pd3dCommandQueue->Signal(this->fence, fenceValue);
+                this->fenceLastSignaledValue = fenceValue;
+                frameCtx->FenceValue = fenceValue;
+            } while (true);
+        }
+        catch (...)
+        {
+            this->WaitForLastSubmittedFrame();
+            this->CloseTextures(true);
+            throw;
+        }
 
         this->WaitForLastSubmittedFrame();
         ImGui_ImplDX12_Shutdown();
@@ -654,11 +1029,12 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
                     _throwV_("Failed to create the overlay RTV heap: {:#x}", (unsigned)hr);
                 D3D12_DESCRIPTOR_HEAP_DESC srvDesc = {};
                 srvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-                srvDesc.NumDescriptors = 2;
+                srvDesc.NumDescriptors = Dx12TextureStore::HEAP_SIZE;
                 srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
                 hr = device->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&this->window.pd3dSrvDescHeap));
                 if (FAILED(hr))
                     _throwV_("Failed to create the overlay SRV heap: {:#x}", (unsigned)hr);
+                this->window.InstallTextures(GetCurrentThreadId());
 
                 for (UINT i = 0; i < Dx12Window::NUM_FRAMES_IN_FLIGHT; i++)
                 {
@@ -723,6 +1099,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 
             void NewFrame() override
             {
+                this->window.CollectTextures(this->lastSignaled, this->fence->GetCompletedValue());
                 if (this->window.invalidatePending.exchange(false))
                 {
                     this->WaitIdle();
@@ -785,6 +1162,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 
             void Release() noexcept override
             {
+                this->window.CloseTextures(true);
                 this->ReleaseBackBuffers();
                 ReleaseCom(this->window.pSwapChain);
                 CloseHandleOnce(this->latencyWaitable);
@@ -1162,6 +1540,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         }
         WaitForHooks();
         bool gpuIdle = this->fence == nullptr || this->fenceEvent == nullptr || this->WaitForFence(this->fenceLastSignaledValue, this->fenceEvent, FENCE_TIMEOUT_MS);
+        this->CloseTextures(gpuIdle);
         this->CleanupRenderTargets();
         delete[] this->backBuffers;
         this->backBuffers = nullptr;
@@ -1283,10 +1662,11 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 
         D3D12_DESCRIPTOR_HEAP_DESC srvDesc = {};
         srvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        srvDesc.NumDescriptors = this->bufferCount > 1 ? this->bufferCount : 2;
+        srvDesc.NumDescriptors = Dx12TextureStore::HEAP_SIZE;
         srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if ((hr = this->pd3dDevice->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&this->pd3dSrvDescHeap))) != S_OK)
             _throwV_("Failed to create SRV heap: {}", hr);
+        this->InstallTextures(0);
 
         for (UINT i = 0; i < NUM_FRAMES_IN_FLIGHT; i++)
             if ((hr = this->pd3dDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&this->frameContext[i].CommandAllocator))) != S_OK)
@@ -1548,6 +1928,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         // ImGui asserts when ViewportsEnable is first set on frame 1, so an assignment then waits one frame.
         if (ImGui::GetFrameCount() != 1 && this->viewportsDirty.exchange(false))
             SetViewportsFlag(this->viewportsEnable);
+        this->CollectTextures(this->fenceLastSignaledValue, this->fence->GetCompletedValue());
         if (this->invalidatePending && this->WaitForFence(this->fenceLastSignaledValue, this->fenceEvent, FENCE_TIMEOUT_MS) && this->invalidatePending.exchange(false))
             ImGui_ImplDX12_InvalidateDeviceObjects();
         ImGui_ImplDX12_NewFrame();
@@ -1624,19 +2005,21 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
     {
         pybind_setup_mImguiImpl_RenderBase(m);
         py::class_<Dx12TextureHelper>(m, "Dx12TextureHelper", py::dynamic_attr(), py::module_local())
-            .def("LoadTextureFromFile", &Dx12TextureHelper::LoadTextureFromFile)
+            .def("LoadTextureFromFile", &Dx12TextureHelper::LoadTextureFromFile, py::arg("filename"), py::kw_only(), py::arg("transform") = py::none())
             .def("FreeTexture", &Dx12TextureHelper::FreeTexture)
             .def("__bool__", [](const Dx12TextureHelper &self) { return self.srv != nullptr; })
             .def_property_readonly("handle", &Dx12TextureHelper::GetHandle)
             .def_property_readonly("width", [](const Dx12TextureHelper &self) { return self.width; })
             .def_property_readonly("height", [](const Dx12TextureHelper &self) { return self.height; })
-            .def_property_readonly("size", &Dx12TextureHelper::GetSize);
+            .def_property_readonly("size", &Dx12TextureHelper::GetSize)
+            .def_property_readonly("mipLevels", [](const Dx12TextureHelper &self) { return self.mipLevels; });
 
         py::class_<Dx12Render, RenderBase>(m, "Dx12Render", py::dynamic_attr(), py::module_local())
             .def_static("InvalidateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); })
             .def_static("CreateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); return true; })
-            .def("CreateTexture", [](Dx12Render &self, const char *filename) { return self.CreateTexture(filename); }, py::arg("filename"), py::return_value_policy::take_ownership)
-            .def("CreateTexture", [](Dx12Render &self) { return self.CreateTexture(); }, py::return_value_policy::take_ownership);
+            .def("CreateTexture", [](Dx12Render &self, const char *filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform) { return self.CreateTexture(filename, transform); }, py::arg("filename"), py::kw_only(), py::arg("transform") = py::none(), py::return_value_policy::take_ownership)
+            .def("CreateTexture", [](Dx12Render &self) { return self.CreateTexture(); }, py::return_value_policy::take_ownership)
+            .def("CreateTextureFromPixels", &Dx12Render::CreateTextureFromPixels, py::arg("width"), py::arg("height"), py::arg("pixels"), py::kw_only(), py::arg("rowPitch") = 0, py::return_value_policy::take_ownership);
 
         py::class_<Dx12Window, Dx12Render> dx12Window(m, "Dx12Window", py::dynamic_attr(), py::module_local());
         dx12Window.def(py::init<std::optional<py::function>>(), py::arg("renderCallback") = py::none())

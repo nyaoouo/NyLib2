@@ -39,7 +39,7 @@ bounds = esp.project_bounds(cam, origin=(100.0, 0.0, 0.0), extent=(20.0, 20.0, 4
 `eulerAngles`，传递 `(-pitch, yaw, -roll)` - `esp.Unity` 仅设置世界
 坐标轴，而非此符号翻转。`from_matrix(view_proj, convention)` 从 4x4 视图投影矩阵（16 个数字，内存顺序）构建摄像机；当游戏已经公开一个时改为使用它。
 
-<!-- dt:section id="drawing-0" hash="0560a7f85b97" -->
+<!-- dt:section id="drawing-0" hash="e0b8e8058947" -->
 ## 绘图
 
 ```python
@@ -60,5 +60,6 @@ if bounds is not None:
 | `add_box_3d` | 世界空间框的12条边 |
 | `add_circle_3d` | 世界空间圆形 |
 | `add_bones` | 来自联合查找和`(parent, child)`对的骨架 |
+| `add_image_triangle` | 一个带纹理的三角形，例如裁剪后图像多边形的一块 |
 
 `add_lines_3d`接受`(a, b)`对的可迭代对象或numpy `(N, 2, 3)`数组；数组采用矢量化快速路径。

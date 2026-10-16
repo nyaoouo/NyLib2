@@ -5,7 +5,7 @@ GL3/VK frontends. Each frontend has a standalone-window class and an injected
 "inbound" class for drawing inside another process's own renderer (see
 [inbound.md](inbound.md)).
 
-Keywords: Dear ImGui, imgui, pyimgui, Dx9Window, Dx11Window, Dx12Window, Dx11Inbound, Dx12Inbound, inbound, overlay, ESP, DirectX, DX11, DX12, OpenGL3, Vulkan, render hook, in-process overlay, pybind11
+Keywords: Dear ImGui, imgui, pyimgui, Dx9Window, Dx11Window, Dx12Window, Dx11Inbound, Dx12Inbound, inbound, overlay, ESP, DirectX, DX11, DX12, OpenGL3, Vulkan, render hook, in-process overlay, pybind11, texture, CreateTextureFromPixels, DecodeImage, grayscale, mipmap, sampler
 
 ## Build
 
@@ -112,6 +112,196 @@ changes the limits for the process (`None` keeps a limit) and
 `GetAtlasLimits()` returns `(max_side, max_mib)`: raise `max_mib` for larger
 CJK sizes on a GPU with enough video memory, and set `max_side=8192` under
 DX10.
+
+## Textures
+
+`CreateTexture(filename)` and `CreateTextureFromPixels(width, height,
+pixels)` exist on the DX11 and DX12 renderers (`Dx11Window`/`Dx12Window`,
+standalone or overlay, and `Dx11Inbound`/`Dx12Inbound`); DX11 also takes
+`mips=False`. DX9, DX10, GL3 and VK have neither: check
+`hasattr(renderer, 'CreateTexture')` and fall back, for example to a solid
+rectangle. The returned objects share the same members on both backends:
+`handle` (the ImGui texture id), `width`, `height`, `size`, `mipLevels`,
+`bool()` and `FreeTexture()`; DX12 also has `LoadTextureFromFile`.
+
+```python
+# needs: running pyimgui window
+import pathlib
+from nylib.pyimgui import Dx11Window, imgui
+import nylib.pyimgui as pyimgui
+
+textures = {}
+
+def make_ppm(path, width, height, rgb=(200, 120, 40)):
+    header = f'P6\n{width} {height}\n255\n'.encode('ascii')
+    path.write_bytes(header + bytes(rgb) * (width * height))
+
+def load_textures(wnd):
+    path = pathlib.Path('texture_demo.ppm')
+    make_ppm(path, 64, 64)
+    textures['file'] = wnd.CreateTexture(str(path))
+    textures['gray'] = wnd.CreateTexture(
+        str(path), transform=pyimgui.TextureTransform.GrayscaleBT709)
+    textures['pixels'] = wnd.CreateTextureFromPixels(2, 2, bytes((
+        255, 0, 0, 255, 0, 255, 0, 255,
+        0, 0, 255, 255, 255, 255, 255, 255,
+    )))
+
+def render(wnd):
+    for tex in textures.values():
+        imgui.Image(tex.handle, imgui.ImVec2(64, 64))
+        imgui.SameLine()
+
+wnd = Dx11Window(render)
+wnd.CallBeforeFrameOnce(lambda: load_textures(wnd))
+wnd.Serve()
+```
+
+Timing: the renderer's device must exist. That is while `Serve()` runs (from
+`CallBeforeFrameOnce` or the render callback), or for an inbound renderer
+after its first frame. Otherwise, including after a callback raised out of
+`Serve()`, creation raises `RuntimeError`. `CallBeforeFrameOnce` can be
+queued before `Serve()`, as in the example above.
+
+Threading: create textures on the render thread, either from
+`CallBeforeFrameOnce` or from the render callback; `CallBeforeFrameOnce` is
+not required. A call from another thread raises `RuntimeError` ("render
+thread"). Decode anywhere instead: `pyimgui.DecodeImage(path)` runs on any
+thread, with the GIL released and no window needed, so a worker decodes and
+the render thread only calls `CreateTextureFromPixels`. Every creation and
+decode call releases the GIL during decode and upload, so other Python
+threads keep running. Drawing happens only in the render callback. A DX12
+upload waits for its GPU copy, so keep the number of uploads per frame small.
+
+```python
+# needs: running pyimgui window
+import pathlib
+import queue
+import threading
+from nylib.pyimgui import Dx11Window, imgui
+import nylib.pyimgui as pyimgui
+
+def make_ppm(path, width, height, rgb):
+    header = f'P6\n{width} {height}\n255\n'.encode('ascii')
+    path.write_bytes(header + bytes(rgb) * (width * height))
+
+paths = []
+for i, rgb in enumerate([(200, 60, 60), (60, 200, 60), (60, 60, 200)]):
+    p = pathlib.Path(f'tile_{i}.ppm')
+    make_ppm(p, 32, 32, rgb)
+    paths.append(p)
+
+decoded = queue.Queue()
+
+def worker():
+    for p in paths:
+        decoded.put(pyimgui.DecodeImage(str(p)))
+
+threading.Thread(target=worker, daemon=True).start()
+textures = []
+
+def render(wnd):
+    for _ in range(2):
+        try:
+            img = decoded.get_nowait()
+        except queue.Empty:
+            break
+        textures.append(
+            wnd.CreateTextureFromPixels(img.width, img.height, img.pixels))
+    for tex in textures:
+        imgui.Image(tex.handle, imgui.ImVec2(32, 32))
+        imgui.SameLine()
+
+wnd = Dx11Window(render)
+wnd.Serve()
+```
+
+Do not re-queue `CallBeforeFrameOnce` from inside itself: a callback queued
+there runs in the same frame, so a callback that keeps re-queueing itself
+never lets a frame through. Spread work across frames from the render
+callback instead, as the example above does.
+
+Lifetime: keep the returned object alive while you draw it, because `handle`
+is a plain int. Dropping it, or calling `FreeTexture()`, frees it at the next
+frame boundary; on DX12 only after the GPU is done with it. After
+`FreeTexture()` the object is falsy and draws nothing. Textures belong to one
+session: once `Serve()` returned or raised, or the inbound renderer is
+destroyed, reading `handle` raises `RuntimeError`, so create new ones for a
+new session. `InvalidateDeviceObjects()` (after a font change) does not
+affect textures. DX12 holds up to 4094 live textures at once; beyond that,
+creation raises `RuntimeError`. DX12 `LoadTextureFromFile` changes `handle`.
+
+Format and memory: `pixels` is RGBA8 with straight alpha, row 0 at the top,
+in a C-contiguous buffer (`bytes`, `bytearray`, `memoryview`, `array.array`,
+or numpy). Tight rows need exactly `width*height*4` bytes; with `rowPitch=n`,
+rows start every `n` bytes and the buffer needs at least `n*height` bytes.
+Short buffers raise `ValueError` before anything is read. A 4096x4096 texture
+is 64 MiB at 4 bytes per pixel, and `mips=True` adds about a third; a side
+may be at most 16384 px, matching the font atlas limits above.
+
+Drawing: `imgui.Image`, `dl.AddImage`, `dl.AddImageQuad` (rotated or skewed
+quads, with per-corner UVs), and `esp.add_image_triangle` (any textured
+triangle, for example a clipped polygon drawn as a fan; see
+[esp.md](esp.md)). UV (0, 0) is the top-left texel.
+
+Sampling: by default, every texture samples bilinear on mip 0 only, on both
+backends. DX11 adds `mips=True` at creation and a per-draw sampler: wrap
+draws in `SetTextureSampler(dl, pyimgui.TextureFilter.Point/Linear/Anisotropic)`
+and `ResetTextureSampler(dl)` on the same draw list. `Point` keeps magnified
+pixels crisp, `Linear` is trilinear across mips, `Anisotropic` suits a
+stretched image seen at a shallow angle. Keep text outside a `Point` scope,
+since it loses its anti-aliasing there. There is no nesting: `Reset`
+restores the backend's default. DX12 has neither `mips=` nor a sampler scope
+yet.
+
+```python
+# needs: running pyimgui window
+import pathlib
+from nylib.pyimgui import Dx11Window, imgui
+import nylib.pyimgui as pyimgui
+
+minimap = {}
+
+def make_ppm(path, width, height, rgb=(80, 140, 90)):
+    header = f'P6\n{width} {height}\n255\n'.encode('ascii')
+    path.write_bytes(header + bytes(rgb) * (width * height))
+
+def load_minimap(wnd):
+    path = pathlib.Path('minimap_demo.ppm')
+    make_ppm(path, 128, 128)
+    minimap['tex'] = wnd.CreateTexture(str(path), mips=True)
+
+def render(wnd):
+    if 'tex' not in minimap:
+        return
+    dl = imgui.GetBackgroundDrawList()
+    wnd.SetTextureSampler(dl, pyimgui.TextureFilter.Linear)
+    dl.AddImageQuad(
+        minimap['tex'].handle,
+        imgui.ImVec2(40, 40), imgui.ImVec2(140, 60),
+        imgui.ImVec2(120, 160), imgui.ImVec2(20, 140),
+    )
+    wnd.ResetTextureSampler(dl)
+
+wnd = Dx11Window(render)
+wnd.CallBeforeFrameOnce(lambda: load_minimap(wnd))
+wnd.Serve()
+```
+
+Large images: memory follows the format rule above (64 MiB at 4096x4096,
+plus about a third with mips). Drawn much smaller than its size, a texture
+aliases under the default sampler; on DX11, `mips=True` plus a `Linear` or
+`Anisotropic` scope avoids that. Dropping a texture frees it at the next
+frame boundary, so a cache can drop what it no longer shows. For very large
+images, consider tiling: several smaller textures, created and dropped as
+the view changes.
+
+Grayscale: `transform=pyimgui.TextureTransform.GrayscaleBT709` on
+`CreateTexture`, DX12 `LoadTextureFromFile` and `DecodeImage` converts the
+image once, before upload: `Y = (2126 R + 7152 G + 722 B + 5000) // 10000`
+on the stored 8-bit values, output `(Y, Y, Y, A)`. On an ordinary sRGB image
+that is BT.709 luma, not linear luminance. Alpha and size are kept, mips are
+built after the conversion, and without `transform` nothing changes.
 
 ## Next
 
