@@ -75,7 +75,7 @@ START_M_IMGUI_IMPL_NAMESPACE
 
         void CreateRenderTarget();
         void CleanupRenderTarget();
-        Dx11Texture *CreateTexture(const std::string &filename);
+        Dx11Texture *CreateTexture(const std::string &filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform = std::nullopt);
         Dx11Texture *CreateTextureFromPixels(int width, int height, py::buffer pixels, long long rowPitch);
         std::shared_ptr<Dx11TextureStore> OpenTextures(); // the open store, else RuntimeError "no D3D11 device"; off the render thread RuntimeError "render thread"
         void InstallTextures(DWORD renderThread);         // open site: closes a leftover store, then opens one on pd3dDevice; 0 for inbound

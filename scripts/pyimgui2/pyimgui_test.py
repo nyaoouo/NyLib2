@@ -42,6 +42,7 @@ class DemoState:
         self.font = None
         self.test_image = None
         self.test_pixels = None
+        self.test_gray = None
         self.texture_error = ''
         self.font_error = ''
 
@@ -95,6 +96,9 @@ class DemoState:
                 self.test_image = self.wnd.CreateTexture(str(image_path))
                 if hasattr(self.wnd, 'CreateTextureFromPixels'):
                     self.test_pixels = self.wnd.CreateTextureFromPixels(2, 2, bytes((255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255)))
+                import pyimgui
+                if hasattr(pyimgui, 'TextureTransform'):
+                    self.test_gray = self.wnd.CreateTexture(str(image_path), transform=pyimgui.TextureTransform.GrayscaleBT709)
             except Exception as exc:
                 self.texture_error = repr(exc)
         if hasattr(self.wnd, 'UpdateTrayIconInfo'):
@@ -278,6 +282,9 @@ class DemoState:
                 image_height = 96
                 image_width = self.test_image.width * image_height // self.test_image.height
                 imgui.ImageButton('##img_button', self.test_image.handle, imgui.ImVec2(image_width, image_height))
+                if self.test_gray:
+                    imgui.SameLine()
+                    imgui.Image(self.test_gray.handle, imgui.ImVec2(image_width, image_height))
             if self.test_pixels:
                 imgui.Image(self.test_pixels.handle, imgui.ImVec2(64, 64))
             text_size = imgui.CalcTextSize(self.test_string)

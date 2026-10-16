@@ -89,7 +89,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         Dx12TextureHelper &operator=(const Dx12TextureHelper &) = delete;
 
         void FreeTexture();
-        void LoadTextureFromFile(const std::string &filename); // GIL held on entry; released for decode and upload
+        void LoadTextureFromFile(const std::string &filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform = std::nullopt); // GIL held on entry; released for decode, transform and upload
         void Assign(ID3D12Resource *resource, UINT slot, int width, int height); // GIL held; retires the previous resource and slot
         uintptr_t GetHandle() const;
         ImVec2 GetSize() const;
@@ -109,7 +109,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 
         Dx12Render(std::optional<py::function> renderCallback = std::nullopt) : RenderBase(renderCallback) {}
 
-        Dx12TextureHelper *CreateTexture(const char *filename = nullptr);
+        Dx12TextureHelper *CreateTexture(const char *filename = nullptr, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform = std::nullopt);
         Dx12TextureHelper *CreateTextureFromPixels(int width, int height, py::buffer pixels, long long rowPitch);
         std::shared_ptr<Dx12TextureStore> OpenTextures();           // the open store, else RuntimeError "no D3D12 device"; off the render thread RuntimeError "render thread"
         void InstallTextures(DWORD renderThread);                   // open site: closes a leftover store leaky, then opens one on pd3dDevice and pd3dSrvDescHeap; 0 for inbound

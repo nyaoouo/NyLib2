@@ -1,5 +1,6 @@
 #pragma once
 #include "./gHeader.h"
+#include "./OverlayTypes.h"
 #ifndef STBI_INCLUDE_STB_IMAGE_H
 #include "stb_image.h"
 #endif
@@ -90,6 +91,20 @@ START_TEXTURE_DATA_NAMESPACE
             _throwV_("Failed to load image: {} ({})", path, reason != nullptr ? reason : "unknown reason");
         }
         return image;
+    }
+
+    // Converts tight RGBA8 rows in place: GrayscaleBT709 sets R = G = B = BT.709 luma, alpha unchanged; nullopt does nothing.
+    // Needs no GIL; never pass a caller's Python buffer.
+    inline void ApplyTransform(unsigned char *rgba, int width, int height, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform)
+    {
+        if (!transform.has_value() || *transform != OVERLAY_TYPES_NAMESPACE::TextureTransform::GrayscaleBT709)
+            return;
+        size_t count = (size_t)width * (size_t)height;
+        for (size_t i = 0; i < count; i++, rgba += 4)
+        {
+            uint32_t y = (2126u * rgba[0] + 7152u * rgba[1] + 722u * rgba[2] + 5000u) / 10000u;
+            rgba[0] = rgba[1] = rgba[2] = (unsigned char)y;
+        }
     }
 }
 END_TEXTURE_DATA_NAMESPACE

@@ -473,7 +473,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         }
     }
 
-    void Dx12TextureHelper::LoadTextureFromFile(const std::string &filename)
+    void Dx12TextureHelper::LoadTextureFromFile(const std::string &filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform)
     {
         if (!this->store->IsOpen())
             _throw_("no D3D12 device; the session of this texture has ended");
@@ -483,6 +483,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         {
             py::gil_scoped_release release;
             TEXTURE_DATA_NAMESPACE::DecodedPixels image = TEXTURE_DATA_NAMESPACE::DecodeFile(filename);
+            TEXTURE_DATA_NAMESPACE::ApplyTransform(image.data.get(), image.width, image.height, transform);
             uploaded = UploadToSlot(*this->store, image.data.get(), image.width, image.height, (UINT)image.width * 4);
         }
         this->Assign(uploaded.resource, uploaded.slot, uploaded.width, uploaded.height);
@@ -497,11 +498,11 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         this->height = height;
     }
 
-    Dx12TextureHelper *Dx12Render::CreateTexture(const char *filename)
+    Dx12TextureHelper *Dx12Render::CreateTexture(const char *filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform)
     {
         std::unique_ptr<Dx12TextureHelper> helper(new Dx12TextureHelper(this->OpenTextures()));
         if (filename != nullptr)
-            helper->LoadTextureFromFile(filename);
+            helper->LoadTextureFromFile(filename, transform);
         return helper.release();
     }
 
@@ -2002,7 +2003,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
     {
         pybind_setup_mImguiImpl_RenderBase(m);
         py::class_<Dx12TextureHelper>(m, "Dx12TextureHelper", py::dynamic_attr(), py::module_local())
-            .def("LoadTextureFromFile", &Dx12TextureHelper::LoadTextureFromFile, py::arg("filename"))
+            .def("LoadTextureFromFile", &Dx12TextureHelper::LoadTextureFromFile, py::arg("filename"), py::kw_only(), py::arg("transform") = py::none())
             .def("FreeTexture", &Dx12TextureHelper::FreeTexture)
             .def("__bool__", [](const Dx12TextureHelper &self) { return self.srv != nullptr; })
             .def_property_readonly("handle", &Dx12TextureHelper::GetHandle)
@@ -2014,7 +2015,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         py::class_<Dx12Render, RenderBase>(m, "Dx12Render", py::dynamic_attr(), py::module_local())
             .def_static("InvalidateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); })
             .def_static("CreateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); return true; })
-            .def("CreateTexture", [](Dx12Render &self, const char *filename) { return self.CreateTexture(filename); }, py::arg("filename"), py::return_value_policy::take_ownership)
+            .def("CreateTexture", [](Dx12Render &self, const char *filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform) { return self.CreateTexture(filename, transform); }, py::arg("filename"), py::kw_only(), py::arg("transform") = py::none(), py::return_value_policy::take_ownership)
             .def("CreateTexture", [](Dx12Render &self) { return self.CreateTexture(); }, py::return_value_policy::take_ownership)
             .def("CreateTextureFromPixels", &Dx12Render::CreateTextureFromPixels, py::arg("width"), py::arg("height"), py::arg("pixels"), py::kw_only(), py::arg("rowPitch") = 0, py::return_value_policy::take_ownership);
 

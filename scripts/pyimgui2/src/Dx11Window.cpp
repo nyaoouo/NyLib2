@@ -556,11 +556,12 @@ START_M_IMGUI_IMPL_NAMESPACE
             store->Close();
     }
 
-    Dx11Texture *Dx11Render::CreateTexture(const std::string &filename)
+    Dx11Texture *Dx11Render::CreateTexture(const std::string &filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform)
     {
         std::shared_ptr<Dx11TextureStore> store = this->OpenTextures();
         py::gil_scoped_release release;
         TEXTURE_DATA_NAMESPACE::DecodedPixels image = TEXTURE_DATA_NAMESPACE::DecodeFile(filename);
+        TEXTURE_DATA_NAMESPACE::ApplyTransform(image.data.get(), image.width, image.height, transform);
         return new Dx11Texture(std::move(store), image.width, image.height, image.data.get(), (UINT)image.width * 4);
     }
 
@@ -976,7 +977,7 @@ START_M_IMGUI_IMPL_NAMESPACE
         py::class_<Dx11Render, RenderBase>(m, "_Dx11Render", py::dynamic_attr(), py::module_local())
             .def_static("InvalidateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); })
             .def_static("CreateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); return true; })
-            .def("CreateTexture", &Dx11Render::CreateTexture, py::arg("filename"), py::return_value_policy::take_ownership)
+            .def("CreateTexture", &Dx11Render::CreateTexture, py::arg("filename"), py::kw_only(), py::arg("transform") = py::none(), py::return_value_policy::take_ownership)
             .def("CreateTextureFromPixels", &Dx11Render::CreateTextureFromPixels, py::arg("width"), py::arg("height"), py::arg("pixels"), py::kw_only(), py::arg("rowPitch") = 0, py::return_value_policy::take_ownership);
 
         py::class_<Dx11Window, Dx11Render> dx11Window(m, "Dx11Window", py::dynamic_attr(), py::module_local());
