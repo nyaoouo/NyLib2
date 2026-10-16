@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,13 +36,20 @@ class ProcessBackend:
         effective_timeout = self.default_timeout if timeout is None else timeout
         start = time.monotonic()
         try:
-            completed = subprocess.run(
-                raw_command,
-                capture_output=True,
-                text=True,
-                timeout=effective_timeout,
-                env=dict(env) if env is not None else None,
-            )
+            # VM descendants can retain inherited pipes after the vmrun process exits.
+            with tempfile.TemporaryFile(mode="w+t") as stdout_file, tempfile.TemporaryFile(mode="w+t") as stderr_file:
+                completed = subprocess.run(
+                    raw_command,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    text=True,
+                    timeout=effective_timeout,
+                    env=dict(env) if env is not None else None,
+                )
+                stdout_file.seek(0)
+                stderr_file.seek(0)
+                stdout = stdout_file.read()
+                stderr = stderr_file.read()
         except subprocess.TimeoutExpired as exc:
             raise VmwareTimeoutError(
                 f"{self.name} command timed out after {effective_timeout}s: {list(stored_command)}",
@@ -53,8 +61,8 @@ class ProcessBackend:
             command=stored_command,
             duration=duration,
             returncode=completed.returncode,
-            stdout=completed.stdout or "",
-            stderr=completed.stderr or "",
+            stdout=stdout,
+            stderr=stderr,
         )
         if check and completed.returncode != 0:
             raise ProcessCommandError(result)
