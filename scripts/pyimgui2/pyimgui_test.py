@@ -41,6 +41,7 @@ class DemoState:
         self.is_init = False
         self.font = None
         self.test_image = None
+        self.test_pixels = None
         self.texture_error = ''
         self.font_error = ''
 
@@ -92,6 +93,8 @@ class DemoState:
             try:
                 image_path = make_test_image(pathlib.Path(__file__).parent / 'auto_src' / 'pyimgui2_test.ppm')
                 self.test_image = self.wnd.CreateTexture(str(image_path))
+                if hasattr(self.wnd, 'CreateTextureFromPixels'):
+                    self.test_pixels = self.wnd.CreateTextureFromPixels(2, 2, bytes((255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255)))
             except Exception as exc:
                 self.texture_error = repr(exc)
         if hasattr(self.wnd, 'UpdateTrayIconInfo'):
@@ -275,6 +278,8 @@ class DemoState:
                 image_height = 96
                 image_width = self.test_image.width * image_height // self.test_image.height
                 imgui.ImageButton('##img_button', self.test_image.handle, imgui.ImVec2(image_width, image_height))
+            if self.test_pixels:
+                imgui.Image(self.test_pixels.handle, imgui.ImVec2(64, 64))
             text_size = imgui.CalcTextSize(self.test_string)
             draw_list = imgui.GetWindowDrawList()
             pos = imgui.GetCursorScreenPos()

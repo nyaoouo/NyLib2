@@ -7,25 +7,109 @@
 #include <dxgi1_2.h>
 #include <atomic>
 #include <mutex>
+#include <new>
 
 #define STBI_WINDOWS_UTF8
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+#include "./TextureData.h"
 
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 START_M_IMGUI_IMPL_NAMESPACE
 {
-    Dx11Texture::Dx11Texture(ID3D11Device *device, const char *filename)
-    {
-        int channels = 0;
-        unsigned char *image_data = stbi_load(filename, &this->width, &this->height, &channels, 4);
-        if (!image_data)
-            _throwV_("Failed to load image: {}", filename);
+    // Depth of our own render logic and submits on this thread; hooks reached from inside it pass through.
+    static thread_local int logicDepth = 0;
 
+    Dx11TextureStore::Dx11TextureStore(ID3D11Device *device, DWORD renderThread) : device(device), renderThread(renderThread)
+    {
+        this->device->AddRef();
+        this->singleThreaded = (device->GetCreationFlags() & D3D11_CREATE_DEVICE_SINGLETHREADED) != 0;
+    }
+
+    Dx11TextureStore::~Dx11TextureStore()
+    {
+        this->Close();
+        this->device->Release();
+    }
+
+    ID3D11Device *Dx11TextureStore::Device() const
+    {
+        return this->device;
+    }
+
+    bool Dx11TextureStore::SingleThreaded() const
+    {
+        return this->singleThreaded;
+    }
+
+    bool Dx11TextureStore::OnRenderThread() const noexcept
+    {
+        return this->renderThread != 0 ? GetCurrentThreadId() == this->renderThread : logicDepth > 0;
+    }
+
+    void Dx11TextureStore::Retire(ID3D11ShaderResourceView *srv) noexcept
+    {
+        if (srv == nullptr)
+            return;
+        {
+            std::lock_guard<std::mutex> lock(this->mutex);
+            if (this->open)
+            {
+                try
+                {
+                    this->pending.push_back(srv);
+                }
+                catch (const std::bad_alloc &)
+                {
+                    // OOM: leak the SRV; an immediate release here would reopen the same-frame-drop bug.
+                }
+                return;
+            }
+        }
+        if (!this->singleThreaded)
+            srv->Release();
+    }
+
+    void Dx11TextureStore::Collect() noexcept
+    {
+        {
+            std::lock_guard<std::mutex> lock(this->mutex);
+            if (!this->open)
+                return;
+            this->releases.swap(this->pending); // ping-pongs between the two members, so neither loses capacity
+        }
+        for (ID3D11ShaderResourceView *srv : this->releases)
+            srv->Release();
+        this->releases.clear();
+    }
+
+    void Dx11TextureStore::Close() noexcept
+    {
+        {
+            std::lock_guard<std::mutex> lock(this->mutex);
+            if (!this->open)
+                return;
+            this->open = false;
+            this->releases.swap(this->pending);
+        }
+        if (this->singleThreaded)
+            return;
+        for (ID3D11ShaderResourceView *srv : this->releases)
+            srv->Release();
+        this->releases.clear();
+    }
+
+    bool Dx11TextureStore::IsOpen() const noexcept
+    {
+        return this->open.load();
+    }
+
+    Dx11Texture::Dx11Texture(std::shared_ptr<Dx11TextureStore> store, int width, int height, const unsigned char *rgba, UINT rowPitch) : store(std::move(store))
+    {
         D3D11_TEXTURE2D_DESC desc = {};
-        desc.Width = this->width;
-        desc.Height = this->height;
+        desc.Width = width;
+        desc.Height = height;
         desc.MipLevels = 1;
         desc.ArraySize = 1;
         desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -34,12 +118,12 @@ START_M_IMGUI_IMPL_NAMESPACE
         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 
         D3D11_SUBRESOURCE_DATA subResource = {};
-        subResource.pSysMem = image_data;
-        subResource.SysMemPitch = desc.Width * 4;
+        subResource.pSysMem = rgba;
+        subResource.SysMemPitch = rowPitch;
 
+        ID3D11Device *device = this->store->Device();
         ID3D11Texture2D *texture = nullptr;
         HRESULT hr = device->CreateTexture2D(&desc, &subResource, &texture);
-        stbi_image_free(image_data);
         if (hr != S_OK)
             _throwV_("Failed to create texture: {}", hr);
 
@@ -51,17 +135,33 @@ START_M_IMGUI_IMPL_NAMESPACE
         texture->Release();
         if (hr != S_OK)
             _throwV_("Failed to create texture view: {}", hr);
+        this->width = width;
+        this->height = height;
     }
 
     Dx11Texture::~Dx11Texture()
     {
-        if (this->textureView)
-            this->textureView->Release();
+        this->FreeTexture();
+    }
+
+    void Dx11Texture::FreeTexture()
+    {
+        this->store->Retire(this->textureView);
+        this->textureView = nullptr;
+        this->width = 0;
+        this->height = 0;
     }
 
     uintptr_t Dx11Texture::GetHandle() const
     {
+        if (!this->store->IsOpen())
+            _throw_("handle: session ended; the D3D11 session of this texture has closed");
         return reinterpret_cast<uintptr_t>(this->textureView);
+    }
+
+    ImVec2 Dx11Texture::GetSize() const
+    {
+        return ImVec2((float)this->width, (float)this->height);
     }
 
     Dx11Window::Dx11Window(std::optional<py::function> renderCallback) : Dx11Render(renderCallback)
@@ -126,6 +226,7 @@ START_M_IMGUI_IMPL_NAMESPACE
 
     void Dx11Window::CleanupDeviceD3D()
     {
+        this->CloseTextures();
         this->CleanupRenderTarget();
         if (this->pSwapChain) { this->pSwapChain->Release(); this->pSwapChain = nullptr; }
         if (this->pd3dDeviceContext) { this->pd3dDeviceContext->Release(); this->pd3dDeviceContext = nullptr; }
@@ -169,100 +270,111 @@ START_M_IMGUI_IMPL_NAMESPACE
             _throwV_("Failed to create window: {}", GetLastError());
         this->SetHwnd(hwnd);
         this->CreateDeviceD3D();
+        this->InstallTextures(GetCurrentThreadId());
 
-        ShowWindow(this->hwnd, SW_SHOWDEFAULT);
-        UpdateWindow(this->hwnd);
-        SetWindowTextA(this->hwnd, this->title.c_str());
-
-        this->ctx = ImGui::CreateContext(nullptr);
-        ImGuiIO &io = ImGui::GetIO();
-        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-        io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
-        io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-        io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
-        ImGui::StyleColorsLight();
-        ImGuiStyle &style = ImGui::GetStyle();
-        if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+        try
         {
-            style.WindowRounding = 0.0f;
-            style.Colors[ImGuiCol_WindowBg].w = 1.0f;
-        }
+            ShowWindow(this->hwnd, SW_SHOWDEFAULT);
+            UpdateWindow(this->hwnd);
+            SetWindowTextA(this->hwnd, this->title.c_str());
 
-        ImGui_ImplWin32_Init(this->hwnd);
-        ImGui_ImplDX11_Init(this->pd3dDevice, this->pd3dDeviceContext);
-
-        bool done = false;
-        while (!done)
-        {
-            MSG msg;
-            while (PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE))
-            {
-                TranslateMessage(&msg);
-                DispatchMessage(&msg);
-                if (msg.message == WM_QUIT)
-                    done = true;
-            }
-            if (done)
-                break;
-
-            if (this->swapChainOccluded && this->pSwapChain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED)
-            {
-                Sleep(10);
-                continue;
-            }
-            this->swapChainOccluded = false;
-
-            if (this->resizeWidth != 0 && this->resizeHeight != 0)
-            {
-                this->CleanupRenderTarget();
-                this->pSwapChain->ResizeBuffers(0, this->resizeWidth, this->resizeHeight, DXGI_FORMAT_UNKNOWN, 0);
-                this->resizeWidth = this->resizeHeight = 0;
-                this->CreateRenderTarget();
-            }
-
-            {
-                py::gil_scoped_acquire gil;
-                py::object self = py::cast(this, py::return_value_policy::reference);
-                this->ProcessCallBeforeFrameOnce(self);
-            }
-            if (this->invalidatePending.exchange(false))
-                ImGui_ImplDX11_InvalidateDeviceObjects();
-            ImGui_ImplDX11_NewFrame();
-            ImGui_ImplWin32_NewFrame();
-            this->GateGamepad(false);
-            ImGui::NewFrame();
-
-            {
-                py::gil_scoped_acquire gil;
-                py::object self = py::cast(this, py::return_value_policy::reference);
-                this->ProcessRenderCallback(self);
-            }
-
-            ImGui::Render();
-            ImVec4 clear_color = this->ClearColor;
-            const float clear_color_with_alpha[4] = {clear_color.x * clear_color.w, clear_color.y * clear_color.w, clear_color.z * clear_color.w, clear_color.w};
-            this->pd3dDeviceContext->OMSetRenderTargets(1, &this->mainRenderTargetView, nullptr);
-            this->pd3dDeviceContext->ClearRenderTargetView(this->mainRenderTargetView, clear_color_with_alpha);
-            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-
+            this->ctx = ImGui::CreateContext(nullptr);
+            ImGuiIO &io = ImGui::GetIO();
+            io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+            io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+            io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+            io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+            ImGui::StyleColorsLight();
+            ImGuiStyle &style = ImGui::GetStyle();
             if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
             {
-                ImGui::UpdatePlatformWindows();
-                ImGui::RenderPlatformWindowsDefault();
+                style.WindowRounding = 0.0f;
+                style.Colors[ImGuiCol_WindowBg].w = 1.0f;
             }
 
-            HRESULT hr = this->pSwapChain->Present(1, 0);
-            this->swapChainOccluded = (hr == DXGI_STATUS_OCCLUDED);
-        }
+            ImGui_ImplWin32_Init(this->hwnd);
+            ImGui_ImplDX11_Init(this->pd3dDevice, this->pd3dDeviceContext);
 
-        ImGui_ImplDX11_Shutdown();
-        ImGui_ImplWin32_Shutdown();
-        ImGui::DestroyContext(this->ctx);
-        this->ctx = nullptr;
-        this->CleanupDeviceD3D();
-        DestroyWindow(this->hwnd);
-        UnregisterClass(wc.lpszClassName, wc.hInstance);
-        this->hwnd = nullptr;
+            bool done = false;
+            while (!done)
+            {
+                MSG msg;
+                while (PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE))
+                {
+                    TranslateMessage(&msg);
+                    DispatchMessage(&msg);
+                    if (msg.message == WM_QUIT)
+                        done = true;
+                }
+                if (done)
+                    break;
+
+                if (this->swapChainOccluded && this->pSwapChain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED)
+                {
+                    this->CollectTextures();
+                    Sleep(10);
+                    continue;
+                }
+                this->swapChainOccluded = false;
+
+                if (this->resizeWidth != 0 && this->resizeHeight != 0)
+                {
+                    this->CleanupRenderTarget();
+                    this->pSwapChain->ResizeBuffers(0, this->resizeWidth, this->resizeHeight, DXGI_FORMAT_UNKNOWN, 0);
+                    this->resizeWidth = this->resizeHeight = 0;
+                    this->CreateRenderTarget();
+                }
+
+                {
+                    py::gil_scoped_acquire gil;
+                    py::object self = py::cast(this, py::return_value_policy::reference);
+                    this->ProcessCallBeforeFrameOnce(self);
+                }
+                this->CollectTextures();
+                if (this->invalidatePending.exchange(false))
+                    ImGui_ImplDX11_InvalidateDeviceObjects();
+                ImGui_ImplDX11_NewFrame();
+                ImGui_ImplWin32_NewFrame();
+                this->GateGamepad(false);
+                ImGui::NewFrame();
+
+                {
+                    py::gil_scoped_acquire gil;
+                    py::object self = py::cast(this, py::return_value_policy::reference);
+                    this->ProcessRenderCallback(self);
+                }
+
+                ImGui::Render();
+                ImVec4 clear_color = this->ClearColor;
+                const float clear_color_with_alpha[4] = {clear_color.x * clear_color.w, clear_color.y * clear_color.w, clear_color.z * clear_color.w, clear_color.w};
+                this->pd3dDeviceContext->OMSetRenderTargets(1, &this->mainRenderTargetView, nullptr);
+                this->pd3dDeviceContext->ClearRenderTargetView(this->mainRenderTargetView, clear_color_with_alpha);
+                ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+                if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+                {
+                    ImGui::UpdatePlatformWindows();
+                    ImGui::RenderPlatformWindowsDefault();
+                }
+
+                HRESULT hr = this->pSwapChain->Present(1, 0);
+                this->swapChainOccluded = (hr == DXGI_STATUS_OCCLUDED);
+            }
+
+            ImGui_ImplDX11_Shutdown();
+            ImGui_ImplWin32_Shutdown();
+            ImGui::DestroyContext(this->ctx);
+            this->ctx = nullptr;
+            this->CleanupDeviceD3D();
+            DestroyWindow(this->hwnd);
+            UnregisterClass(wc.lpszClassName, wc.hInstance);
+            this->hwnd = nullptr;
+        }
+        catch (...)
+        {
+            this->CloseTextures();
+            throw;
+        }
     }
 
     namespace
@@ -287,6 +399,7 @@ START_M_IMGUI_IMPL_NAMESPACE
                     hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, featureLevelArray, 2, D3D11_SDK_VERSION, &this->window.pd3dDevice, &featureLevel, &this->window.pd3dDeviceContext);
                 if (FAILED(hr))
                     _throwV_("Failed to create D3D11 device: {:#x}", (unsigned)hr);
+                this->window.InstallTextures(GetCurrentThreadId());
 
                 IDXGIDevice *dxgiDevice = nullptr;
                 hr = this->window.pd3dDevice->QueryInterface(IID_PPV_ARGS(&dxgiDevice));
@@ -350,6 +463,7 @@ START_M_IMGUI_IMPL_NAMESPACE
 
             void NewFrame() override
             {
+                this->window.CollectTextures();
                 if (this->window.invalidatePending.exchange(false))
                     ImGui_ImplDX11_InvalidateDeviceObjects();
                 ImGui_ImplDX11_NewFrame();
@@ -371,6 +485,7 @@ START_M_IMGUI_IMPL_NAMESPACE
 
             void Release() noexcept override
             {
+                this->window.CloseTextures();
                 this->window.CleanupRenderTarget();
                 if (this->window.pSwapChain) { this->window.pSwapChain->Release(); this->window.pSwapChain = nullptr; }
                 if (this->factory) { this->factory->Release(); this->factory = nullptr; }
@@ -396,11 +511,66 @@ START_M_IMGUI_IMPL_NAMESPACE
         Overlay::Serve(*this, this->overlayConfig, renderer, L"PyImgui2Dx11Overlay");
     }
 
-    Dx11Texture *Dx11Render::CreateTexture(const char *filename)
+    std::shared_ptr<Dx11TextureStore> Dx11Render::OpenTextures()
     {
-        if (this->pd3dDevice == nullptr)
-            _throw_("CreateTexture: no D3D11 device; call it while Serve() runs (e.g. from CallBeforeFrameOnce) or after the inbound hook drew a frame");
-        return new Dx11Texture(this->pd3dDevice, filename);
+        std::shared_ptr<Dx11TextureStore> store;
+        {
+            std::lock_guard<std::mutex> lock(this->texturesMutex);
+            store = this->textures;
+        }
+        if (store == nullptr || !store->IsOpen())
+            _throw_("no D3D11 device; call it while Serve() runs (e.g. from CallBeforeFrameOnce) or after the inbound hook drew a frame");
+        if (!store->OnRenderThread())
+            _throw_("called off the render thread; create textures from the render callback or CallBeforeFrameOnce");
+        return store;
+    }
+
+    void Dx11Render::InstallTextures(DWORD renderThread)
+    {
+        this->CloseTextures();
+        auto store = std::make_shared<Dx11TextureStore>(this->pd3dDevice, renderThread);
+        std::lock_guard<std::mutex> lock(this->texturesMutex);
+        this->textures = std::move(store);
+    }
+
+    void Dx11Render::CollectTextures() noexcept
+    {
+        std::shared_ptr<Dx11TextureStore> store;
+        {
+            std::lock_guard<std::mutex> lock(this->texturesMutex);
+            store = this->textures;
+        }
+        if (store != nullptr)
+            store->Collect();
+    }
+
+    void Dx11Render::CloseTextures() noexcept
+    {
+        std::shared_ptr<Dx11TextureStore> store;
+        {
+            std::lock_guard<std::mutex> lock(this->texturesMutex);
+            store = std::move(this->textures);
+            this->textures = nullptr;
+        }
+        if (store != nullptr)
+            store->Close();
+    }
+
+    Dx11Texture *Dx11Render::CreateTexture(const std::string &filename)
+    {
+        std::shared_ptr<Dx11TextureStore> store = this->OpenTextures();
+        py::gil_scoped_release release;
+        TEXTURE_DATA_NAMESPACE::DecodedPixels image = TEXTURE_DATA_NAMESPACE::DecodeFile(filename);
+        return new Dx11Texture(std::move(store), image.width, image.height, image.data.get(), (UINT)image.width * 4);
+    }
+
+    Dx11Texture *Dx11Render::CreateTextureFromPixels(int width, int height, py::buffer pixels, long long rowPitch)
+    {
+        TEXTURE_DATA_NAMESPACE::CheckTextureSize(width, height);
+        TEXTURE_DATA_NAMESPACE::PixelView view(pixels, width, height, rowPitch);
+        std::shared_ptr<Dx11TextureStore> store = this->OpenTextures();
+        py::gil_scoped_release release;
+        return new Dx11Texture(std::move(store), width, height, view.Bytes(), view.Pitch());
     }
 
     typedef HRESULT(__stdcall *Present)(IDXGISwapChain *, UINT, UINT);
@@ -414,8 +584,6 @@ START_M_IMGUI_IMPL_NAMESPACE
     static std::atomic<bool> hooksEnabled{false};
     static std::atomic<int> hooksInFlight{0};
     static thread_local int hookBodyDepth = 0;
-    // Depth of our own render logic and submits on this thread; hooks reached from inside it pass through.
-    static thread_local int logicDepth = 0;
     static std::atomic<HWND> attachedHwnd{nullptr};
     static bool presentHooked = false;
     static bool resizeHooked = false;
@@ -580,6 +748,7 @@ START_M_IMGUI_IMPL_NAMESPACE
         {
         }
         WaitForHooks();
+        this->CloseTextures();
         this->CleanupRenderTarget();
         if (this->pd3dDeviceContext != nullptr)
         {
@@ -662,6 +831,7 @@ START_M_IMGUI_IMPL_NAMESPACE
         if (hr != S_OK)
             _throwV_("Failed to get D3D11 device from swap chain: {}", hr);
         this->pd3dDevice->GetImmediateContext(&this->pd3dDeviceContext);
+        this->InstallTextures(0);
 
         this->CreateRenderTarget();
         this->ctx = ImGui::CreateContext();
@@ -746,6 +916,7 @@ START_M_IMGUI_IMPL_NAMESPACE
         // ImGui asserts when ViewportsEnable is first set on frame 1, so an assignment then waits one frame.
         if (ImGui::GetFrameCount() != 1 && this->viewportsDirty.exchange(false))
             SetViewportsFlag(this->viewportsEnable);
+        this->CollectTextures();
         if (this->invalidatePending.exchange(false))
             ImGui_ImplDX11_InvalidateDeviceObjects();
         ImGui_ImplDX11_NewFrame();
@@ -792,16 +963,21 @@ START_M_IMGUI_IMPL_NAMESPACE
     void pybind_setup_mImguiImpl(pybind11::module_ m)
     {
         py::class_<Dx11Texture>(m, "Dx11Texture", py::dynamic_attr(), py::module_local())
+            .def("FreeTexture", &Dx11Texture::FreeTexture)
+            .def("__bool__", [](const Dx11Texture &self) { return self.textureView != nullptr; })
             .def_property_readonly("handle", &Dx11Texture::GetHandle)
             .def_readonly("width", &Dx11Texture::width)
-            .def_readonly("height", &Dx11Texture::height);
+            .def_readonly("height", &Dx11Texture::height)
+            .def_property_readonly("size", &Dx11Texture::GetSize)
+            .def_readonly("mipLevels", &Dx11Texture::mipLevels);
 
         pybind_setup_mImguiImpl_RenderBase(m);
 
         py::class_<Dx11Render, RenderBase>(m, "_Dx11Render", py::dynamic_attr(), py::module_local())
             .def_static("InvalidateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); })
             .def_static("CreateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); return true; })
-            .def("CreateTexture", &Dx11Render::CreateTexture, py::arg("filename"), py::return_value_policy::take_ownership);
+            .def("CreateTexture", &Dx11Render::CreateTexture, py::arg("filename"), py::return_value_policy::take_ownership)
+            .def("CreateTextureFromPixels", &Dx11Render::CreateTextureFromPixels, py::arg("width"), py::arg("height"), py::arg("pixels"), py::kw_only(), py::arg("rowPitch") = 0, py::return_value_policy::take_ownership);
 
         py::class_<Dx11Window, Dx11Render> dx11Window(m, "Dx11Window", py::dynamic_attr(), py::module_local());
         dx11Window.def(py::init<std::optional<py::function>>(), py::arg("renderCallback") = py::none())

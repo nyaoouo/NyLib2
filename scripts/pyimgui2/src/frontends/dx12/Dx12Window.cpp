@@ -8,6 +8,7 @@
 #define STBI_WINDOWS_UTF8
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+#include "../../TextureData.h"
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -27,7 +28,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         };
     }
 
-    Dx12TextureStore::Dx12TextureStore(ID3D12Device *device, ID3D12DescriptorHeap *heap) : device(device), heap(heap)
+    Dx12TextureStore::Dx12TextureStore(ID3D12Device *device, ID3D12DescriptorHeap *heap, DWORD renderThread) : device(device), heap(heap), renderThread(renderThread)
     {
         this->device->AddRef();
         this->heap->AddRef();
@@ -164,6 +165,11 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         return this->open.load();
     }
 
+    bool Dx12TextureStore::OnRenderThread() const noexcept
+    {
+        return this->renderThread != 0 ? GetCurrentThreadId() == this->renderThread : logicDepth > 0;
+    }
+
     ID3D12Device *Dx12TextureStore::Device() const
     {
         return this->device;
@@ -179,10 +185,8 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         return this->gpuStart + (UINT64)slot * this->increment;
     }
 
-    Dx12TextureHelper::Dx12TextureHelper(std::shared_ptr<Dx12TextureStore> store, const char *filename) : store(std::move(store))
+    Dx12TextureHelper::Dx12TextureHelper(std::shared_ptr<Dx12TextureStore> store) : store(std::move(store))
     {
-        if (filename != nullptr)
-            this->LoadTextureFromFile(filename);
     }
 
     Dx12TextureHelper::~Dx12TextureHelper()
@@ -237,8 +241,9 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             }
         };
 
-        // Copies RGBA8 pixels into upload.texture on a private queue and waits for the copy; after a submit that did not complete, leaks every object.
-        void UploadTexture(ID3D12Device *device, UploadObjects &upload, const unsigned char *imageData, int imageWidth, int imageHeight)
+        // Copies RGBA8 rows (imageWidth*4 bytes every srcPitch) into upload.texture on a private queue and waits for the copy.
+        // After a submit that did not complete, leaks every object.
+        void UploadTexture(ID3D12Device *device, UploadObjects &upload, const unsigned char *imageData, int imageWidth, int imageHeight, UINT srcPitch)
         {
             D3D12_HEAP_PROPERTIES props = {};
             props.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -282,7 +287,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             if (hr != S_OK)
                 _throwV_("Failed to map upload buffer with error code {}", hr);
             for (int y = 0; y < imageHeight; y++)
-                memcpy((void *)((uintptr_t)mapped + y * uploadPitch), imageData + y * imageWidth * 4, imageWidth * 4);
+                memcpy((void *)((uintptr_t)mapped + (size_t)y * uploadPitch), imageData + (size_t)y * srcPitch, (size_t)imageWidth * 4);
             upload.uploadBuffer->Unmap(0, &range);
 
             D3D12_TEXTURE_COPY_LOCATION srcLocation = {};
@@ -346,48 +351,84 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
                 _throwV_("Texture upload timed out after {} ms; its upload objects are leaked", UPLOAD_TIMEOUT_MS);
             upload.leaked = false;
         }
+
+        struct UploadedTexture
+        {
+            ID3D12Resource *resource = nullptr;
+            UINT slot = 0;
+            int width = 0;
+            int height = 0;
+        };
+
+        // Uploads RGBA8 rows into a new resource and slot of the store and writes its SRV; needs no GIL.
+        UploadedTexture UploadToSlot(Dx12TextureStore &store, const unsigned char *rgba, int width, int height, UINT pitch)
+        {
+            UINT slot = store.Allocate();
+            UploadObjects upload;
+            try
+            {
+                UploadTexture(store.Device(), upload, rgba, width, height, pitch);
+            }
+            catch (...)
+            {
+                store.Unallocate(slot);
+                throw;
+            }
+
+            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+            srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            srvDesc.Texture2D.MipLevels = 1;
+            srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            store.Device()->CreateShaderResourceView(upload.texture, &srvDesc, store.CpuHandle(slot));
+            return {std::exchange(upload.texture, nullptr), slot, width, height};
+        }
     }
 
-    void Dx12TextureHelper::LoadTextureFromFile(const char *filename)
+    void Dx12TextureHelper::LoadTextureFromFile(const std::string &filename)
     {
         if (!this->store->IsOpen())
             _throw_("no D3D12 device; the session of this texture has ended");
-        int imageWidth = 0;
-        int imageHeight = 0;
-        unsigned char *imageData = stbi_load(filename, &imageWidth, &imageHeight, nullptr, 4);
-        if (imageData == nullptr)
-            _throwV_("Failed to load image file {}", filename);
-        std::unique_ptr<unsigned char, decltype(&stbi_image_free)> imageGuard(imageData, stbi_image_free);
-
-        UINT slot = this->store->Allocate();
-        UploadObjects upload;
-        try
+        if (!this->store->OnRenderThread())
+            _throw_("LoadTextureFromFile: called off the render thread; load textures from the render callback or CallBeforeFrameOnce");
+        UploadedTexture uploaded;
         {
-            UploadTexture(this->store->Device(), upload, imageData, imageWidth, imageHeight);
+            py::gil_scoped_release release;
+            TEXTURE_DATA_NAMESPACE::DecodedPixels image = TEXTURE_DATA_NAMESPACE::DecodeFile(filename);
+            uploaded = UploadToSlot(*this->store, image.data.get(), image.width, image.height, (UINT)image.width * 4);
         }
-        catch (...)
-        {
-            this->store->Unallocate(slot);
-            throw;
-        }
+        this->Assign(uploaded.resource, uploaded.slot, uploaded.width, uploaded.height);
+    }
 
-        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-        srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        srvDesc.Texture2D.MipLevels = 1;
-        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        this->store->Device()->CreateShaderResourceView(upload.texture, &srvDesc, this->store->CpuHandle(slot));
-
+    void Dx12TextureHelper::Assign(ID3D12Resource *resource, UINT slot, int width, int height)
+    {
         this->store->Retire(this->srv, this->slot);
-        this->srv = std::exchange(upload.texture, nullptr);
+        this->srv = resource;
         this->slot = slot;
-        this->width = imageWidth;
-        this->height = imageHeight;
+        this->width = width;
+        this->height = height;
     }
 
     Dx12TextureHelper *Dx12Render::CreateTexture(const char *filename)
     {
-        return new Dx12TextureHelper(this->OpenTextures(), filename);
+        std::unique_ptr<Dx12TextureHelper> helper(new Dx12TextureHelper(this->OpenTextures()));
+        if (filename != nullptr)
+            helper->LoadTextureFromFile(filename);
+        return helper.release();
+    }
+
+    Dx12TextureHelper *Dx12Render::CreateTextureFromPixels(int width, int height, py::buffer pixels, long long rowPitch)
+    {
+        TEXTURE_DATA_NAMESPACE::CheckTextureSize(width, height);
+        TEXTURE_DATA_NAMESPACE::PixelView view(pixels, width, height, rowPitch);
+        std::unique_ptr<Dx12TextureHelper> helper(new Dx12TextureHelper(this->OpenTextures()));
+        UploadedTexture uploaded;
+        {
+            py::gil_scoped_release release;
+            uploaded = UploadToSlot(*helper->store, view.Bytes(), width, height, view.Pitch());
+        }
+        helper->Assign(uploaded.resource, uploaded.slot, uploaded.width, uploaded.height);
+        return helper.release();
     }
 
     std::shared_ptr<Dx12TextureStore> Dx12Render::OpenTextures()
@@ -398,14 +439,16 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             store = this->textures;
         }
         if (store == nullptr || !store->IsOpen())
-            _throw_("CreateTexture: no D3D12 device; call it while Serve() runs (e.g. from CallBeforeFrameOnce) or after the inbound hook drew a frame");
+            _throw_("no D3D12 device; call it while Serve() runs (e.g. from CallBeforeFrameOnce) or after the inbound hook drew a frame");
+        if (!store->OnRenderThread())
+            _throw_("called off the render thread; create textures from the render callback or CallBeforeFrameOnce");
         return store;
     }
 
-    void Dx12Render::InstallTextures()
+    void Dx12Render::InstallTextures(DWORD renderThread)
     {
         this->CloseTextures(false);
-        auto store = std::make_shared<Dx12TextureStore>(this->pd3dDevice, this->pd3dSrvDescHeap);
+        auto store = std::make_shared<Dx12TextureStore>(this->pd3dDevice, this->pd3dSrvDescHeap, renderThread);
         std::lock_guard<std::mutex> lock(this->texturesMutex);
         this->textures = std::move(store);
     }
@@ -521,7 +564,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if ((hr = this->pd3dDevice->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&this->pd3dSrvDescHeap))) != S_OK)
             _throwV_("Failed to create SRV descriptor heap: {}", hr);
-        this->InstallTextures();
+        this->InstallTextures(GetCurrentThreadId());
 
         D3D12_COMMAND_QUEUE_DESC queueDesc = {};
         queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -900,7 +943,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
                 hr = device->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&this->window.pd3dSrvDescHeap));
                 if (FAILED(hr))
                     _throwV_("Failed to create the overlay SRV heap: {:#x}", (unsigned)hr);
-                this->window.InstallTextures();
+                this->window.InstallTextures(GetCurrentThreadId());
 
                 for (UINT i = 0; i < Dx12Window::NUM_FRAMES_IN_FLIGHT; i++)
                 {
@@ -1532,7 +1575,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if ((hr = this->pd3dDevice->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&this->pd3dSrvDescHeap))) != S_OK)
             _throwV_("Failed to create SRV heap: {}", hr);
-        this->InstallTextures();
+        this->InstallTextures(0);
 
         for (UINT i = 0; i < NUM_FRAMES_IN_FLIGHT; i++)
             if ((hr = this->pd3dDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&this->frameContext[i].CommandAllocator))) != S_OK)
@@ -1877,13 +1920,15 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             .def_property_readonly("handle", &Dx12TextureHelper::GetHandle)
             .def_property_readonly("width", [](const Dx12TextureHelper &self) { return self.width; })
             .def_property_readonly("height", [](const Dx12TextureHelper &self) { return self.height; })
-            .def_property_readonly("size", &Dx12TextureHelper::GetSize);
+            .def_property_readonly("size", &Dx12TextureHelper::GetSize)
+            .def_property_readonly("mipLevels", [](const Dx12TextureHelper &self) { return self.mipLevels; });
 
         py::class_<Dx12Render, RenderBase>(m, "Dx12Render", py::dynamic_attr(), py::module_local())
             .def_static("InvalidateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); })
             .def_static("CreateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); return true; })
             .def("CreateTexture", [](Dx12Render &self, const char *filename) { return self.CreateTexture(filename); }, py::arg("filename"), py::return_value_policy::take_ownership)
-            .def("CreateTexture", [](Dx12Render &self) { return self.CreateTexture(); }, py::return_value_policy::take_ownership);
+            .def("CreateTexture", [](Dx12Render &self) { return self.CreateTexture(); }, py::return_value_policy::take_ownership)
+            .def("CreateTextureFromPixels", &Dx12Render::CreateTextureFromPixels, py::arg("width"), py::arg("height"), py::arg("pixels"), py::kw_only(), py::arg("rowPitch") = 0, py::return_value_policy::take_ownership);
 
         py::class_<Dx12Window, Dx12Render> dx12Window(m, "Dx12Window", py::dynamic_attr(), py::module_local());
         dx12Window.def(py::init<std::optional<py::function>>(), py::arg("renderCallback") = py::none())

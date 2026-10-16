@@ -24,7 +24,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         static UINT const HEAP_SIZE = 4096;
         static UINT const NULL_SLOT = 1;
 
-        Dx12TextureStore(ID3D12Device *device, ID3D12DescriptorHeap *heap); // AddRefs both and writes the null SRV into NULL_SLOT
+        Dx12TextureStore(ID3D12Device *device, ID3D12DescriptorHeap *heap, DWORD renderThread); // AddRefs both and writes the null SRV into NULL_SLOT
         ~Dx12TextureStore();                                                 // after Close(true) releases device and heap; leaky or never closed: leaks them
         Dx12TextureStore(const Dx12TextureStore &) = delete;
         Dx12TextureStore &operator=(const Dx12TextureStore &) = delete;
@@ -35,6 +35,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         void Collect(UINT64 submitted, UINT64 completed) noexcept; // render thread, before the backend NewFrame
         void Close(bool gpuIdle) noexcept;                         // teardown, unwind guard or open site; idempotent
         bool IsOpen() const noexcept;                              // lock-free; read on every handle access
+        bool OnRenderThread() const noexcept;                      // renderThread 0 (inbound): inside our hooked frame
         ID3D12Device *Device() const;
         D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle(UINT slot) const;
         UINT64 GpuHandle(UINT slot) const;
@@ -52,6 +53,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         bool leaky = false;
         ID3D12Device *device;
         ID3D12DescriptorHeap *heap;
+        DWORD renderThread;
         UINT increment;
         D3D12_CPU_DESCRIPTOR_HANDLE cpuStart;
         UINT64 gpuStart;
@@ -70,14 +72,16 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         UINT slot = 0;
         int width = 0;
         int height = 0;
+        int mipLevels = 1;
 
-        Dx12TextureHelper(std::shared_ptr<Dx12TextureStore> store, const char *filename = nullptr);
+        explicit Dx12TextureHelper(std::shared_ptr<Dx12TextureStore> store);
         ~Dx12TextureHelper();
         Dx12TextureHelper(const Dx12TextureHelper &) = delete;
         Dx12TextureHelper &operator=(const Dx12TextureHelper &) = delete;
 
         void FreeTexture();
-        void LoadTextureFromFile(const char *filename);
+        void LoadTextureFromFile(const std::string &filename); // GIL held on entry; released for decode and upload
+        void Assign(ID3D12Resource *resource, UINT slot, int width, int height); // GIL held; retires the previous resource and slot
         uintptr_t GetHandle() const;
         ImVec2 GetSize() const;
     };
@@ -97,8 +101,9 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         Dx12Render(std::optional<py::function> renderCallback = std::nullopt) : RenderBase(renderCallback) {}
 
         Dx12TextureHelper *CreateTexture(const char *filename = nullptr);
-        std::shared_ptr<Dx12TextureStore> OpenTextures();           // the open store, or RuntimeError "no D3D12 device"
-        void InstallTextures();                                     // open site: closes a leftover store leaky, then opens one on pd3dDevice and pd3dSrvDescHeap
+        Dx12TextureHelper *CreateTextureFromPixels(int width, int height, py::buffer pixels, long long rowPitch);
+        std::shared_ptr<Dx12TextureStore> OpenTextures();           // the open store, else RuntimeError "no D3D12 device"; off the render thread RuntimeError "render thread"
+        void InstallTextures(DWORD renderThread);                   // open site: closes a leftover store leaky, then opens one on pd3dDevice and pd3dSrvDescHeap; 0 for inbound
         void CollectTextures(UINT64 submitted, UINT64 completed) noexcept;
         void CloseTextures(bool gpuIdle) noexcept;
     };
