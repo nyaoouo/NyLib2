@@ -94,8 +94,11 @@ thread: a call from another thread is not detected and races the frame.
 Installed before the first frame, the font is the first in the atlas and
 becomes the default font; use `imgui_ctx.PushFont(font)` to switch fonts for a
 block. A font installed after the first frame needs
-`wnd.InvalidateDeviceObjects()`, called in the same `CallBeforeFrameOnce`
-callback, so the backend uploads the rebuilt atlas texture.
+`wnd.InvalidateDeviceObjects()` so the backend uploads the rebuilt atlas
+texture. The call only records a request, which is applied right before the
+next frame starts, so calling it from the render callback is safe too; call it
+in the same `CallBeforeFrameOnce` callback as the install so that no frame is
+drawn with the old texture.
 
 Every script font contributes all of its glyphs, so the atlas grows with
 `size_pixels`: `AutoInstall(locale='zh-CN')` is about 4096x4096 (64 MiB) at

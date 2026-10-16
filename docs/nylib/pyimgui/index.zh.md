@@ -59,7 +59,7 @@ wnd.Serve()
 
 `gamepadPolicy` (`pyimgui.GamepadPolicy`，默认 `WhenForeground`) 控制 ImGui 是否读取已连接的手柄。在默认情况下，ImGui 仅在其绘制所用的窗口为前台窗口时读取手柄，因此后台窗口默认不再对控制器做出反应；`Always` 每帧读取手柄，`Never` 则不读取；`NavEnableGamepad` 无论如何都保持启用。在 `inputPolicy = PassAll` 下，Inbound 和叠加层永远不读取手柄，无论 `gamepadPolicy` 怎么说。对于 `Always`，ImGui 也会在无人观察的帧上读取手柄——例如当叠加层的目标被最小化时——因此按键可以激活视线外的获焦小部件。当门打开时，如果手柄按钮已经被按住——例如窗口变成前台窗口——ImGui 会在该帧看到一次新的按键。
 
-<!-- dt:section id="fonts-0" hash="87988bbd0cf7" -->
+<!-- dt:section id="fonts-0" hash="b888623e8df0" -->
 ## 字体
 
 `win32_font` 通过 DirectWrite 查找系统字体，并把它们加载进 ImGui 的
@@ -89,8 +89,10 @@ wnd.Serve()
 安装，会抛出 `RuntimeError`。只能在渲染线程上安装：从其他线程调用不会被
 检测出来，并且会与帧发生竞争。在第一帧之前安装的字体是图集中的第一个字体，
 会成为默认字体；用 `imgui_ctx.PushFont(font)` 可以为一段代码切换字体。
-在第一帧之后安装的字体需要在同一个 `CallBeforeFrameOnce` 回调里调用
-`wnd.InvalidateDeviceObjects()`，让后端上传重建后的图集纹理。
+在第一帧之后安装的字体需要调用 `wnd.InvalidateDeviceObjects()`，让后端上传
+重建后的图集纹理。这个调用只记录一个请求，在下一帧开始前才执行，所以在渲染回调
+里调用也是安全的；请在安装字体的同一个 `CallBeforeFrameOnce` 回调里调用它，
+这样不会有任何一帧用旧纹理绘制。
 
 每个文字的字体都会贡献它的全部字形，所以图集随 `size_pixels` 增长：
 `AutoInstall(locale='zh-CN')` 在 16 px 时约为 4096x4096（64 MiB），24 px 时
