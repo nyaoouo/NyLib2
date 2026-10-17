@@ -1,7 +1,9 @@
 import contextlib
 import ctypes
 import sys
+import threading
 import typing
+import weakref
 from ._buf import int_arg, pinned, view
 from ._data import _with_views
 from ._lib import OodleError, current
@@ -9,6 +11,64 @@ from ._lib import OodleError, current
 _MAX_WINDOW = 1 << 24  # OODLENETWORK1_MAX_DICTIONARY_SIZE
 _OVERREAD = 5  # OODLENETWORK1_DECOMP_BUF_OVERREAD_LEN
 _S32_MAX = 0x7FFFFFFF
+
+_PAGE = 0x1000
+_MEM_COMMIT_RESERVE, _MEM_RELEASE = 0x3000, 0x8000  # MEM_COMMIT|MEM_RESERVE, MEM_RELEASE
+_PAGE_RW, _PAGE_NOACCESS = 0x04, 0x01
+
+_k32 = None
+
+
+def _kernel32():
+    """kernel32's VirtualAlloc/Free/Protect, bound on first use."""
+    global _k32
+    if _k32 is None:
+        k = ctypes.WinDLL('kernel32', use_last_error=True)
+        k.VirtualAlloc.restype = ctypes.c_void_p
+        k.VirtualAlloc.argtypes = (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_uint32)
+        k.VirtualFree.argtypes = (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32)
+        k.VirtualProtect.argtypes = (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32))
+        _k32 = k
+    return _k32
+
+
+class _GuardedBuffer:
+    """`capacity` writable bytes ending at a PAGE_NOACCESS guard page; `slot(n)` ends an n-byte access exactly at the guard.
+
+    Allocation fails closed: a failed VirtualAlloc or guard VirtualProtect frees what it got and raises before any use.
+    """
+    __slots__ = ('base', 'guard', 'capacity')
+
+    def __init__(self):
+        self.base = self.guard = self.capacity = 0
+
+    def _alloc(self, n: int):
+        span = (n + _PAGE - 1) // _PAGE * _PAGE
+        k = _kernel32()
+        if not (base := k.VirtualAlloc(None, span + _PAGE, _MEM_COMMIT_RESERVE, _PAGE_RW)):
+            raise MemoryError(f'VirtualAlloc of {span + _PAGE} bytes failed (WinError {ctypes.get_last_error()})')
+        if not k.VirtualProtect(base + span, _PAGE, _PAGE_NOACCESS, ctypes.byref(ctypes.c_uint32())):
+            err = ctypes.get_last_error()
+            k.VirtualFree(base, 0, _MEM_RELEASE)
+            raise OSError(0, f'VirtualProtect could not arm the guard page (WinError {err})', None, err)
+        self.base, self.guard, self.capacity = base, base + span, span
+
+    def slot(self, n: int) -> int:
+        """Address where an n-byte access ends at the guard page; grows the region when needed (caller holds the lock)."""
+        if n > self.capacity:
+            self.free()
+            self._alloc(n)
+        return self.guard - n
+
+    def free(self):
+        if self.base:
+            _k32.VirtualFree(self.base, 0, _MEM_RELEASE)
+            self.base = self.guard = self.capacity = 0
+
+
+def _release(*guards: _GuardedBuffer):
+    for g in guards:
+        g.free()
 
 
 def _checked_size(lib, name: str, v: int, raw: int | None = None) -> int:
@@ -78,12 +138,15 @@ class _Codec:
         with view(src, 'src') as mv:
             if not (n_src := mv.nbytes):
                 return b''
-            lib, func = self._lib, f'OodleNetwork1{self._proto}_Encode'
-            encode = lib.require(func, f'{self._name}.compress')
-            size_needed = lib.require('OodleNetwork1_CompressedBufferSizeNeeded', f'{self._name}.compress')
-            comp = ctypes.create_string_buffer(_checked_size(lib, 'OodleNetwork1_CompressedBufferSizeNeeded', size_needed(n_src), n_src))
-            with pinned(mv) as p_src:
-                n = encode(self._state, self._shared, p_src, n_src, comp)
+            return self._encode(mv, n_src)
+
+    def _encode(self, mv: memoryview, n_src: int) -> bytes:
+        lib, func = self._lib, f'OodleNetwork1{self._proto}_Encode'
+        encode = lib.require(func, f'{self._name}.compress')
+        size_needed = lib.require('OodleNetwork1_CompressedBufferSizeNeeded', f'{self._name}.compress')
+        comp = ctypes.create_string_buffer(_checked_size(lib, 'OodleNetwork1_CompressedBufferSizeNeeded', size_needed(n_src), n_src))
+        with pinned(mv) as p_src:
+            n = encode(self._state, self._shared, p_src, n_src, comp)
         if not 0 <= n <= n_src:
             raise OodleError(f'{func} returned {n} ({n_src} raw bytes)', func=func, result=n, path=lib.path)
         return bytes(memoryview(comp)[:n])
@@ -125,3 +188,87 @@ class UdpCodec(_Codec):
         if not ok:
             raise self._decode_error(func, ok, raw_size, n_src)
         return buf.raw if out is None else out[:raw_size]
+
+
+class TcpCodec(_Codec):
+    """Oodle Network 1 TCP codec: an adaptive state for one stream direction; decode is guarded and any failure poisons the instance.
+
+    Serves packets of one direction in order; rebuild a desynced stream from an earlier copy(). The lock gives memory safety, not ordering.
+    """
+    _proto, _name = 'TCP', 'oodle.TcpCodec'
+
+    def __init__(self, window, hash_bits: int = 19, training: typing.Iterable = ()):
+        self._poisoned = False
+        self._lock = threading.Lock()
+        self._out, self._comp = _GuardedBuffer(), _GuardedBuffer()
+        super().__init__(window, hash_bits, training)
+        self._arm_finalizer()
+
+    def _arm_finalizer(self):
+        fin = weakref.finalize(self, _release, self._out, self._comp)
+        fin.atexit = False
+
+    def _check_poison(self):
+        if self._poisoned:
+            raise OodleError('this TcpCodec is poisoned by an earlier failure; rebuild the stream from an earlier copy()',
+                             path=self._lib.path)
+
+    def _encode(self, mv: memoryview, n_src: int) -> bytes:
+        with self._lock:
+            self._check_poison()
+            try:
+                return super()._encode(mv, n_src)
+            except BaseException:
+                self._poisoned = True
+                raise
+
+    def _decompress(self, src: memoryview, out: memoryview | None, raw_size: int):
+        if out is not None and out.nbytes < raw_size:
+            raise ValueError(f'out is {out.nbytes} bytes, raw_size is {raw_size}')
+        with self._lock:
+            self._check_poison()
+            if not raw_size:
+                return b'' if out is None else out[:0]
+            func, n_src = 'OodleNetwork1TCP_Decode', src.nbytes
+            decode = self._lib.require(func, 'oodle.TcpCodec.decompress')
+            comp = self._comp.slot(n_src + _OVERREAD)
+            with pinned(src) as p_src:
+                ctypes.memmove(comp, p_src, n_src)
+            ctypes.memset(comp + n_src, 0, _OVERREAD)
+            dst = self._out.slot(raw_size)
+            try:
+                ok = decode(self._state, self._shared, comp, n_src, dst, raw_size)
+                if not ok:
+                    raise self._decode_error(func, ok, raw_size, n_src)
+                return self._copy_out(dst, raw_size, out)
+            except OSError as e:
+                self._poisoned = True
+                raise OodleError(f'{func} faulted on a mismatched packet (out-of-bounds access); the TCP stream is '
+                                 f'desynchronised and this codec is now unusable (rebuild it from an earlier copy())',
+                                 func=func, expected=raw_size, path=self._lib.path) from e
+            except BaseException:
+                self._poisoned = True
+                raise
+
+    def _copy_out(self, dst: int, raw_size: int, out):
+        with memoryview((ctypes.c_char * raw_size).from_address(dst)).cast('B') as b:
+            if out is None:
+                return bytes(b)
+            out[:raw_size] = b
+        return out[:raw_size]
+
+    def copy(self) -> 'TcpCodec':
+        """A new codec with a copy of the current state; the window, hash table and bound DLL are shared, not copied."""
+        with self._lock:
+            self._check_poison()
+            lib = self._lib
+            init_as_copy = lib.require('OodleNetwork1TCP_State_InitAsCopy', 'oodle.TcpCodec.copy')
+            state_size = lib.require('OodleNetwork1TCP_State_Size', 'oodle.TcpCodec.copy')
+            new = TcpCodec.__new__(TcpCodec)
+            new._poisoned, new._lock = False, threading.Lock()
+            new._out, new._comp = _GuardedBuffer(), _GuardedBuffer()
+            new._lib, new._window, new._shared = lib, self._window, self._shared
+            new._state = ctypes.create_string_buffer(_checked_size(lib, 'OodleNetwork1TCP_State_Size', state_size()))
+            init_as_copy(new._state, self._state)
+            new._arm_finalizer()
+        return new
