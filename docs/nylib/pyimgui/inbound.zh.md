@@ -26,7 +26,11 @@ time.sleep(3)
 renderer.Detach()
 ```
 
-`CreateInbound(renderCallback, frontend=None)` 从进程中已加载的任何单个 `d3d9/10/11/12.dll` 选择前端；当加载了多个 D3D 运行时时，传递 `frontend=`（`'dx9'`、`'dx10'`、`'dx11'`、`'dx12'`、`'gl3'`、`'vk'` 之一）（否则会抛出异常并列出已加载的集合），或直接构造类（`Dx11Inbound`、`Dx12Inbound`、...）。`Attach()` 安装钩子并开始调用 `renderCallback`；`Detach()` 移除它。
+`CreateInbound(renderCallback, frontend=None)` 从进程中已加载的任何单个 `d3d9/10/11/12.dll` 选择前端；当加载了多个 D3D 运行时时，传递 `frontend=`（`'dx9'`、`'dx10'`、`'dx11'`、`'dx12'`、`'gl3'`、`'vk'` 之一）（否则会抛出异常并列出已加载的集合），或直接构造类（`Dx11Inbound`、`Dx12Inbound`、...）。`Attach()` 安装钩子并开始调用 `renderCallback`；`Detach()` 停止绘制和输入。已安装的钩子在进程运行期间保留为直通路径，供其他 overlay 继续调用。
+
+`Dx11Inbound` 和 `Dx12Inbound` 的 `Attach(mode=...)` 接受 `pyimgui.HookMode.Detours`（默认）、`Vtable` 或 `Auto`。`Vtable` 钩住共享 DXGI 交换链的 `Present`、`Present1`、`ResizeBuffers` 和 `ResizeBuffers1` 槽位；DX12 还钩住用于发现队列的命令队列 vtable 槽位。此模式需要 `IDXGISwapChain3`，且不修改函数入口字节。`Auto` 将 Detours 所需覆盖的完整指令范围与磁盘映像比较：原生入口未修改时选 Detours，入口已有补丁且共享表可用时选 Vtable。`renderer.hookMode` 返回实际选择。已附加时更换模式会抛出 `RuntimeError`，须先调用 `Detach()`。DX9、DX10、GL3 和 Vulkan 保持现有钩子，不接受 `mode=`。
+
+如果交换链对象的 vptr 被替换，或调用方缓存了函数指针，共享 vtable 钩子可能收不到调用。此时应显式使用 `Detours`。
 
 你的 `renderCallback` 总是在拥有游戏呈现调用的线程上运行 - 只能从那里调用 `pyimgui`/`pyimgui.esp`，不能从其他线程调用。
 

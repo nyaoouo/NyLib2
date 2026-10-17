@@ -29,9 +29,9 @@ START_IMGUI_INBOUND_NAMESPACE
     RenderType GuessRenderType();
     void Init(RenderType renderType);
     PVOID GetMethod(size_t index);
-    // Dummy D3D12 vtables recorded by Init(D3D12); nullptr before that.
+    PVOID *GetSwapChain3Vtable();
+    // Dummy vtables recorded by Init; nullptr before the matching backend is initialized.
     PVOID *GetD3D12QueueVtable();
-    PVOID *GetD3D12SwapChain3Vtable();
     RenderType GetRenderType();
     void pybind_setup_imgui_inbound(pybind11::module_ m);
 }

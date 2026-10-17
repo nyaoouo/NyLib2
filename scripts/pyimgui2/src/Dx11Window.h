@@ -122,7 +122,7 @@ START_M_IMGUI_IMPL_NAMESPACE
         Dx11Inbound(std::optional<py::function> renderCallback = std::nullopt);
         ~Dx11Inbound();
 
-        void Attach();
+        void Attach(OVERLAY_TYPES_NAMESPACE::HookMode mode = OVERLAY_TYPES_NAMESPACE::HookMode::Detours);
         void Detach();
         void InitImGui(IDXGISwapChain *pSwapChain);
         void Update();

@@ -6,17 +6,17 @@ START_IMGUI_INBOUND_NAMESPACE
     static RenderType g_renderType = RenderType::None;
     static PVOID *g_methodsTable = nullptr;
     static size_t g_methodsTableSize = 0;
+    static PVOID *g_swapChain3Vtable = nullptr;
     static PVOID *g_d3d12QueueVtable = nullptr;
-    static PVOID *g_d3d12SwapChain3Vtable = nullptr;
+
+    PVOID *GetSwapChain3Vtable()
+    {
+        return g_swapChain3Vtable;
+    }
 
     PVOID *GetD3D12QueueVtable()
     {
         return g_d3d12QueueVtable;
-    }
-
-    PVOID *GetD3D12SwapChain3Vtable()
-    {
-        return g_d3d12SwapChain3Vtable;
     }
 
     RenderType GuessRenderType()
@@ -84,6 +84,10 @@ START_IMGUI_INBOUND_NAMESPACE
 
     void Init(RenderType renderType)
     {
+        if (g_renderType == renderType && g_methodsTable != nullptr)
+            return;
+        g_swapChain3Vtable = nullptr;
+        g_d3d12QueueVtable = nullptr;
         bool bSuccess = false;
         HRESULT hr = S_OK;
         std::runtime_error err = _err_("Failed but no error message");
@@ -232,6 +236,12 @@ START_IMGUI_INBOUND_NAMESPACE
                 _mSetMethodsTable_(0, swapChain, 18);
                 _mSetMethodsTable_(18, device, 43);
                 _mSetMethodsTable_(18 + 43, context, 144);
+                IDXGISwapChain3 *swapChain3 = nullptr;
+                if (swapChain->QueryInterface(__uuidof(IDXGISwapChain3), (void **)&swapChain3) == S_OK)
+                {
+                    g_swapChain3Vtable = *(PVOID **)swapChain3;
+                    swapChain3->Release();
+                }
                 swapChain->Release();
                 device->Release();
                 context->Release();
@@ -298,7 +308,7 @@ START_IMGUI_INBOUND_NAMESPACE
                                         IDXGISwapChain3 *swapChain3 = nullptr;
                                         if (swapChain->QueryInterface(__uuidof(IDXGISwapChain3), (void **)&swapChain3) == S_OK)
                                         {
-                                            g_d3d12SwapChain3Vtable = *(PVOID **)swapChain3;
+                                            g_swapChain3Vtable = *(PVOID **)swapChain3;
                                             swapChain3->Release();
                                         }
                                         swapChain->Release();
