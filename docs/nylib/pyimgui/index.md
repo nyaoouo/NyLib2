@@ -117,8 +117,8 @@ DX10.
 
 `CreateTexture(filename)` and `CreateTextureFromPixels(width, height,
 pixels)` exist on the DX11 and DX12 renderers (`Dx11Window`/`Dx12Window`,
-standalone or overlay, and `Dx11Inbound`/`Dx12Inbound`); DX11 also takes
-`mips=False`. DX9, DX10, GL3 and VK have neither: check
+standalone or overlay, and `Dx11Inbound`/`Dx12Inbound`); both backends also
+take `mips=False`. DX9, DX10, GL3 and VK have neither: check
 `hasattr(renderer, 'CreateTexture')` and fall back, for example to a solid
 rectangle. The returned objects share the same members on both backends:
 `handle` (the ImGui texture id), `width`, `height`, `size`, `mipLevels`,
@@ -229,7 +229,8 @@ session: once `Serve()` returned or raised, or the inbound renderer is
 destroyed, reading `handle` raises `RuntimeError`, so create new ones for a
 new session. `InvalidateDeviceObjects()` (after a font change) does not
 affect textures. DX12 holds up to 4094 live textures at once; beyond that,
-creation raises `RuntimeError`. DX12 `LoadTextureFromFile` changes `handle`.
+creation raises `RuntimeError`. DX12 `LoadTextureFromFile` changes `handle`,
+and so does DX12 `UpdatePixels`.
 
 Format and memory: `pixels` is RGBA8 with straight alpha, row 0 at the top,
 in a C-contiguous buffer (`bytes`, `bytearray`, `memoryview`, `array.array`,
@@ -245,14 +246,13 @@ triangle, for example a clipped polygon drawn as a fan; see
 [esp.md](esp.md)). UV (0, 0) is the top-left texel.
 
 Sampling: by default, every texture samples bilinear on mip 0 only, on both
-backends. DX11 adds `mips=True` at creation and a per-draw sampler: wrap
-draws in `SetTextureSampler(dl, pyimgui.TextureFilter.Point/Linear/Anisotropic)`
+backends. Both backends add `mips=True` at creation and a per-draw sampler:
+wrap draws in `SetTextureSampler(dl, pyimgui.TextureFilter.Point/Linear/Anisotropic)`
 and `ResetTextureSampler(dl)` on the same draw list. `Point` keeps magnified
 pixels crisp, `Linear` is trilinear across mips, `Anisotropic` suits a
 stretched image seen at a shallow angle. Keep text outside a `Point` scope,
 since it loses its anti-aliasing there. There is no nesting: `Reset`
-restores the backend's default. DX12 has neither `mips=` nor a sampler scope
-yet.
+restores the backend's default.
 
 ```python
 # needs: running pyimgui window
@@ -290,7 +290,7 @@ wnd.Serve()
 
 Large images: memory follows the format rule above (64 MiB at 4096x4096,
 plus about a third with mips). Drawn much smaller than its size, a texture
-aliases under the default sampler; on DX11, `mips=True` plus a `Linear` or
+aliases under the default sampler; `mips=True` plus a `Linear` or
 `Anisotropic` scope avoids that. Dropping a texture frees it at the next
 frame boundary, so a cache can drop what it no longer shows. For very large
 images, consider tiling: several smaller textures, created and dropped as
@@ -302,6 +302,50 @@ image once, before upload: `Y = (2126 R + 7152 G + 722 B + 5000) // 10000`
 on the stored 8-bit values, output `(Y, Y, Y, A)`. On an ordinary sRGB image
 that is BT.709 luma, not linear luminance. Alpha and size are kept, mips are
 built after the conversion, and without `transform` nothing changes.
+
+Updating pixels: `tex.UpdatePixels(pixels, *, rowPitch=0)` replaces a
+texture's pixels with a new buffer of the same size, with the pixel and
+`rowPitch` rules of `CreateTextureFromPixels`. Call it on the render thread
+only, from the render callback or `CallBeforeFrameOnce`; off the render
+thread, on an empty or freed texture, or after the session ended it raises
+`RuntimeError`, and a buffer sized for another width or height raises
+`ValueError`. A texture created with `mips=True` gets its whole mip chain
+rebuilt from the new pixels. DX11 updates in place and keeps `handle`, so
+draws already recorded earlier in the frame show the new pixels too; DX12
+uploads a new texture on every call and changes `handle`, so draws recorded
+earlier in the frame still show the old pixels - read `handle` when you
+draw.
+
+```python
+# needs: running pyimgui window
+import pathlib
+from nylib.pyimgui import Dx11Window, imgui
+
+live = {}
+colors = [(200, 60, 60), (60, 200, 60), (60, 60, 200)]
+
+def make_ppm(path, width, height, rgb):
+    header = f'P6\n{width} {height}\n255\n'.encode('ascii')
+    path.write_bytes(header + bytes(rgb) * (width * height))
+
+def load_live(wnd):
+    path = pathlib.Path('update_demo.ppm')
+    make_ppm(path, 64, 64, colors[0])
+    live['tex'] = wnd.CreateTexture(str(path))
+
+def render(wnd):
+    if 'tex' not in live:
+        return
+    frame = imgui.GetFrameCount()
+    if frame % 30 == 0:
+        rgb = colors[(frame // 30) % len(colors)]
+        live['tex'].UpdatePixels(bytes(rgb + (255,)) * (64 * 64))
+    imgui.Image(live['tex'].handle, imgui.ImVec2(64, 64))
+
+wnd = Dx11Window(render)
+wnd.CallBeforeFrameOnce(lambda: load_live(wnd))
+wnd.Serve()
+```
 
 ## Next
 
