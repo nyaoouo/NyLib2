@@ -106,6 +106,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         void FreeTexture();
         void LoadTextureFromFile(const std::string &filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform = std::nullopt, bool mips = false); // GIL held on entry; released for decode, transform, mips and upload
         void Assign(ID3D12Resource *resource, UINT slot, int width, int height, int mipLevels); // GIL held; retires the previous resource and slot
+        void UpdatePixels(py::buffer pixels, long long rowPitch); // render thread, GIL held on entry; same size into a new slot (handle changes), mips rebuilt
         uintptr_t GetHandle() const;
         ImVec2 GetSize() const;
     };

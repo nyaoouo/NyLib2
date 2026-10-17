@@ -521,6 +521,31 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         this->mipLevels = mipLevels;
     }
 
+    void Dx12TextureHelper::UpdatePixels(py::buffer pixels, long long rowPitch)
+    {
+        if (this->srv == nullptr)
+            _throw_("UpdatePixels: empty texture; it was freed or never loaded");
+        TEXTURE_DATA_NAMESPACE::PixelView view(pixels, this->width, this->height, rowPitch);
+        if (!this->store->IsOpen())
+            _throw_("no D3D12 device; the session of this texture has ended");
+        if (!this->store->OnRenderThread())
+            _throw_("UpdatePixels: called off the render thread; update textures from the render callback or CallBeforeFrameOnce");
+        int width = this->width;
+        int height = this->height;
+        bool mips = this->mipLevels > 1;
+        UploadedTexture uploaded;
+        {
+            py::gil_scoped_release release;
+            uploaded = UploadToSlot(*this->store, view.Bytes(), width, height, view.Pitch(), mips);
+        }
+        if (this->srv == nullptr)
+        {
+            this->store->Retire(uploaded.resource, uploaded.slot); // freed by another thread meanwhile: the update loses
+            return;
+        }
+        this->Assign(uploaded.resource, uploaded.slot, uploaded.width, uploaded.height, uploaded.mipLevels);
+    }
+
     Dx12TextureHelper *Dx12Render::CreateTexture(const char *filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform, bool mips)
     {
         TEXTURE_DATA_NAMESPACE::CheckTextureTransform(transform);
@@ -2029,6 +2054,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         py::class_<Dx12TextureHelper>(m, "Dx12TextureHelper", py::dynamic_attr(), py::module_local())
             .def("LoadTextureFromFile", &Dx12TextureHelper::LoadTextureFromFile, py::arg("filename"), py::kw_only(), py::arg("transform") = py::none(), py::arg("mips") = false)
             .def("FreeTexture", &Dx12TextureHelper::FreeTexture)
+            .def("UpdatePixels", &Dx12TextureHelper::UpdatePixels, py::arg("pixels"), py::kw_only(), py::arg("rowPitch") = 0)
             .def("__bool__", [](const Dx12TextureHelper &self) { return self.srv != nullptr; })
             .def_property_readonly("handle", &Dx12TextureHelper::GetHandle)
             .def_property_readonly("width", [](const Dx12TextureHelper &self) { return self.width; })
