@@ -17,6 +17,13 @@ START_OVERLAY_TYPES_NAMESPACE
         PassAll = 2,
     };
 
+    enum class HookMode
+    {
+        Detours = 0,
+        Vtable = 1,
+        Auto = 2,
+    };
+
     enum class OverlayZOrder
     {
         AboveTarget = 0,

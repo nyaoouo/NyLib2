@@ -133,9 +133,30 @@ def draw(renderer):
 
 
 renderer = InboundCls(draw)
+_requested_mode = os.environ.get("DXTEST_HOOK_MODE", "").lower()
+_method_addr = 0
+_method_before = b""
+_queue_addr = 0
+_queue_before = b""
+if _requested_mode and backend in _PRESENT_METHOD_INDEX:
+    frontend_module.inbound.Init(getattr(frontend_module.inbound.RenderType, f"D3D{backend[2:]}"))
+    _method_addr = frontend_module.inbound.GetMethod(_PRESENT_METHOD_INDEX[backend])
+    if backend == "dx12":
+        _queue_addr = frontend_module.inbound.GetMethod(54)
+_attach_at = float(os.environ.get("DXTEST_ATTACH_AT", "0"))
+if _attach_at:
+    time.sleep(_attach_at)
+if _method_addr:
+    _method_before = bytes(Process.current.read_memoryview(_method_addr, 16))
+if _queue_addr:
+    _queue_before = bytes(Process.current.read_memoryview(_queue_addr, 16))
 for attempt in range(50):
     try:
-        renderer.Attach()
+        if _requested_mode and backend in _PRESENT_METHOD_INDEX:
+            mode = getattr(nylib.pyimgui.HookMode, {"detours": "Detours", "vtable": "Vtable", "auto": "Auto"}[_requested_mode])
+            renderer.Attach(mode)
+        else:
+            renderer.Attach()
         mark("payload_attached")
         break
     except Exception as exc:
@@ -148,20 +169,17 @@ else:
 # a stale main-tree one. Gated like the rest so the default run's marker set
 # is unchanged; a harness run sets at least one DXTEST_* var below.
 _HARNESS_ENV_VARS = (
-    "DXTEST_HOOK_MODE", "DXTEST_DETACH_AT", "DXTEST_RESIZE_AT",
+    "DXTEST_HOOK_MODE", "DXTEST_ATTACH_AT", "DXTEST_DETACH_AT", "DXTEST_RESIZE_AT",
     "DXTEST_FOREIGN", "DXTEST_DX12_EXTRA_QUEUES", "DXTEST_D3D12_DEBUG",
 )
 if any(os.environ.get(name) for name in _HARNESS_ENV_VARS):
     mark("nylib_pyimgui_file", str(nylib.pyimgui.__file__))
 
-# When DXTEST_HOOK_MODE is set, record the Present slot's owning module and
-# the first byte of the dxgi Present body, so a run can tell which hook owns
-# the slot. Attach() always takes the Detours path.
-if os.environ.get("DXTEST_HOOK_MODE") and backend in _PRESENT_METHOD_INDEX:
-    present_addr = frontend_module.GetMethod(_PRESENT_METHOD_INDEX[backend])
-    owner = _module_owner(Process.current, present_addr)
-    first_byte = bytes(Process.current.read_memoryview(present_addr, 1))[0]
-    mark("hook_mode", f"owner={owner} first_byte=0x{first_byte:02X}")
+# Record the selected mode and the full sampled Present prologue around Attach.
+if _requested_mode and backend in _PRESENT_METHOD_INDEX:
+    method_after = bytes(Process.current.read_memoryview(_method_addr, 16))
+    queue_after = bytes(Process.current.read_memoryview(_queue_addr, 16)) if _queue_addr else b""
+    mark("hook_mode", f"requested={_requested_mode} selected={renderer.hookMode.name} owner={_module_owner(Process.current, _method_addr)} before={_method_before.hex()} after={method_after.hex()} queue_before={_queue_before.hex()} queue_after={queue_after.hex()}")
 
 # Detach at a fixed elapsed time instead of only at exit, so a foreign hook
 # installed earlier (DXTEST_FOREIGN_AT) can be checked across our Detach().

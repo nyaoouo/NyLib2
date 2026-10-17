@@ -10,6 +10,11 @@ START_OVERLAY_TYPES_NAMESPACE
             .value("CaptureAll", InputPolicy::CaptureAll)
             .value("PassAll", InputPolicy::PassAll);
 
+        py::enum_<HookMode>(m, "HookMode")
+            .value("Detours", HookMode::Detours)
+            .value("Vtable", HookMode::Vtable)
+            .value("Auto", HookMode::Auto);
+
         py::enum_<OverlayZOrder>(m, "OverlayZOrder")
             .value("AboveTarget", OverlayZOrder::AboveTarget)
             .value("Topmost", OverlayZOrder::Topmost);

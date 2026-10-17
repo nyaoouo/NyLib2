@@ -1,6 +1,7 @@
 #include "./Dx12Window.h"
 #include "../common/ImguiInbound.h"
 #include "../common/PyDetours.h"
+#include "../common/VtableHook.h"
 #include "../overlay/OverlayCanvas.h"
 
 #include <mutex>
@@ -1310,11 +1311,19 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
     typedef void(__fastcall *ExecuteCommandListsD3D12)(ID3D12CommandQueue *dCommandQueue, UINT NumCommandLists, ID3D12CommandList *const *ppCommandLists);
     typedef HRESULT(__fastcall *ResizeBuffersD3D12)(IDXGISwapChain3 *pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags);
     typedef HRESULT(__fastcall *ResizeBuffers1D3D12)(IDXGISwapChain3 *pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT Format, UINT SwapChainFlags, const UINT *pCreationNodeMask, IUnknown *const *ppPresentQueue);
+    typedef HRESULT(__fastcall *Present1D3D12)(IDXGISwapChain3 *pSwapChain, UINT SyncInterval, UINT Flags, const DXGI_PRESENT_PARAMETERS *params);
 
     static PresentD3D12 oPresentD3D12 = nullptr;
     static ExecuteCommandListsD3D12 oExecuteCommandListsD3D12 = nullptr;
     static ResizeBuffersD3D12 oResizeBuffersD3D12 = nullptr;
     static ResizeBuffers1D3D12 oResizeBuffers1D3D12 = nullptr;
+    static VTABLE_HOOK_NAMESPACE::SlotHook vtPresentD3D12;
+    static VTABLE_HOOK_NAMESPACE::SlotHook vtPresent1D3D12;
+    static VTABLE_HOOK_NAMESPACE::SlotHook vtResizeBuffersD3D12;
+    static VTABLE_HOOK_NAMESPACE::SlotHook vtResizeBuffers1D3D12;
+    static VTABLE_HOOK_NAMESPACE::SlotHook vtExecuteCommandListsD3D12;
+    static std::atomic<OVERLAY_TYPES_NAMESPACE::HookMode> activeHookMode{OVERLAY_TYPES_NAMESPACE::HookMode::Detours};
+    static thread_local int presentHookDepth = 0;
 
     static thread_local bool inGamePresent = false;
     static std::atomic<bool> presentSeen{false};
@@ -1332,6 +1341,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
     static bool executeCommandListsHooked = false;
     static bool resizeBuffersHooked = false;
     static bool resizeBuffers1Done = false;
+    static bool vtableHooked = false;
     static bool atexitRegistered = false;
     // Serializes hooksEnabled, the Win32Hook subclass and the visible hwnd; never held while acquiring the GIL.
     static std::mutex transitionMutex;
@@ -1343,6 +1353,13 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         {
             HookBody() { hookBodyDepth++; hooksInFlight++; }
             ~HookBody() { hooksInFlight--; hookBodyDepth--; }
+        };
+
+        struct PresentScope
+        {
+            bool previous;
+            PresentScope() : previous(inGamePresent) { presentHookDepth++; inGamePresent = true; }
+            ~PresentScope() { inGamePresent = previous; presentHookDepth--; }
         };
     }
 
@@ -1495,45 +1512,91 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         return found;
     }
 
+    static void PresentFrameD3D12(IDXGISwapChain3 *pSwapChain)
+    {
+        HookBody body;
+        Dx12Inbound *instance = hookInstance;
+        if (instance == nullptr || !hooksEnabled || logicDepth != 0 || presentHookDepth != 0 ||
+            (instance->pSwapChain != nullptr && instance->pSwapChain != pSwapChain))
+            return;
+        try
+        {
+            if (!instance->isImGuiInitialized)
+                instance->InitImGui(pSwapChain);
+            instance->Update();
+        }
+        catch (const std::exception &e)
+        {
+            DisableFromHook(e.what());
+        }
+        catch (...)
+        {
+            DisableFromHook("unknown exception");
+        }
+    }
+
     long __fastcall hkPresentD3D12(IDXGISwapChain3 *pSwapChain, UINT SyncInterval, UINT Flags)
     {
-        {
-            HookBody body;
-            Dx12Inbound *instance = hookInstance;
-            if (instance != nullptr && hooksEnabled && logicDepth == 0 && (instance->pSwapChain == nullptr || instance->pSwapChain == pSwapChain))
-            {
-                try
-                {
-                    if (!instance->isImGuiInitialized)
-                        instance->InitImGui(pSwapChain);
-                    instance->Update();
-                }
-                catch (const std::exception &e)
-                {
-                    DisableFromHook(e.what());
-                }
-                catch (...)
-                {
-                    DisableFromHook("unknown exception");
-                }
-            }
-        }
-        inGamePresent = true;
+        bool active = activeHookMode == OVERLAY_TYPES_NAMESPACE::HookMode::Detours;
+        if (active)
+            PresentFrameD3D12(pSwapChain);
+        std::optional<PresentScope> present;
+        if (active)
+            present.emplace();
         long result = oPresentD3D12(pSwapChain, SyncInterval, Flags);
-        inGamePresent = false;
-        presentSeen = true;
+        if (active)
+            presentSeen = true;
         return result;
+    }
+
+    long __fastcall hkVtablePresentD3D12(IDXGISwapChain3 *pSwapChain, UINT SyncInterval, UINT Flags)
+    {
+        bool active = activeHookMode == OVERLAY_TYPES_NAMESPACE::HookMode::Vtable;
+        if (active)
+            PresentFrameD3D12(pSwapChain);
+        std::optional<PresentScope> present;
+        if (active)
+            present.emplace();
+        long result = VTABLE_HOOK_NAMESPACE::Original<PresentD3D12>(vtPresentD3D12)(pSwapChain, SyncInterval, Flags);
+        if (active)
+            presentSeen = true;
+        return result;
+    }
+
+    long __fastcall hkVtablePresent1D3D12(IDXGISwapChain3 *pSwapChain, UINT SyncInterval, UINT Flags, const DXGI_PRESENT_PARAMETERS *params)
+    {
+        bool active = activeHookMode == OVERLAY_TYPES_NAMESPACE::HookMode::Vtable;
+        if (active)
+            PresentFrameD3D12(pSwapChain);
+        std::optional<PresentScope> present;
+        if (active)
+            present.emplace();
+        long result = VTABLE_HOOK_NAMESPACE::Original<Present1D3D12>(vtPresent1D3D12)(pSwapChain, SyncInterval, Flags, params);
+        if (active)
+            presentSeen = true;
+        return result;
+    }
+
+    static void OfferFallbackQueueD3D12(ID3D12CommandQueue *queue)
+    {
+        HookBody body;
+        Dx12Inbound *instance = hookInstance;
+        if (instance != nullptr && hooksEnabled && instance->queueFallback && logicDepth == 0)
+            instance->OfferFallbackQueue(queue, inGamePresent);
     }
 
     void __fastcall hkExecuteCommandListsD3D12(ID3D12CommandQueue *dCommandQueue, UINT NumCommandLists, ID3D12CommandList *const *ppCommandLists)
     {
-        {
-            HookBody body;
-            Dx12Inbound *instance = hookInstance;
-            if (instance != nullptr && hooksEnabled && instance->queueFallback && logicDepth == 0)
-                instance->OfferFallbackQueue(dCommandQueue, inGamePresent);
-        }
+        if (activeHookMode == OVERLAY_TYPES_NAMESPACE::HookMode::Detours)
+            OfferFallbackQueueD3D12(dCommandQueue);
         oExecuteCommandListsD3D12(dCommandQueue, NumCommandLists, ppCommandLists);
+    }
+
+    void __fastcall hkVtableExecuteCommandListsD3D12(ID3D12CommandQueue *queue, UINT count, ID3D12CommandList *const *lists)
+    {
+        if (activeHookMode == OVERLAY_TYPES_NAMESPACE::HookMode::Vtable)
+            OfferFallbackQueueD3D12(queue);
+        VTABLE_HOOK_NAMESPACE::Original<ExecuteCommandListsD3D12>(vtExecuteCommandListsD3D12)(queue, count, lists);
     }
 
     // While disabled, the resize hooks still release our back buffers but do not keep new ones.
@@ -1541,7 +1604,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
     {
         HookBody body;
         Dx12Inbound *instance = hookInstance;
-        if (logicDepth > 0 || instance == nullptr || !instance->isImGuiInitialized || instance->pSwapChain != pSwapChain)
+        if (activeHookMode != OVERLAY_TYPES_NAMESPACE::HookMode::Detours || logicDepth > 0 || instance == nullptr || !instance->isImGuiInitialized || instance->pSwapChain != pSwapChain)
             return oResizeBuffersD3D12(pSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
         LogicScope logic;
         instance->BeforeResize();
@@ -1556,12 +1619,44 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
     {
         HookBody body;
         Dx12Inbound *instance = hookInstance;
-        if (logicDepth > 0 || instance == nullptr || !instance->isImGuiInitialized || instance->pSwapChain != pSwapChain)
+        if (activeHookMode != OVERLAY_TYPES_NAMESPACE::HookMode::Detours || logicDepth > 0 || instance == nullptr || !instance->isImGuiInitialized || instance->pSwapChain != pSwapChain)
             return oResizeBuffers1D3D12(pSwapChain, BufferCount, Width, Height, Format, SwapChainFlags, pCreationNodeMask, ppPresentQueue);
         LogicScope logic;
         instance->BeforeResize();
         HRESULT hr = oResizeBuffers1D3D12(pSwapChain, BufferCount, Width, Height, Format, SwapChainFlags, pCreationNodeMask, ppPresentQueue);
         instance->AfterResize(pCreationNodeMask, SUCCEEDED(hr) ? ppPresentQueue : nullptr);
+        if (!hooksEnabled)
+            instance->CleanupRenderTargets();
+        return hr;
+    }
+
+    HRESULT __fastcall hkVtableResizeBuffersD3D12(IDXGISwapChain3 *pSwapChain, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags)
+    {
+        HookBody body;
+        ResizeBuffersD3D12 original = VTABLE_HOOK_NAMESPACE::Original<ResizeBuffersD3D12>(vtResizeBuffersD3D12);
+        Dx12Inbound *instance = hookInstance;
+        if (activeHookMode != OVERLAY_TYPES_NAMESPACE::HookMode::Vtable || logicDepth > 0 || instance == nullptr || !instance->isImGuiInitialized || instance->pSwapChain != pSwapChain)
+            return original(pSwapChain, count, width, height, format, flags);
+        LogicScope logic;
+        instance->BeforeResize();
+        HRESULT hr = original(pSwapChain, count, width, height, format, flags);
+        instance->AfterResize(nullptr, nullptr);
+        if (!hooksEnabled)
+            instance->CleanupRenderTargets();
+        return hr;
+    }
+
+    HRESULT __fastcall hkVtableResizeBuffers1D3D12(IDXGISwapChain3 *pSwapChain, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags, const UINT *nodeMasks, IUnknown *const *queues)
+    {
+        HookBody body;
+        ResizeBuffers1D3D12 original = VTABLE_HOOK_NAMESPACE::Original<ResizeBuffers1D3D12>(vtResizeBuffers1D3D12);
+        Dx12Inbound *instance = hookInstance;
+        if (activeHookMode != OVERLAY_TYPES_NAMESPACE::HookMode::Vtable || logicDepth > 0 || instance == nullptr || !instance->isImGuiInitialized || instance->pSwapChain != pSwapChain)
+            return original(pSwapChain, count, width, height, format, flags, nodeMasks, queues);
+        LogicScope logic;
+        instance->BeforeResize();
+        HRESULT hr = original(pSwapChain, count, width, height, format, flags, nodeMasks, queues);
+        instance->AfterResize(nodeMasks, SUCCEEDED(hr) ? queues : nullptr);
         if (!hooksEnabled)
             instance->CleanupRenderTargets();
         return hr;
@@ -1617,41 +1712,88 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
     }
 
     // Installs each hook at most once; a later Attach only re-enables drawing and input.
-    void Dx12Inbound::Attach()
+    void Dx12Inbound::Attach(OVERLAY_TYPES_NAMESPACE::HookMode mode)
     {
+        PresentD3D12 autoPresent = nullptr;
+        ResizeBuffersD3D12 autoResizeBuffers = nullptr;
+        ResizeBuffers1D3D12 autoResizeBuffers1 = nullptr;
+        ExecuteCommandListsD3D12 autoExecuteCommandLists = nullptr;
+        if (mode != OVERLAY_TYPES_NAMESPACE::HookMode::Detours && mode != OVERLAY_TYPES_NAMESPACE::HookMode::Vtable &&
+            mode != OVERLAY_TYPES_NAMESPACE::HookMode::Auto)
+            _throw_("Unsupported inbound hook mode");
+        if (mode == OVERLAY_TYPES_NAMESPACE::HookMode::Auto)
+        {
+            if (presentHooked || vtableHooked)
+                mode = activeHookMode;
+            else
+            {
+                IMGUI_INBOUND_NAMESPACE::Init(IMGUI_INBOUND_NAMESPACE::D3D12);
+                PVOID *vtable = IMGUI_INBOUND_NAMESPACE::GetSwapChain3Vtable();
+                PVOID *queueVtable = IMGUI_INBOUND_NAMESPACE::GetD3D12QueueVtable();
+                autoPresent = (PresentD3D12)VTABLE_HOOK_NAMESPACE::PristineImageMethod(vtable, 8);
+                autoResizeBuffers = (ResizeBuffersD3D12)VTABLE_HOOK_NAMESPACE::PristineImageMethod(vtable, 13);
+                autoResizeBuffers1 = (ResizeBuffers1D3D12)VTABLE_HOOK_NAMESPACE::PristineImageMethod(vtable, 39);
+                autoExecuteCommandLists = (ExecuteCommandListsD3D12)VTABLE_HOOK_NAMESPACE::PristineImageMethod(queueVtable, 10);
+                bool vtableAvailable = VTABLE_HOOK_NAMESPACE::IsImageSlot(vtable, 8) &&
+                                       VTABLE_HOOK_NAMESPACE::IsImageSlot(vtable, 13) &&
+                                       VTABLE_HOOK_NAMESPACE::IsImageSlot(vtable, 22) &&
+                                       VTABLE_HOOK_NAMESPACE::IsImageSlot(vtable, 39) &&
+                                       VTABLE_HOOK_NAMESPACE::IsImageSlot(queueVtable, 10);
+                mode = (autoPresent != nullptr && autoResizeBuffers != nullptr && autoResizeBuffers1 != nullptr &&
+                        autoExecuteCommandLists != nullptr) || !vtableAvailable
+                           ? OVERLAY_TYPES_NAMESPACE::HookMode::Detours
+                           : OVERLAY_TYPES_NAMESPACE::HookMode::Vtable;
+            }
+        }
+        if (hooksEnabled && activeHookMode != mode)
+            _throw_("Detach before changing the inbound hook mode");
         if (!atexitRegistered)
         {
             py::module_::import("atexit").attr("register")(py::cpp_function(StopHooksAtExit));
             atexitRegistered = true;
         }
-        if (!presentHooked || !executeCommandListsHooked || !resizeBuffersHooked || !resizeBuffers1Done)
+        if (mode == OVERLAY_TYPES_NAMESPACE::HookMode::Detours && (!presentHooked || !executeCommandListsHooked || !resizeBuffersHooked || !resizeBuffers1Done))
         {
             IMGUI_INBOUND_NAMESPACE::Init(IMGUI_INBOUND_NAMESPACE::D3D12);
             if (!presentHooked)
             {
-                oPresentD3D12 = (PresentD3D12)IMGUI_INBOUND_NAMESPACE::GetMethod(140);
+                oPresentD3D12 = autoPresent != nullptr ? autoPresent : (PresentD3D12)IMGUI_INBOUND_NAMESPACE::GetMethod(140);
                 PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oPresentD3D12, (PVOID)hkPresentD3D12);
                 presentHooked = true;
             }
             if (!executeCommandListsHooked)
             {
-                oExecuteCommandListsD3D12 = (ExecuteCommandListsD3D12)IMGUI_INBOUND_NAMESPACE::GetMethod(54);
+                oExecuteCommandListsD3D12 = autoExecuteCommandLists != nullptr ? autoExecuteCommandLists : (ExecuteCommandListsD3D12)IMGUI_INBOUND_NAMESPACE::GetMethod(54);
                 PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oExecuteCommandListsD3D12, (PVOID)hkExecuteCommandListsD3D12);
                 executeCommandListsHooked = true;
             }
             if (!resizeBuffersHooked)
             {
-                oResizeBuffersD3D12 = (ResizeBuffersD3D12)IMGUI_INBOUND_NAMESPACE::GetMethod(145);
+                oResizeBuffersD3D12 = autoResizeBuffers != nullptr ? autoResizeBuffers : (ResizeBuffersD3D12)IMGUI_INBOUND_NAMESPACE::GetMethod(145);
                 PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oResizeBuffersD3D12, (PVOID)hkResizeBuffersD3D12);
                 resizeBuffersHooked = true;
             }
-            PVOID *swapChain3Vtable = IMGUI_INBOUND_NAMESPACE::GetD3D12SwapChain3Vtable();
+            PVOID *swapChain3Vtable = IMGUI_INBOUND_NAMESPACE::GetSwapChain3Vtable();
             if (!resizeBuffers1Done && swapChain3Vtable != nullptr)
             {
-                oResizeBuffers1D3D12 = (ResizeBuffers1D3D12)swapChain3Vtable[39];
+                oResizeBuffers1D3D12 = autoResizeBuffers1 != nullptr ? autoResizeBuffers1 : (ResizeBuffers1D3D12)swapChain3Vtable[39];
                 PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oResizeBuffers1D3D12, (PVOID)hkResizeBuffers1D3D12);
             }
             resizeBuffers1Done = true;
+        }
+        if (mode == OVERLAY_TYPES_NAMESPACE::HookMode::Vtable && !vtableHooked)
+        {
+            IMGUI_INBOUND_NAMESPACE::Init(IMGUI_INBOUND_NAMESPACE::D3D12);
+            PVOID *vtable = IMGUI_INBOUND_NAMESPACE::GetSwapChain3Vtable();
+            PVOID *queueVtable = IMGUI_INBOUND_NAMESPACE::GetD3D12QueueVtable();
+            if (vtable == nullptr || queueVtable == nullptr)
+                _throw_("The D3D12 swap chain or command queue vtable is unavailable");
+            VTABLE_HOOK_NAMESPACE::Install(vtPresentD3D12, vtable, 8, (void *)hkVtablePresentD3D12);
+            VTABLE_HOOK_NAMESPACE::Install(vtPresent1D3D12, vtable, 22, (void *)hkVtablePresent1D3D12);
+            VTABLE_HOOK_NAMESPACE::Install(vtResizeBuffersD3D12, vtable, 13, (void *)hkVtableResizeBuffersD3D12);
+            VTABLE_HOOK_NAMESPACE::Install(vtResizeBuffers1D3D12, vtable, 39, (void *)hkVtableResizeBuffers1D3D12);
+            VTABLE_HOOK_NAMESPACE::Install(vtExecuteCommandListsD3D12, queueVtable, 10, (void *)hkVtableExecuteCommandListsD3D12);
+            vtableHooked = true;
         }
         std::lock_guard<std::mutex> lock(transitionMutex);
         HWND hwnd = attachedHwnd;
@@ -1660,6 +1802,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             M_IMGUI_IMPL_WIN32_NAMESPACE::Attach(hwnd, &this->inputPolicy);
             this->SetHwnd(hwnd);
         }
+        activeHookMode = mode;
         hooksEnabled = true;
     }
 
@@ -2086,7 +2229,8 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
                               self.viewportsEnable = enable;
                               self.viewportsDirty = true;
                           })
-            .def("Attach", &Dx12Inbound::Attach)
+            .def("Attach", &Dx12Inbound::Attach, py::arg("mode") = OVERLAY_TYPES_NAMESPACE::HookMode::Detours)
+            .def_property_readonly("hookMode", [](Dx12Inbound &) { return activeHookMode.load(); })
             .def("Detach", &Dx12Inbound::Detach);
     }
 }

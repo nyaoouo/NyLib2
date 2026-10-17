@@ -1,10 +1,11 @@
 #include "./Dx11Window.h"
 #include "./frontends/common/ImguiInbound.h"
 #include "./frontends/common/PyDetours.h"
+#include "./frontends/common/VtableHook.h"
 #include "./frontends/common/Win32Hook.h"
 #include "./frontends/overlay/OverlayCanvas.h"
 
-#include <dxgi1_2.h>
+#include <dxgi1_4.h>
 #include <atomic>
 #include <mutex>
 #include <new>
@@ -736,6 +737,14 @@ START_M_IMGUI_IMPL_NAMESPACE
 
     typedef HRESULT(__stdcall *ResizeBuffers)(IDXGISwapChain *, UINT, UINT, UINT, DXGI_FORMAT, UINT);
     static ResizeBuffers oResizeBuffers = nullptr;
+    typedef HRESULT(__stdcall *Present1)(IDXGISwapChain1 *, UINT, UINT, const DXGI_PRESENT_PARAMETERS *);
+    typedef HRESULT(__stdcall *ResizeBuffers1)(IDXGISwapChain3 *, UINT, UINT, UINT, DXGI_FORMAT, UINT, const UINT *, IUnknown *const *);
+    static VTABLE_HOOK_NAMESPACE::SlotHook vtPresent;
+    static VTABLE_HOOK_NAMESPACE::SlotHook vtPresent1;
+    static VTABLE_HOOK_NAMESPACE::SlotHook vtResizeBuffers;
+    static VTABLE_HOOK_NAMESPACE::SlotHook vtResizeBuffers1;
+    static std::atomic<OVERLAY_TYPES_NAMESPACE::HookMode> activeHookMode{OVERLAY_TYPES_NAMESPACE::HookMode::Detours};
+    static thread_local int presentHookDepth = 0;
 
     // Hooks stay installed for the process lifetime and reach the instance only through hookInstance.
     static std::atomic<Dx11Inbound *> hookInstance{nullptr};
@@ -745,6 +754,7 @@ START_M_IMGUI_IMPL_NAMESPACE
     static std::atomic<HWND> attachedHwnd{nullptr};
     static bool presentHooked = false;
     static bool resizeHooked = false;
+    static bool vtableHooked = false;
     static bool atexitRegistered = false;
     // Serializes hooksEnabled, the Win32Hook subclass and the visible hwnd; never held while acquiring the GIL.
     static std::mutex transitionMutex;
@@ -763,6 +773,12 @@ START_M_IMGUI_IMPL_NAMESPACE
         {
             LogicScope() { logicDepth++; }
             ~LogicScope() { logicDepth--; }
+        };
+
+        struct PresentScope
+        {
+            PresentScope() { presentHookDepth++; }
+            ~PresentScope() { presentHookDepth--; }
         };
     }
 
@@ -844,6 +860,28 @@ START_M_IMGUI_IMPL_NAMESPACE
         StopHooks();
     }
 
+    static void PresentFrame11(IDXGISwapChain *pSwapChain)
+    {
+        HookBody body;
+        Dx11Inbound *instance = hookInstance;
+        if (instance == nullptr || !hooksEnabled || logicDepth != 0 || presentHookDepth != 0 ||
+            (instance->pSwapChain != nullptr && instance->pSwapChain != pSwapChain))
+            return;
+        try
+        {
+            instance->InitImGui(pSwapChain);
+            instance->Update();
+        }
+        catch (const std::exception &e)
+        {
+            DisableFromHook(e.what());
+        }
+        catch (...)
+        {
+            DisableFromHook("unknown exception");
+        }
+    }
+
     HRESULT __stdcall hkResizeBuffers11(
         IDXGISwapChain *pSwapChain,
         UINT BufferCount,
@@ -854,37 +892,78 @@ START_M_IMGUI_IMPL_NAMESPACE
     {
         HookBody body;
         Dx11Inbound *instance = hookInstance;
-        if (instance != nullptr && instance->isImGuiInitialized)
+        bool target = activeHookMode == OVERLAY_TYPES_NAMESPACE::HookMode::Detours && logicDepth == 0 && instance != nullptr &&
+                      instance->isImGuiInitialized && instance->pSwapChain == pSwapChain;
+        if (target)
             instance->CleanupRenderTarget();
+        LogicScope logic;
         auto res = oResizeBuffers(pSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
-        if (instance != nullptr && instance->isImGuiInitialized)
+        if (target)
             instance->CreateRenderTarget();
         return res;
     }
 
     HRESULT __stdcall hkPresent11(IDXGISwapChain *pSwapChain, UINT SyncInterval, UINT Flags)
     {
-        {
-            HookBody body;
-            Dx11Inbound *instance = hookInstance;
-            if (instance != nullptr && hooksEnabled && logicDepth == 0)
-            {
-                try
-                {
-                    instance->InitImGui(pSwapChain);
-                    instance->Update();
-                }
-                catch (const std::exception &e)
-                {
-                    DisableFromHook(e.what());
-                }
-                catch (...)
-                {
-                    DisableFromHook("unknown exception");
-                }
-            }
-        }
+        bool active = activeHookMode == OVERLAY_TYPES_NAMESPACE::HookMode::Detours;
+        if (active)
+            PresentFrame11(pSwapChain);
+        std::optional<PresentScope> present;
+        if (active)
+            present.emplace();
         return oPresent(pSwapChain, SyncInterval, Flags);
+    }
+
+    HRESULT __stdcall hkVtablePresent11(IDXGISwapChain *pSwapChain, UINT SyncInterval, UINT Flags)
+    {
+        bool active = activeHookMode == OVERLAY_TYPES_NAMESPACE::HookMode::Vtable;
+        if (active)
+            PresentFrame11(pSwapChain);
+        std::optional<PresentScope> present;
+        if (active)
+            present.emplace();
+        return VTABLE_HOOK_NAMESPACE::Original<Present>(vtPresent)(pSwapChain, SyncInterval, Flags);
+    }
+
+    HRESULT __stdcall hkVtablePresent1_11(IDXGISwapChain1 *pSwapChain, UINT SyncInterval, UINT Flags, const DXGI_PRESENT_PARAMETERS *params)
+    {
+        bool active = activeHookMode == OVERLAY_TYPES_NAMESPACE::HookMode::Vtable;
+        if (active)
+            PresentFrame11(pSwapChain);
+        std::optional<PresentScope> present;
+        if (active)
+            present.emplace();
+        return VTABLE_HOOK_NAMESPACE::Original<Present1>(vtPresent1)(pSwapChain, SyncInterval, Flags, params);
+    }
+
+    HRESULT __stdcall hkVtableResizeBuffers11(IDXGISwapChain *pSwapChain, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags)
+    {
+        HookBody body;
+        Dx11Inbound *instance = hookInstance;
+        bool target = activeHookMode == OVERLAY_TYPES_NAMESPACE::HookMode::Vtable && logicDepth == 0 && instance != nullptr &&
+                      instance->isImGuiInitialized && instance->pSwapChain == pSwapChain;
+        if (target)
+            instance->CleanupRenderTarget();
+        LogicScope logic;
+        HRESULT result = VTABLE_HOOK_NAMESPACE::Original<ResizeBuffers>(vtResizeBuffers)(pSwapChain, count, width, height, format, flags);
+        if (target)
+            instance->CreateRenderTarget();
+        return result;
+    }
+
+    HRESULT __stdcall hkVtableResizeBuffers1_11(IDXGISwapChain3 *pSwapChain, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags, const UINT *nodeMasks, IUnknown *const *queues)
+    {
+        HookBody body;
+        Dx11Inbound *instance = hookInstance;
+        bool target = activeHookMode == OVERLAY_TYPES_NAMESPACE::HookMode::Vtable && logicDepth == 0 && instance != nullptr &&
+                      instance->isImGuiInitialized && instance->pSwapChain == pSwapChain;
+        if (target)
+            instance->CleanupRenderTarget();
+        LogicScope logic;
+        HRESULT result = VTABLE_HOOK_NAMESPACE::Original<ResizeBuffers1>(vtResizeBuffers1)(pSwapChain, count, width, height, format, flags, nodeMasks, queues);
+        if (target)
+            instance->CreateRenderTarget();
+        return result;
     }
 
     Dx11Inbound::Dx11Inbound(std::optional<py::function> renderCallback) : Dx11Render(renderCallback)
@@ -922,28 +1001,66 @@ START_M_IMGUI_IMPL_NAMESPACE
     }
 
     // Installs each hook at most once; a later Attach only re-enables drawing and input.
-    void Dx11Inbound::Attach()
+    void Dx11Inbound::Attach(OVERLAY_TYPES_NAMESPACE::HookMode mode)
     {
+        Present autoPresent = nullptr;
+        ResizeBuffers autoResizeBuffers = nullptr;
+        if (mode != OVERLAY_TYPES_NAMESPACE::HookMode::Detours && mode != OVERLAY_TYPES_NAMESPACE::HookMode::Vtable &&
+            mode != OVERLAY_TYPES_NAMESPACE::HookMode::Auto)
+            _throw_("Unsupported inbound hook mode");
+        if (mode == OVERLAY_TYPES_NAMESPACE::HookMode::Auto)
+        {
+            if (presentHooked || vtableHooked)
+                mode = activeHookMode;
+            else
+            {
+                IMGUI_INBOUND_NAMESPACE::Init(IMGUI_INBOUND_NAMESPACE::D3D11);
+                PVOID *vtable = IMGUI_INBOUND_NAMESPACE::GetSwapChain3Vtable();
+                autoPresent = (Present)VTABLE_HOOK_NAMESPACE::PristineImageMethod(vtable, 8);
+                autoResizeBuffers = (ResizeBuffers)VTABLE_HOOK_NAMESPACE::PristineImageMethod(vtable, 13);
+                bool vtableAvailable = VTABLE_HOOK_NAMESPACE::IsImageSlot(vtable, 8) &&
+                                       VTABLE_HOOK_NAMESPACE::IsImageSlot(vtable, 13) &&
+                                       VTABLE_HOOK_NAMESPACE::IsImageSlot(vtable, 22) &&
+                                       VTABLE_HOOK_NAMESPACE::IsImageSlot(vtable, 39);
+                mode = (autoPresent != nullptr && autoResizeBuffers != nullptr) || !vtableAvailable
+                           ? OVERLAY_TYPES_NAMESPACE::HookMode::Detours
+                           : OVERLAY_TYPES_NAMESPACE::HookMode::Vtable;
+            }
+        }
+        if (hooksEnabled && activeHookMode != mode)
+            _throw_("Detach before changing the inbound hook mode");
         if (!atexitRegistered)
         {
             py::module_::import("atexit").attr("register")(py::cpp_function(StopHooksAtExit));
             atexitRegistered = true;
         }
-        if (!presentHooked || !resizeHooked)
+        if (mode == OVERLAY_TYPES_NAMESPACE::HookMode::Detours && (!presentHooked || !resizeHooked))
         {
             IMGUI_INBOUND_NAMESPACE::Init(IMGUI_INBOUND_NAMESPACE::D3D11);
             if (!presentHooked)
             {
-                oPresent = (Present)IMGUI_INBOUND_NAMESPACE::GetMethod(8);
+                oPresent = autoPresent != nullptr ? autoPresent : (Present)IMGUI_INBOUND_NAMESPACE::GetMethod(8);
                 PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oPresent, (PVOID)hkPresent11);
                 presentHooked = true;
             }
             if (!resizeHooked)
             {
-                oResizeBuffers = (ResizeBuffers)IMGUI_INBOUND_NAMESPACE::GetMethod(13);
+                oResizeBuffers = autoResizeBuffers != nullptr ? autoResizeBuffers : (ResizeBuffers)IMGUI_INBOUND_NAMESPACE::GetMethod(13);
                 PYDETOURS_NAMESPACE::SimpleAttach((PVOID *)&oResizeBuffers, (PVOID)hkResizeBuffers11);
                 resizeHooked = true;
             }
+        }
+        if (mode == OVERLAY_TYPES_NAMESPACE::HookMode::Vtable && !vtableHooked)
+        {
+            IMGUI_INBOUND_NAMESPACE::Init(IMGUI_INBOUND_NAMESPACE::D3D11);
+            PVOID *vtable = IMGUI_INBOUND_NAMESPACE::GetSwapChain3Vtable();
+            if (vtable == nullptr)
+                _throw_("The DXGI swap chain does not support IDXGISwapChain3");
+            VTABLE_HOOK_NAMESPACE::Install(vtPresent, vtable, 8, (void *)hkVtablePresent11);
+            VTABLE_HOOK_NAMESPACE::Install(vtPresent1, vtable, 22, (void *)hkVtablePresent1_11);
+            VTABLE_HOOK_NAMESPACE::Install(vtResizeBuffers, vtable, 13, (void *)hkVtableResizeBuffers11);
+            VTABLE_HOOK_NAMESPACE::Install(vtResizeBuffers1, vtable, 39, (void *)hkVtableResizeBuffers1_11);
+            vtableHooked = true;
         }
         std::lock_guard<std::mutex> lock(transitionMutex);
         HWND hwnd = attachedHwnd;
@@ -952,6 +1069,7 @@ START_M_IMGUI_IMPL_NAMESPACE
             M_IMGUI_IMPL_WIN32_NAMESPACE::Attach(hwnd, &this->inputPolicy);
             this->SetHwnd(hwnd);
         }
+        activeHookMode = mode;
         hooksEnabled = true;
     }
 
@@ -1157,7 +1275,8 @@ START_M_IMGUI_IMPL_NAMESPACE
                               self.viewportsEnable = enable;
                               self.viewportsDirty = true;
                           })
-            .def("Attach", &Dx11Inbound::Attach)
+            .def("Attach", &Dx11Inbound::Attach, py::arg("mode") = OVERLAY_TYPES_NAMESPACE::HookMode::Detours)
+            .def_property_readonly("hookMode", [](Dx11Inbound &) { return activeHookMode.load(); })
             .def("Detach", &Dx11Inbound::Detach);
     }
 }
