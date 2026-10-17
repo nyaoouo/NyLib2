@@ -105,12 +105,12 @@ wnd.Serve()
 在显存足够的 GPU 上需要更大的 CJK 字号时调大 `max_mib`，在 DX10 下设置
 `max_side=8192`。
 
-<!-- dt:section id="textures-0" hash="f5dbbd8949c7" -->
+<!-- dt:section id="textures-0" hash="b4369fd03f1a" -->
 ## 纹理
 
 `CreateTexture(filename)` 和 `CreateTextureFromPixels(width, height,
 pixels)` 存在于 DX11 和 DX12 渲染器上（`Dx11Window`/`Dx12Window`，
-独立或叠加模式，以及 `Dx11Inbound`/`Dx12Inbound`）；DX11 还接受
+独立或叠加模式，以及 `Dx11Inbound`/`Dx12Inbound`）；两种后端都还接受
 `mips=False`。DX9、DX10、GL3 和 VK 都没有这两个方法：请检查
 `hasattr(renderer, 'CreateTexture')` 并做好回退，例如回退到绘制一个
 纯色矩形。两种后端返回的对象共享相同的成员：
@@ -221,7 +221,8 @@ DX12 上则要等到 GPU 使用完毕之后才释放。调用 `FreeTexture()` �
 抛出 `RuntimeError`，因此新会话需要创建新的纹理。
 `InvalidateDeviceObjects()`（在字体变化之后调用）不会影响纹理。DX12
 最多同时持有 4094 个存活的纹理；超过这个数量，创建会抛出
-`RuntimeError`。DX12 的 `LoadTextureFromFile` 会改变 `handle`。
+`RuntimeError`。DX12 的 `LoadTextureFromFile` 会改变 `handle`，
+DX12 的 `UpdatePixels` 也一样。
 
 格式与内存：`pixels` 是非预乘 alpha 的 RGBA8 格式，第 0 行在顶部，
 存放在一个 C 连续的缓冲区中（`bytes`、`bytearray`、`memoryview`、
@@ -238,15 +239,14 @@ DX12 上则要等到 GPU 使用完毕之后才释放。调用 `FreeTexture()` �
 [esp.md](esp.md)）。UV (0, 0) 对应左上角的像素。
 
 采样：默认情况下，每个纹理在两种后端上都只在 mip 0 上进行双线性
-采样。DX11 在创建时额外支持 `mips=True`，以及一个逐次绘制的采样器
+采样。两种后端都在创建时额外支持 `mips=True`，以及一个逐次绘制的采样器
 作用域：用
 `SetTextureSampler(dl, pyimgui.TextureFilter.Point/Linear/Anisotropic)`
 和同一绘制列表上的 `ResetTextureSampler(dl)` 包裹绘制调用。`Point`
 能让放大后的像素保持清晰，`Linear` 是跨 mip 的三线性过滤，
 `Anisotropic` 适合以较浅角度观察的拉伸图像。文本应留在 `Point`
 作用域之外，因为它在该作用域内会失去抗锯齿效果。该作用域不支持
-嵌套：`Reset` 会恢复到后端的默认设置。DX12 目前既没有 `mips=`
-也没有采样器作用域。
+嵌套：`Reset` 会恢复到后端的默认设置。
 
 ```python
 # needs: running pyimgui window
@@ -284,7 +284,7 @@ wnd.Serve()
 
 大图：内存占用遵循上面的格式规则（4096x4096 时为 64 MiB，再加上
 `mips` 带来的约三分之一额外占用）。当纹理被绘制得远小于其尺寸时，
-在默认采样器下会出现锯齿；在 DX11 上，`mips=True` 配合 `Linear` 或
+在默认采样器下会出现锯齿；`mips=True` 配合 `Linear` 或
 `Anisotropic` 作用域可以避免这个问题。丢弃纹理会在下一个帧边界释放
 它，因此缓存可以丢弃它不再显示的内容。对于非常大的图像，可以考虑
 分块（tiling）：使用多个较小的纹理，随视图变化而创建和丢弃。
@@ -297,6 +297,47 @@ wnd.Serve()
 `(Y, Y, Y, A)`。对于普通的 sRGB 图像，这是 BT.709 的亮度(luma)，
 而不是线性亮度。alpha 和尺寸保持不变，mipmap 会在转换之后生成，
 不指定 `transform` 则什么都不会改变。
+
+更新像素：`tex.UpdatePixels(pixels, *, rowPitch=0)` 用一个同样尺寸的新缓冲区
+替换纹理的像素，像素和 `rowPitch` 的规则与 `CreateTextureFromPixels` 相同。
+只能在渲染线程上调用，即在渲染回调或 `CallBeforeFrameOnce` 中；在其他线程
+调用、对空的或已释放的纹理调用、或在会话结束之后调用，都会抛出
+`RuntimeError`；缓冲区尺寸与纹理的宽高不符时抛出 `ValueError`。用
+`mips=True` 创建的纹理会根据新像素重建整条 mip 链。DX11 原地更新并保持
+`handle` 不变，所以本帧中更早记录的绘制也会显示新像素；DX12 每次调用都会
+上传一张新纹理并改变 `handle`，所以本帧中更早记录的绘制仍显示旧像素——
+请在绘制时再读取 `handle`。
+
+```python
+# needs: running pyimgui window
+import pathlib
+from nylib.pyimgui import Dx11Window, imgui
+
+live = {}
+colors = [(200, 60, 60), (60, 200, 60), (60, 60, 200)]
+
+def make_ppm(path, width, height, rgb):
+    header = f'P6\n{width} {height}\n255\n'.encode('ascii')
+    path.write_bytes(header + bytes(rgb) * (width * height))
+
+def load_live(wnd):
+    path = pathlib.Path('update_demo.ppm')
+    make_ppm(path, 64, 64, colors[0])
+    live['tex'] = wnd.CreateTexture(str(path))
+
+def render(wnd):
+    if 'tex' not in live:
+        return
+    frame = imgui.GetFrameCount()
+    if frame % 30 == 0:
+        rgb = colors[(frame // 30) % len(colors)]
+        live['tex'].UpdatePixels(bytes(rgb + (255,)) * (64 * 64))
+    imgui.Image(live['tex'].handle, imgui.ImVec2(64, 64))
+
+wnd = Dx11Window(render)
+wnd.CallBeforeFrameOnce(lambda: load_live(wnd))
+wnd.Serve()
+```
 
 <!-- dt:section id="next-0" hash="03f1565c2acf" -->
 ## 下一步

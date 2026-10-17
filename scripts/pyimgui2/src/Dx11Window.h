@@ -58,6 +58,7 @@ START_M_IMGUI_IMPL_NAMESPACE
         Dx11Texture &operator=(const Dx11Texture &) = delete;
 
         void FreeTexture();
+        void UpdatePixels(py::buffer pixels, long long rowPitch); // render thread, GIL held on entry; same size, in place (handle kept), mips rebuilt
         uintptr_t GetHandle() const;
         ImVec2 GetSize() const;
     };

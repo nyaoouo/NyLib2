@@ -212,6 +212,49 @@ START_M_IMGUI_IMPL_NAMESPACE
         this->mipLevels = 1;
     }
 
+    namespace
+    {
+        // Releases one COM reference on scope exit.
+        struct ComRelease
+        {
+            IUnknown *object = nullptr;
+
+            ~ComRelease()
+            {
+                if (this->object != nullptr)
+                    this->object->Release();
+            }
+        };
+    }
+
+    void Dx11Texture::UpdatePixels(py::buffer pixels, long long rowPitch)
+    {
+        if (this->textureView == nullptr)
+            _throw_("UpdatePixels: empty texture; it was freed or never loaded");
+        TEXTURE_DATA_NAMESPACE::PixelView view(pixels, this->width, this->height, rowPitch);
+        if (!this->store->IsOpen())
+            _throw_("no D3D11 device; the session of this texture has ended");
+        if (!this->store->OnRenderThread())
+            _throw_("UpdatePixels: called off the render thread; update textures from the render callback or CallBeforeFrameOnce");
+        int width = this->width;
+        int height = this->height;
+        UINT levels = (UINT)this->mipLevels;
+        ID3D11Resource *resource = nullptr;
+        this->textureView->GetResource(&resource);
+        ComRelease resourceRef{resource};
+        ID3D11DeviceContext *context = nullptr;
+        this->store->Device()->GetImmediateContext(&context);
+        ComRelease contextRef{context};
+
+        py::gil_scoped_release release;
+        TEXTURE_MIPS_NAMESPACE::MipChain chain;
+        if (levels > 1)
+            chain = TEXTURE_MIPS_NAMESPACE::BuildMipChain(view.Bytes(), width, height, view.Pitch());
+        context->UpdateSubresource(resource, 0, nullptr, view.Bytes(), view.Pitch(), 0);
+        for (UINT k = 1; k < levels; k++)
+            context->UpdateSubresource(resource, D3D11CalcSubresource(k, 0, levels), nullptr, chain.bytes.data() + chain.offsets[k - 1], (UINT)chain.widths[k - 1] * 4, 0);
+    }
+
     uintptr_t Dx11Texture::GetHandle() const
     {
         if (!this->store->IsOpen())
@@ -1079,6 +1122,7 @@ START_M_IMGUI_IMPL_NAMESPACE
     {
         py::class_<Dx11Texture>(m, "Dx11Texture", py::dynamic_attr(), py::module_local())
             .def("FreeTexture", &Dx11Texture::FreeTexture)
+            .def("UpdatePixels", &Dx11Texture::UpdatePixels, py::arg("pixels"), py::kw_only(), py::arg("rowPitch") = 0)
             .def("__bool__", [](const Dx11Texture &self) { return self.textureView != nullptr; })
             .def_property_readonly("handle", &Dx11Texture::GetHandle)
             .def_readonly("width", &Dx11Texture::width)

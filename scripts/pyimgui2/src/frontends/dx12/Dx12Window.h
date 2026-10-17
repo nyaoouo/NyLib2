@@ -24,7 +24,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         static UINT const HEAP_SIZE = 4096;
         static UINT const NULL_SLOT = 1;
 
-        Dx12TextureStore(ID3D12Device *device, ID3D12DescriptorHeap *heap, DWORD renderThread); // AddRefs both and writes the null SRV into NULL_SLOT
+        Dx12TextureStore(ID3D12Device *device, ID3D12DescriptorHeap *heap, DWORD renderThread, DXGI_FORMAT rtvFormat); // AddRefs both and writes the null SRV into NULL_SLOT
         ~Dx12TextureStore();                                                 // after Close(true) releases device and heap; leaky or never closed: leaks them
         Dx12TextureStore(const Dx12TextureStore &) = delete;
         Dx12TextureStore &operator=(const Dx12TextureStore &) = delete;
@@ -39,9 +39,12 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         ID3D12Device *Device() const;
         D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle(UINT slot) const;
         UINT64 GpuHandle(UINT slot) const;
-        // Records the copy and the barrier on the store's upload context, submits them and waits for them; needs no GIL.
+        // Records one copy per subresource and the barrier on the store's upload context, submits them and waits for them; needs no GIL.
         // Sets inFlight once submitted and clears it once the copy completed; while it stays set, the caller leaks the copy's resources.
-        void Upload(const D3D12_TEXTURE_COPY_LOCATION &dst, const D3D12_TEXTURE_COPY_LOCATION &src, const D3D12_RESOURCE_BARRIER &barrier, bool &inFlight);
+        void Upload(ID3D12Resource *texture, ID3D12Resource *uploadBuffer, const D3D12_PLACED_SUBRESOURCE_FOOTPRINT *layouts, UINT levels, bool &inFlight);
+        // Render thread: user data of SamplerCallback for variant index (0 Point, 1 Linear, 1 + anisotropy); the first call creates the pipeline.
+        void *SamplerScope(UINT index);
+        static void SamplerCallback(const ImDrawList *parentList, const ImDrawCmd *cmd) noexcept; // binds the variant for the draws after it
 
     private:
         struct Entry
@@ -51,6 +54,15 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             UINT64 value;
         };
         struct UploadContext;
+        struct SamplerPipeline;
+        struct SamplerRecord
+        {
+            Dx12TextureStore *store;
+            UINT index;
+        };
+
+        static SamplerPipeline *CreateSamplerPipeline(ID3D12Device *device, DXGI_FORMAT rtvFormat); // RuntimeError with the HRESULT on failure
+        static void ReleaseSamplerPipeline(SamplerPipeline *pipeline) noexcept;
 
         std::shared_ptr<UploadContext> AcquireUploadContext();
         void ForgetUploadContext(const std::shared_ptr<UploadContext> &context) noexcept;
@@ -58,6 +70,9 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         std::mutex mutex;
         std::mutex uploadMutex;                       // serializes uploads on the context; never held together with mutex
         std::shared_ptr<UploadContext> uploadContext; // created by the first upload; guarded by mutex
+        std::atomic<SamplerPipeline *> samplerPipeline{nullptr}; // created by the first SamplerScope; installed and removed under mutex
+        SamplerRecord samplerRecords[18];                         // Point, Linear, then Anisotropic 1..16
+        DXGI_FORMAT rtvFormat;
         std::atomic<bool> open{true};
         bool leaky = false;
         ID3D12Device *device;
@@ -89,8 +104,9 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         Dx12TextureHelper &operator=(const Dx12TextureHelper &) = delete;
 
         void FreeTexture();
-        void LoadTextureFromFile(const std::string &filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform = std::nullopt); // GIL held on entry; released for decode, transform and upload
-        void Assign(ID3D12Resource *resource, UINT slot, int width, int height); // GIL held; retires the previous resource and slot
+        void LoadTextureFromFile(const std::string &filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform = std::nullopt, bool mips = false); // GIL held on entry; released for decode, transform, mips and upload
+        void Assign(ID3D12Resource *resource, UINT slot, int width, int height, int mipLevels); // GIL held; retires the previous resource and slot
+        void UpdatePixels(py::buffer pixels, long long rowPitch); // render thread, GIL held on entry; same size into a new slot (handle changes), mips rebuilt
         uintptr_t GetHandle() const;
         ImVec2 GetSize() const;
     };
@@ -109,12 +125,17 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 
         Dx12Render(std::optional<py::function> renderCallback = std::nullopt) : RenderBase(renderCallback) {}
 
-        Dx12TextureHelper *CreateTexture(const char *filename = nullptr, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform = std::nullopt);
-        Dx12TextureHelper *CreateTextureFromPixels(int width, int height, py::buffer pixels, long long rowPitch);
+        Dx12TextureHelper *CreateTexture(const char *filename = nullptr, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform = std::nullopt, bool mips = false);
+        Dx12TextureHelper *CreateTextureFromPixels(int width, int height, py::buffer pixels, long long rowPitch, bool mips);
+        void SetTextureSampler(ImDrawList *drawList, OVERLAY_TYPES_NAMESPACE::TextureFilter filter, int anisotropy); // the draws added after it to drawList, until Reset
+        void ResetTextureSampler(ImDrawList *drawList);                                                             // restores the backend's render state
         std::shared_ptr<Dx12TextureStore> OpenTextures();           // the open store, else RuntimeError "no D3D12 device"; off the render thread RuntimeError "render thread"
-        void InstallTextures(DWORD renderThread);                   // open site: closes a leftover store leaky, then opens one on pd3dDevice and pd3dSrvDescHeap; 0 for inbound
+        void InstallTextures(DWORD renderThread, DXGI_FORMAT rtvFormat); // open site: closes a leftover store leaky, then opens one on pd3dDevice and pd3dSrvDescHeap; 0 for inbound
         void CollectTextures(UINT64 submitted, UINT64 completed) noexcept;
         void CloseTextures(bool gpuIdle) noexcept;
+
+    private:
+        std::shared_ptr<Dx12TextureStore> SamplerScopeStore(ImDrawList *drawList); // frame, session, render-thread and context checks
     };
 
     class Dx12Window : public Dx12Render
