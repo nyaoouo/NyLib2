@@ -44,6 +44,7 @@ nylib/                       importable package
   tkinter_/                  small tkinter extras
   ue/                        Unreal Engine reflection: dumper, snapshots, runtime API
   utils/                     pip bootstrap, eventloop, threading, web, ...
+    oodle/                   Oodle Data/Network 1 bindings (ctypes) + bundled DLLs
   vmware_wp/                 VMware Workstation Pro backend (own README.md)
   winapi/                    typed ctypes for kernel32 / ntdll / user32 / ...
   winutils/                  high-level Win32 helpers (see section 4)
@@ -54,6 +55,7 @@ scripts/                     dev-only tools (NOT installed; not in the wheel)
   dxtest/                    DirectX 9/10/11/12 injection smoke tests
   generate_bind/             pybind11 binding generator from C headers
   ida/                       IDA Pro loaders & sig workers
+  oodle/                     reproducible build for the bundled Oodle DLLs
   pyimgui/  pyimgui2/        build scripts for the `pyimgui` C extension
   sig_thief/                 signature thief (PE Authenticode)
   test_inject/               sample injection target
@@ -98,6 +100,7 @@ canonical entry points.
 | `nylib.imguiutils` | Dear ImGui widgets: alerts, file dialog, window manager, debug view | message box, file dialog, window manager, Dear ImGui widgets, memory debugger, debug view | [docs/nylib/imguiutils.md](docs/nylib/imguiutils.md) |
 | `nylib.mono` | Runtime inspector for Mono / IL2CPP games | mono, il2cpp, unity, MonoClass, MonoMethod, runtime inspection | [docs/nylib/mono.md](docs/nylib/mono.md) |
 | `nylib.utils` | Catch-all: lazy pip install, asm, event loop, downloads, archive packing | pip, install, keystone, capstone, event loop, download, pack, archive | [docs/nylib/utils.md](docs/nylib/utils.md) |
+| `nylib.utils.oodle` | Oodle Data compression and Oodle Network 1 UDP/TCP packet codecs over bundled 2.9.14 DLLs | oodle, compress, decompress, Kraken, OodleLZ, UdpCodec, TcpCodec, Oodle Network | [docs/nylib/utils/oodle.md](docs/nylib/utils/oodle.md) |
 | `nylib.logging` | Color console logging with file rotation and custom verbosity levels | install, std2file, color console, log to file, file rotation, custom log levels | [docs/nylib/logging.md](docs/nylib/logging.md) |
 | `nylib.vmware_wp` | Control VMware Workstation Pro (power, snapshots, guest, REST) | Vmrun, Vmcli, WorkstationRest, VmwareConfig, snapshot, guest command | [docs/nylib/vmware_wp.md](docs/nylib/vmware_wp.md) |
 | `nylib.ue` | Unreal Engine reflection dumper + runtime object access | Unreal Engine, UE4, UE5, reflection, dump, Unreal.attach, GObjects | [docs/nylib/ue/index.md](docs/nylib/ue/index.md) |
@@ -376,6 +379,8 @@ Catch-all for non-Win32 helpers. The notable ones:
   builder (used by `python_loader`).
 - `template`, `preprocessor`, `yaml2json`, `prime`, `simple` - small
   text / data utilities.
+- `oodle/` - Oodle Data compression and Oodle Network 1 UDP/TCP packet
+  codecs over the bundled 2.9.14 DLLs; own page, [oodle.md](docs/nylib/utils/oodle.md).
 
 ### `nylib.logging`
 
@@ -474,6 +479,7 @@ venv.
 | `scripts/sig_thief/` | Steal a valid Authenticode signature from one PE and apply it to another. |
 | `scripts/test_inject/` | Example client/host pair driving `nylib.winutils.python_loader`. |
 | `scripts/ue/` | `build_dumper7.py` builds the pinned Dumper-7 oracle DLL that `nylib.ue`'s capture tests compare with. Needs MSVC; dev only. |
+| `scripts/oodle/` | `build.py` fetches, links, and verifies the bundled Oodle Data/Network 1 DLLs from UE's static libraries (see `nylib/utils/oodle/PROVENANCE.md`). Needs MSVC; dev only. |
 | `scripts/windows_driver_policy_manage/` | PowerShell (`manage.ps1` / `manage.bat`) to status/remove/restore the Windows cross-cert driver Code-Integrity policy so a cross-signed test driver can load. Run elevated; lowers security and needs a reboot. |
 | `scripts/setup_llvm_dev.py` | Bootstrap an LLVM dev environment via `nylib.winutils.ensure_env`. |
 | `scripts/gen_fa_icons.py` | Regenerate `nylib/imguiutils/icons/fa/{solid,regular}.py` from the upstream Font Awesome metadata. |
@@ -544,6 +550,9 @@ What this gives you for free, once `nylib` is `pip install`ed:
   sources / DLLs.
 - `hook-nylib.winutils.python_loader.py` - bundles the in-process Python
   loader C source.
+- `hook-nylib.utils.oodle.py` - collects the bundled Oodle Data/Network
+  DLLs (`oo2core_9_win64.dll`, `oo2net_9_win64.dll`) via
+  `collect_dynamic_libs`.
 
 ### Two installation modes
 
@@ -612,6 +621,8 @@ After a successful freeze the bundle should contain:
 <bundle>\nylib\imguiutils\icons\fa\resources\*.ttf
 <bundle>\keystone\keystone.dll
 <bundle>\capstone\lib\capstone.dll
+<bundle>\nylib\utils\oodle\oo2core_9_win64.dll
+<bundle>\nylib\utils\oodle\oo2net_9_win64.dll
 ```
 
 Missing frontend `.pyd` files mean the pyimgui hook did not run -
@@ -639,6 +650,9 @@ check that `nylib` is installed (entry-point mode) or that
    `nylib/winutils/python_loader/python_loader.dll` are all
    `.gitignore`d. The wheel excludes them too (see
    `[tool.setuptools.exclude-package-data]` in `pyproject.toml`).
+   Exception: the two Oodle DLLs under `nylib/utils/oodle/` are
+   committed - plain C, ABI-independent, reproducibly built by
+   `scripts/oodle/build.py`; see `nylib/utils/oodle/PROVENANCE.md`.
 7. **`.agent-memory/` is local-only.** Read it for context, but never
    commit anything inside it.
 8. **English only** for code, comments, identifiers, config,

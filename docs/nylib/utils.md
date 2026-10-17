@@ -122,6 +122,7 @@ packed = pkg_archive.pack('pkg/', is_main=True, package_name='myapp')
 | `enum` | Enum helpers for fallback on missing values | `missing()`, `auto_missing()` |
 | `handles` | Allocate and free integer handles | `Handles.get()`, `.free()` |
 | `mutex` | Cross-process file-based lock | `Mutex(__enter__, __exit__)` |
+| [`oodle`](utils/oodle.md) | Oodle Data compression and Oodle Network 1 UDP/TCP packet codecs | `compress()`, `decompress()`, `UdpCodec`, `TcpCodec` |
 | `preprocessor` | Compile-time macro and conditional code processor | `IProcessors` |
 | `prime` | Prime testing and generation | `miller_rabin()`, utilities |
 | `simple` | Alignment helpers, thread-safe counter | `aligned4/8/16()`, `Counter` |

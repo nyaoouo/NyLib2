@@ -61,6 +61,7 @@ pip install ".[full]"   # all of the above
 | Unity / Mono | `nylib.mono` | runtime inspector for Mono/IL2CPP-style games | [docs/nylib/mono.md](docs/nylib/mono.md) |
 | Unreal Engine | `nylib.ue` | UE4.25+/UE5 reflection dumper (snapshots, Dumper-7-format exports, IDA importer), runtime objects with opt-in writes and UFunction calls | [docs/nylib/ue/index.md](docs/nylib/ue/index.md) |
 | VMware | `nylib.vmware_wp` | drive VMware Workstation Pro (power/snapshots/guest/REST) | [docs/nylib/vmware_wp.md](docs/nylib/vmware_wp.md) |
+| Compression | `nylib.utils.oodle` | Oodle Data compression and Oodle Network 1 UDP/TCP packet codecs, bundled 2.9.14 DLLs | [docs/nylib/utils/oodle.md](docs/nylib/utils/oodle.md) |
 | Misc | `nylib.utils`, `nylib.logging` | lazy pip, asm, eventloop, color logging, ... | [docs/nylib/utils.md](docs/nylib/utils.md), [docs/nylib/logging.md](docs/nylib/logging.md) |
 
 ---
@@ -210,9 +211,10 @@ they are auto-discovered:
 pyinstaller your_app.py
 ```
 
-This bundles the `pyimgui` frontends, the Font Awesome TTFs, and the
-keystone/capstone DLLs, and registers their hidden imports. See `AGENTS.md`
-section 6 for in-tree usage and the expected bundle layout.
+This bundles the `pyimgui` frontends, the Font Awesome TTFs, the
+keystone/capstone DLLs, and the Oodle DLLs, and registers their hidden
+imports. See `AGENTS.md` section 6 for in-tree usage and the expected
+bundle layout.
 
 ---
 

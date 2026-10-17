@@ -125,7 +125,7 @@ packed = pkg_archive.pack('script.py', is_main=True)
 packed = pkg_archive.pack('pkg/', is_main=True, package_name='myapp')
 ```
 
-<!-- dt:section id="other-utilities-0" hash="6160f090ff0d" -->
+<!-- dt:section id="other-utilities-0" hash="b29b1b32d1ce" -->
 ## 其他实用工具
 
 | 模块 | 用途 | 主要类/函数 |
@@ -134,6 +134,7 @@ packed = pkg_archive.pack('pkg/', is_main=True, package_name='myapp')
 | `enum` | Enum 辅助工具，用于缺失值的回退 | `missing()`, `auto_missing()` |
 | `handles` | 分配和释放整数句柄 | `Handles.get()`, `.free()` |
 | `mutex` | 跨进程基于文件的锁 | `Mutex(__enter__, __exit__)` |
+| [`oodle`](utils/oodle.md) | Oodle Data 压缩和 Oodle Network 1 UDP/TCP 数据包编解码器 | `compress()`, `decompress()`, `UdpCodec`, `TcpCodec` |
 | `preprocessor` | 编译时宏和条件代码处理器 | `IProcessors` |
 | `prime` | 质数测试和生成 | `miller_rabin()`, utilities |
 | `simple` | 对齐辅助工具、线程安全计数器 | `aligned4/8/16()`, `Counter` |
