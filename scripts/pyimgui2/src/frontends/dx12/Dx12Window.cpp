@@ -9,6 +9,7 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #include "../../TextureData.h"
+#include "../common/TextureMips.h"
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -51,10 +52,12 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         }
     };
 
-    Dx12TextureStore::Dx12TextureStore(ID3D12Device *device, ID3D12DescriptorHeap *heap, DWORD renderThread) : device(device), heap(heap), renderThread(renderThread)
+    Dx12TextureStore::Dx12TextureStore(ID3D12Device *device, ID3D12DescriptorHeap *heap, DWORD renderThread, DXGI_FORMAT rtvFormat) : rtvFormat(rtvFormat), device(device), heap(heap), renderThread(renderThread)
     {
         this->device->AddRef();
         this->heap->AddRef();
+        for (UINT i = 0; i < 18; i++)
+            this->samplerRecords[i] = {this, i};
         this->increment = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         this->cpuStart = heap->GetCPUDescriptorHandleForHeapStart();
         this->gpuStart = heap->GetGPUDescriptorHandleForHeapStart().ptr;
@@ -163,6 +166,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
     void Dx12TextureStore::Close(bool gpuIdle) noexcept
     {
         std::shared_ptr<UploadContext> context;
+        SamplerPipeline *pipeline = nullptr;
         {
             std::lock_guard<std::mutex> lock(this->mutex);
             if (!this->open)
@@ -170,6 +174,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             this->open = false;
             this->leaky = !gpuIdle;
             context = std::move(this->uploadContext);
+            pipeline = this->samplerPipeline.exchange(nullptr);
             if (context != nullptr && !gpuIdle)
                 context->leaked = true;
             if (gpuIdle)
@@ -185,6 +190,8 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         for (ID3D12Resource *resource : this->releases)
             resource->Release();
         this->releases.clear();
+        if (pipeline != nullptr)
+            ReleaseSamplerPipeline(pipeline);
     }
 
     bool Dx12TextureStore::IsOpen() const noexcept
@@ -259,8 +266,15 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             forgotten = std::move(this->uploadContext);
     }
 
-    void Dx12TextureStore::Upload(const D3D12_TEXTURE_COPY_LOCATION &dst, const D3D12_TEXTURE_COPY_LOCATION &src, const D3D12_RESOURCE_BARRIER &barrier, bool &inFlight)
+    void Dx12TextureStore::Upload(ID3D12Resource *texture, ID3D12Resource *uploadBuffer, const D3D12_PLACED_SUBRESOURCE_FOOTPRINT *layouts, UINT levels, bool &inFlight)
     {
+        D3D12_RESOURCE_BARRIER barrier = {};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = texture;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
         std::shared_ptr<UploadContext> context = this->AcquireUploadContext();
         try
         {
@@ -275,7 +289,18 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             hr = context->list->Reset(context->allocator, nullptr);
             if (hr != S_OK)
                 _throwV_("Failed to reset command list with error code {}", hr);
-            context->list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+            for (UINT k = 0; k < levels; k++)
+            {
+                D3D12_TEXTURE_COPY_LOCATION dst = {};
+                dst.pResource = texture;
+                dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                dst.SubresourceIndex = k;
+                D3D12_TEXTURE_COPY_LOCATION src = {};
+                src.pResource = uploadBuffer;
+                src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                src.PlacedFootprint = layouts[k];
+                context->list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+            }
             context->list->ResourceBarrier(1, &barrier);
             hr = context->list->Close();
             if (hr != S_OK)
@@ -334,6 +359,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         this->slot = 0;
         this->width = 0;
         this->height = 0;
+        this->mipLevels = 1;
     }
 
     uintptr_t Dx12TextureHelper::GetHandle() const
@@ -367,11 +393,12 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             }
         };
 
-        // Copies RGBA8 rows (imageWidth*4 bytes every srcPitch) into upload.texture on the store's upload context and waits for the copy.
+        // Copies level 0 (imageWidth*4 bytes every srcPitch) and the chain's levels into upload.texture on the store's upload context, then waits.
         // After a submit that did not complete, leaks both resources.
-        void UploadTexture(Dx12TextureStore &store, UploadObjects &upload, const unsigned char *imageData, int imageWidth, int imageHeight, UINT srcPitch)
+        void UploadTexture(Dx12TextureStore &store, UploadObjects &upload, const unsigned char *imageData, int imageWidth, int imageHeight, UINT srcPitch, const TEXTURE_MIPS_NAMESPACE::MipChain &chain)
         {
             ID3D12Device *device = store.Device();
+            UINT levels = (UINT)chain.offsets.size() + 1;
             D3D12_HEAP_PROPERTIES props = {};
             props.Type = D3D12_HEAP_TYPE_DEFAULT;
 
@@ -380,7 +407,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             desc.Width = imageWidth;
             desc.Height = imageHeight;
             desc.DepthOrArraySize = 1;
-            desc.MipLevels = 1;
+            desc.MipLevels = (UINT16)levels;
             desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
             desc.SampleDesc.Count = 1;
             desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
@@ -389,8 +416,11 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             if (hr != S_OK)
                 _throwV_("Failed to create texture resource with error code {}", hr);
 
-            UINT uploadPitch = (imageWidth * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u);
-            UINT uploadSize = imageHeight * uploadPitch;
+            D3D12_PLACED_SUBRESOURCE_FOOTPRINT layouts[D3D12_REQ_MIP_LEVELS] = {};
+            UINT numRows[D3D12_REQ_MIP_LEVELS] = {};
+            UINT64 rowSizes[D3D12_REQ_MIP_LEVELS] = {};
+            UINT64 uploadSize = 0;
+            device->GetCopyableFootprints(&desc, 0, levels, 0, layouts, numRows, rowSizes, &uploadSize);
             D3D12_RESOURCE_DESC uploadDesc = {};
             uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
             uploadDesc.Width = uploadSize;
@@ -409,35 +439,21 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
                 _throwV_("Failed to create upload buffer with error code {}", hr);
 
             void *mapped = nullptr;
-            D3D12_RANGE range = {0, uploadSize};
+            D3D12_RANGE range = {0, (SIZE_T)uploadSize};
             hr = upload.uploadBuffer->Map(0, &range, &mapped);
             if (hr != S_OK)
                 _throwV_("Failed to map upload buffer with error code {}", hr);
-            for (int y = 0; y < imageHeight; y++)
-                memcpy((void *)((uintptr_t)mapped + (size_t)y * uploadPitch), imageData + (size_t)y * srcPitch, (size_t)imageWidth * 4);
+            for (UINT k = 0; k < levels; k++)
+            {
+                const unsigned char *src = k == 0 ? imageData : chain.bytes.data() + chain.offsets[k - 1];
+                size_t pitch = k == 0 ? srcPitch : (size_t)chain.widths[k - 1] * 4;
+                unsigned char *dst = (unsigned char *)mapped + layouts[k].Offset;
+                for (UINT y = 0; y < numRows[k]; y++)
+                    memcpy(dst + (size_t)y * layouts[k].Footprint.RowPitch, src + (size_t)y * pitch, (size_t)rowSizes[k]);
+            }
             upload.uploadBuffer->Unmap(0, &range);
 
-            D3D12_TEXTURE_COPY_LOCATION srcLocation = {};
-            srcLocation.pResource = upload.uploadBuffer;
-            srcLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-            srcLocation.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-            srcLocation.PlacedFootprint.Footprint.Width = imageWidth;
-            srcLocation.PlacedFootprint.Footprint.Height = imageHeight;
-            srcLocation.PlacedFootprint.Footprint.Depth = 1;
-            srcLocation.PlacedFootprint.Footprint.RowPitch = uploadPitch;
-
-            D3D12_TEXTURE_COPY_LOCATION dstLocation = {};
-            dstLocation.pResource = upload.texture;
-            dstLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-
-            D3D12_RESOURCE_BARRIER barrier = {};
-            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            barrier.Transition.pResource = upload.texture;
-            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-            barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-            barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-
-            store.Upload(dstLocation, srcLocation, barrier, upload.leaked);
+            store.Upload(upload.texture, upload.uploadBuffer, layouts, levels, upload.leaked);
         }
 
         struct UploadedTexture
@@ -446,16 +462,21 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             UINT slot = 0;
             int width = 0;
             int height = 0;
+            int mipLevels = 1;
         };
 
-        // Uploads RGBA8 rows into a new resource and slot of the store and writes its SRV; needs no GIL.
-        UploadedTexture UploadToSlot(Dx12TextureStore &store, const unsigned char *rgba, int width, int height, UINT pitch)
+        // Uploads RGBA8 rows, plus their mip chain with mips, into a new resource and slot of the store and writes its SRV; needs no GIL.
+        UploadedTexture UploadToSlot(Dx12TextureStore &store, const unsigned char *rgba, int width, int height, UINT pitch, bool mips)
         {
+            TEXTURE_MIPS_NAMESPACE::MipChain chain;
+            if (mips)
+                chain = TEXTURE_MIPS_NAMESPACE::BuildMipChain(rgba, width, height, pitch);
+            int levels = (int)chain.offsets.size() + 1;
             UINT slot = store.Allocate();
             UploadObjects upload;
             try
             {
-                UploadTexture(store, upload, rgba, width, height, pitch);
+                UploadTexture(store, upload, rgba, width, height, pitch, chain);
             }
             catch (...)
             {
@@ -466,14 +487,14 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
             srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
             srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-            srvDesc.Texture2D.MipLevels = 1;
+            srvDesc.Texture2D.MipLevels = (UINT)levels;
             srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             store.Device()->CreateShaderResourceView(upload.texture, &srvDesc, store.CpuHandle(slot));
-            return {std::exchange(upload.texture, nullptr), slot, width, height};
+            return {std::exchange(upload.texture, nullptr), slot, width, height, levels};
         }
     }
 
-    void Dx12TextureHelper::LoadTextureFromFile(const std::string &filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform)
+    void Dx12TextureHelper::LoadTextureFromFile(const std::string &filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform, bool mips)
     {
         if (!this->store->IsOpen())
             _throw_("no D3D12 device; the session of this texture has ended");
@@ -485,30 +506,31 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             py::gil_scoped_release release;
             TEXTURE_DATA_NAMESPACE::DecodedPixels image = TEXTURE_DATA_NAMESPACE::DecodeFile(filename);
             TEXTURE_DATA_NAMESPACE::ApplyTransform(image.data.get(), image.width, image.height, transform);
-            uploaded = UploadToSlot(*this->store, image.data.get(), image.width, image.height, (UINT)image.width * 4);
+            uploaded = UploadToSlot(*this->store, image.data.get(), image.width, image.height, (UINT)image.width * 4, mips);
         }
-        this->Assign(uploaded.resource, uploaded.slot, uploaded.width, uploaded.height);
+        this->Assign(uploaded.resource, uploaded.slot, uploaded.width, uploaded.height, uploaded.mipLevels);
     }
 
-    void Dx12TextureHelper::Assign(ID3D12Resource *resource, UINT slot, int width, int height)
+    void Dx12TextureHelper::Assign(ID3D12Resource *resource, UINT slot, int width, int height, int mipLevels)
     {
         this->store->Retire(this->srv, this->slot);
         this->srv = resource;
         this->slot = slot;
         this->width = width;
         this->height = height;
+        this->mipLevels = mipLevels;
     }
 
-    Dx12TextureHelper *Dx12Render::CreateTexture(const char *filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform)
+    Dx12TextureHelper *Dx12Render::CreateTexture(const char *filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform, bool mips)
     {
         TEXTURE_DATA_NAMESPACE::CheckTextureTransform(transform);
         std::unique_ptr<Dx12TextureHelper> helper(new Dx12TextureHelper(this->OpenTextures()));
         if (filename != nullptr)
-            helper->LoadTextureFromFile(filename, transform);
+            helper->LoadTextureFromFile(filename, transform, mips);
         return helper.release();
     }
 
-    Dx12TextureHelper *Dx12Render::CreateTextureFromPixels(int width, int height, py::buffer pixels, long long rowPitch)
+    Dx12TextureHelper *Dx12Render::CreateTextureFromPixels(int width, int height, py::buffer pixels, long long rowPitch, bool mips)
     {
         TEXTURE_DATA_NAMESPACE::CheckTextureSize(width, height);
         TEXTURE_DATA_NAMESPACE::PixelView view(pixels, width, height, rowPitch);
@@ -516,9 +538,9 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         UploadedTexture uploaded;
         {
             py::gil_scoped_release release;
-            uploaded = UploadToSlot(*helper->store, view.Bytes(), width, height, view.Pitch());
+            uploaded = UploadToSlot(*helper->store, view.Bytes(), width, height, view.Pitch(), mips);
         }
-        helper->Assign(uploaded.resource, uploaded.slot, uploaded.width, uploaded.height);
+        helper->Assign(uploaded.resource, uploaded.slot, uploaded.width, uploaded.height, uploaded.mipLevels);
         return helper.release();
     }
 
@@ -536,10 +558,10 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         return store;
     }
 
-    void Dx12Render::InstallTextures(DWORD renderThread)
+    void Dx12Render::InstallTextures(DWORD renderThread, DXGI_FORMAT rtvFormat)
     {
         this->CloseTextures(false);
-        auto store = std::make_shared<Dx12TextureStore>(this->pd3dDevice, this->pd3dSrvDescHeap, renderThread);
+        auto store = std::make_shared<Dx12TextureStore>(this->pd3dDevice, this->pd3dSrvDescHeap, renderThread, rtvFormat);
         std::lock_guard<std::mutex> lock(this->texturesMutex);
         this->textures = std::move(store);
     }
@@ -655,7 +677,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if ((hr = this->pd3dDevice->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&this->pd3dSrvDescHeap))) != S_OK)
             _throwV_("Failed to create SRV descriptor heap: {}", hr);
-        this->InstallTextures(GetCurrentThreadId());
+        this->InstallTextures(GetCurrentThreadId(), DXGI_FORMAT_R8G8B8A8_UNORM);
 
         D3D12_COMMAND_QUEUE_DESC queueDesc = {};
         queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -1034,7 +1056,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
                 hr = device->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&this->window.pd3dSrvDescHeap));
                 if (FAILED(hr))
                     _throwV_("Failed to create the overlay SRV heap: {:#x}", (unsigned)hr);
-                this->window.InstallTextures(GetCurrentThreadId());
+                this->window.InstallTextures(GetCurrentThreadId(), DXGI_FORMAT_R8G8B8A8_UNORM);
 
                 for (UINT i = 0; i < Dx12Window::NUM_FRAMES_IN_FLIGHT; i++)
                 {
@@ -1666,7 +1688,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if ((hr = this->pd3dDevice->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&this->pd3dSrvDescHeap))) != S_OK)
             _throwV_("Failed to create SRV heap: {}", hr);
-        this->InstallTextures(0);
+        this->InstallTextures(0, this->backBufferFormat);
 
         for (UINT i = 0; i < NUM_FRAMES_IN_FLIGHT; i++)
             if ((hr = this->pd3dDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&this->frameContext[i].CommandAllocator))) != S_OK)
@@ -2005,7 +2027,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
     {
         pybind_setup_mImguiImpl_RenderBase(m);
         py::class_<Dx12TextureHelper>(m, "Dx12TextureHelper", py::dynamic_attr(), py::module_local())
-            .def("LoadTextureFromFile", &Dx12TextureHelper::LoadTextureFromFile, py::arg("filename"), py::kw_only(), py::arg("transform") = py::none())
+            .def("LoadTextureFromFile", &Dx12TextureHelper::LoadTextureFromFile, py::arg("filename"), py::kw_only(), py::arg("transform") = py::none(), py::arg("mips") = false)
             .def("FreeTexture", &Dx12TextureHelper::FreeTexture)
             .def("__bool__", [](const Dx12TextureHelper &self) { return self.srv != nullptr; })
             .def_property_readonly("handle", &Dx12TextureHelper::GetHandle)
@@ -2017,9 +2039,11 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         py::class_<Dx12Render, RenderBase>(m, "Dx12Render", py::dynamic_attr(), py::module_local())
             .def_static("InvalidateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); })
             .def_static("CreateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); return true; })
-            .def("CreateTexture", [](Dx12Render &self, const char *filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform) { return self.CreateTexture(filename, transform); }, py::arg("filename"), py::kw_only(), py::arg("transform") = py::none(), py::return_value_policy::take_ownership)
+            .def("CreateTexture", [](Dx12Render &self, const char *filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform, bool mips) { return self.CreateTexture(filename, transform, mips); }, py::arg("filename"), py::kw_only(), py::arg("transform") = py::none(), py::arg("mips") = false, py::return_value_policy::take_ownership)
             .def("CreateTexture", [](Dx12Render &self) { return self.CreateTexture(); }, py::return_value_policy::take_ownership)
-            .def("CreateTextureFromPixels", &Dx12Render::CreateTextureFromPixels, py::arg("width"), py::arg("height"), py::arg("pixels"), py::kw_only(), py::arg("rowPitch") = 0, py::return_value_policy::take_ownership);
+            .def("CreateTextureFromPixels", &Dx12Render::CreateTextureFromPixels, py::arg("width"), py::arg("height"), py::arg("pixels"), py::kw_only(), py::arg("rowPitch") = 0, py::arg("mips") = false, py::return_value_policy::take_ownership)
+            .def("SetTextureSampler", &Dx12Render::SetTextureSampler, py::arg("drawList").none(false), py::arg("filter"), py::arg("anisotropy") = 16)
+            .def("ResetTextureSampler", &Dx12Render::ResetTextureSampler, py::arg("drawList").none(false));
 
         py::class_<Dx12Window, Dx12Render> dx12Window(m, "Dx12Window", py::dynamic_attr(), py::module_local());
         dx12Window.def(py::init<std::optional<py::function>>(), py::arg("renderCallback") = py::none())
