@@ -24,6 +24,7 @@ at this hooks directory.
 | `hook-pyimgui.py`             | top-level `pyimgui` import       | Same, but bundled into top-level `pyimgui/`                                     |
 | `hook-keystone.py`            | `keystone`                       | Collects `keystone.dll` next to the `keystone` package via `collect_dynamic_libs` |
 | `hook-capstone.py`            | `capstone`                       | Collects `capstone.dll`. Strictly redundant with `pyinstaller-hooks-contrib` (always installed alongside PyInstaller) — kept as a defensive fallback for stripped-down installs |
+| `hook-nylib.utils.oodle.py`   | `nylib.utils.oodle`              | Collects the bundled `oo2core_9_win64.dll` and `oo2net_9_win64.dll` into `nylib/utils/oodle/` via `collect_dynamic_libs` |
 
 The pyimgui hooks discover every `*.pyd` next to the loaded core
 extension, register them as PyInstaller `binaries`, and add their dotted

@@ -1,0 +1,6 @@
+"""Oodle Data compression and the Oodle Network 1 UDP/TCP codecs over the bundled (or a game's) Oodle 2.9 DLLs; Windows x64, loaded on first use."""
+from ._lib import OodleError, dll, load, version
+from ._data import CompressionLevel, Compressor, compress, compress_bound, decompress
+from ._net import TcpCodec, UdpCodec
+
+__all__ = ['load', 'version', 'dll', 'Compressor', 'CompressionLevel', 'compress', 'compress_bound', 'decompress', 'UdpCodec', 'TcpCodec', 'OodleError']
