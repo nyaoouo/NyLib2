@@ -4,7 +4,10 @@ from typing import TYPE_CHECKING
 
 from .errors import UeError, MemoryReadError, MemoryWriteError, TargetError, PeFormatError, CaptureError, SnapshotError, SchemaError, DetectionError, \
     AmbiguousTargetError, ProfileError, OutputRootError, SessionError, ReadOnlySessionError, CallsDisabledError, DumpMismatchError, \
-    UnverifiedOffsetsError, AmbiguousNameError, CallError, MarshalError
+    UnverifiedOffsetsError, AmbiguousNameError, CallError, MarshalError, \
+    AssetError, InvalidKeyError, InvalidMappingError, BuildMismatchError, MissingAssetError, MissingTileError, \
+    UnsupportedError, UnsupportedContainerError, UnsupportedAssetError, UnsupportedPixelFormatError, \
+    CorruptAssetError, RegionOutOfBoundsError, ReadCancelledError, InstallationClosedError
 
 if TYPE_CHECKING:
     from .pipeline import probe, dump
@@ -16,6 +19,9 @@ __all__ = [
     'SnapshotError', 'SchemaError', 'DetectionError', 'AmbiguousTargetError', 'ProfileError', 'OutputRootError',
     'SessionError', 'ReadOnlySessionError', 'CallsDisabledError', 'DumpMismatchError', 'UnverifiedOffsetsError',
     'AmbiguousNameError', 'CallError', 'MarshalError',
+    'AssetError', 'InvalidKeyError', 'InvalidMappingError', 'BuildMismatchError', 'MissingAssetError', 'MissingTileError',
+    'UnsupportedError', 'UnsupportedContainerError', 'UnsupportedAssetError', 'UnsupportedPixelFormatError',
+    'CorruptAssetError', 'RegionOutOfBoundsError', 'ReadCancelledError', 'InstallationClosedError',
     'probe', 'dump', 'load_snapshot', 'Unreal',
 ]
 
