@@ -58,6 +58,8 @@ _DELEGATE_KINDS = frozenset({'MulticastInlineDelegateProperty', 'MulticastSparse
 _COUNT_KEYS = ('objects', 'packages', 'classes', 'structs', 'enums', 'functions')
 # per-slot kind bits of the walk
 _ROW, _CDO, _PACKAGE, _STRUCT, _CLASS, _FUNCTION, _ENUM = 1, 2, 4, 8, 16, 32, 64
+_TYPE_CAST_FLAGS = int(CF.Package | CF.Struct | CF.Class | CF.Function | CF.Enum)  # a row is type-relevant for the quality verdict
+QUALITY_THRESHOLDS = {'unreadable_type': 0, 'unreadable_fields': 0, 'index_mismatch_type_ratio': 0.001}
 
 
 def kind_of(cast_flags: int, objptr_instead_of_fieldpath: bool) -> str:
@@ -332,6 +334,7 @@ class WalkResult:
     unreadable: int
     seconds: float
     written: dict
+    quality: dict
 
 
 class _Issues:
@@ -365,6 +368,7 @@ class _Walk:
         self.table: ObjectTable | None = None
         self.reflection: Reflection | None = None
         self.walked = self.unreadable = 0
+        self.type_objects = self.type_mismatch = 0
         self.done = self.total = 0
         self.run = 0
         self.current = (-1, '?')
@@ -427,8 +431,13 @@ class _Walk:
                 self._tick()
                 continue
             self._ok()
+            type_relevant = bool(cast_flags & _TYPE_CAST_FLAGS)
+            if type_relevant:
+                self.type_objects += 1
             if stored_index != i:
                 self.issues.add('index_mismatch', i, name, f'stored index {stored_index}')
+                if type_relevant:
+                    self.type_mismatch += 1
             class_index, outer_index = first_slot.get(cls, -1), first_slot.get(outer, -1)
             if cls and class_index < 0:
                 self.issues.add('unresolved_class', i, name, f'class {cls:#x} is not in GObjects')
@@ -570,6 +579,26 @@ class _Walk:
             self.progress(self.done, self.total)
 
 
+def _quality(w: '_Walk') -> dict:
+    """The export quality verdict from one walk's final issue and type-relevance counts.
+
+    `degraded` when `unreadable_type` or `unreadable_fields` is nonzero, or when `index_mismatch`
+    over type-relevant rows exceeds `index_mismatch_type_ratio` of the type-relevant row count.
+    """
+    issue_counts = {kind: w.issues.entries.get(kind, {}).get('count', 0) for kind in ISSUE_KINDS}
+    reasons = []
+    if issue_counts['unreadable_type'] > QUALITY_THRESHOLDS['unreadable_type']:
+        reasons.append(f"unreadable_type {issue_counts['unreadable_type']} > {QUALITY_THRESHOLDS['unreadable_type']}")
+    if issue_counts['unreadable_fields'] > QUALITY_THRESHOLDS['unreadable_fields']:
+        reasons.append(f"unreadable_fields {issue_counts['unreadable_fields']} > {QUALITY_THRESHOLDS['unreadable_fields']}")
+    ratio = QUALITY_THRESHOLDS['index_mismatch_type_ratio']
+    if w.type_objects and w.type_mismatch > ratio * w.type_objects:
+        reasons.append(f'index_mismatch {w.type_mismatch}/{w.type_objects} type-relevant rows > {ratio:.1%}')
+    return {'verdict': 'degraded' if reasons else 'complete', 'reasons': reasons, 'counts': issue_counts,
+            'type_counts': {'index_mismatch': w.type_mismatch}, 'objects': w.counts['objects'],
+            'type_objects': w.type_objects, 'thresholds': dict(QUALITY_THRESHOLDS)}
+
+
 def walk(ctx: 'EngineContext', folder, *, meta: dict, offsets: dict,
          check_alive: Callable[[], bool] | None = None, progress: Callable[[int, int], None] | None = None,
          generator: dict | None = None) -> WalkResult:
@@ -590,7 +619,7 @@ def walk(ctx: 'EngineContext', folder, *, meta: dict, offsets: dict,
         raise DetectionError('reflect.walk', 'engines with UProperty reflection (UE < 4.25) are not supported yet')
     start = time.perf_counter()
     w = _Walk(e, check_alive, progress)
-    written = write_snapshot(folder, lambda: {**meta, 'counts': dict(w.counts), 'issues': w.issues.to_list()}, offsets,
-                             w.objects(), w.types(), w.fields(), generator=generator)
+    written = write_snapshot(folder, lambda: {**meta, 'counts': dict(w.counts), 'issues': w.issues.to_list(), 'quality': _quality(w)},
+                             offsets, w.objects(), w.types(), w.fields(), generator=generator)
     return WalkResult(partial=written['partial'], counts=dict(w.counts), issues=w.issues.to_list(), walked=w.walked,
-                      unreadable=w.unreadable, seconds=time.perf_counter() - start, written=written)
+                      unreadable=w.unreadable, seconds=time.perf_counter() - start, written=written, quality=_quality(w))

@@ -22,6 +22,7 @@ print(result.counts, result.unverified, result.warnings, result.export_paths)
 - `nylib.ue.pipeline.list_targets()` lists the running processes that look like UE games.
 - Output: `<out>/<GameName>/<YYYYmmdd-HHMMSS>/`. The root is `out=`, else the environment variable `NYLIB_UE_OUT`, else `.\ue_dumps` under the current directory. Inside the game there is no default: pass `out=` or set `NYLIB_UE_OUT`.
 - Profiles: a TOML file in `<out>/profiles/` whose `[match] exe` is the target is used automatically (or pass `profile=`); `nylib.ue.pipeline.write_profile(report)` writes one that pins GObjects and GNames for this build. A profile can never enable calls.
+- Quality: `result.quality` (and `meta.json`'s `quality`) reports a `verdict` of `complete` or `degraded` with the `reasons`, the per-kind issue `counts`, and the `thresholds` applied. It degrades on any `unreadable_type` or `unreadable_fields`, or when `index_mismatch` over type-relevant rows (classes, structs, functions, enums, packages) exceeds 0.1% of them; other issue kinds are reported but never gate it. `strict=True` (CLI: `--strict`) turns a degraded verdict into a raised error before anything is published, leaving only the `.partial` folder on disk; the default (`strict=False`) only reports it.
 
 ## Exports
 
@@ -73,7 +74,7 @@ The folder holds `meta.json`, `offsets.json`, `objects.jsonl`, `fields.jsonl`, `
 ```text
 python -m nylib.ue list
 python -m nylib.ue probe TRIANGLE_STRATEGY-Win64-Shipping.exe [--write-profile] [--explain]
-python -m nylib.ue dump TRIANGLE_STRATEGY-Win64-Shipping.exe [--out DIR] [--exports idmap,gobjects] [--allow-calls [text,game-info,append-string]]
+python -m nylib.ue dump TRIANGLE_STRATEGY-Win64-Shipping.exe [--out DIR] [--exports idmap,gobjects] [--allow-calls [text,game-info,append-string]] [--strict]
 python -m nylib.ue export <snapshot> --format idmap
 python -m nylib.ue info <snapshot>
 ```
