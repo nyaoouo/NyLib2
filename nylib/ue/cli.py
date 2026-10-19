@@ -346,7 +346,10 @@ def _finish_error(e: Exception, json_mode: bool, *, target, log_file: str, logge
     message = str(e)
     known = isinstance(e, (errors.UeError, NotImplementedError))
     if json_mode:
-        _print_json({'ok': False, 'error': {'type': type(e).__name__, 'message': message, 'exit': exit_code}})
+        error_doc = {'type': type(e).__name__, 'message': message, 'exit': exit_code}
+        if (quality := getattr(e, 'quality', None)) is not None:
+            error_doc['quality'] = quality
+        _print_json({'ok': False, 'error': error_doc})
         return exit_code
     if known:
         print(f'error: {message}', file=sys.stderr)

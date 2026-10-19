@@ -704,8 +704,10 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, a
                 warning_list.append(msg)
                 logger.warning(msg)
             if strict and wr.quality['verdict'] == 'degraded':
-                raise errors.UeError(f"export quality degraded ({'; '.join(wr.quality['reasons'])}); "
+                err = errors.UeError(f"export quality degraded ({'; '.join(wr.quality['reasons'])}); "
                                      f'the snapshot was left in {folder}.partial')
+                err.quality = wr.quality
+                raise err
 
             image_written = img is not None and img.skipped is None
             written_fmts = tuple(f for f in fmts if f != IMAGE_EXPORT or image_written)
