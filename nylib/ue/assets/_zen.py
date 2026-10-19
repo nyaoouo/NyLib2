@@ -20,7 +20,7 @@ _EXPORT_FMT = '<QQIIQQQQQIB'
 _EXPORT_SIZE = 72  # the struct above is 69 bytes; 3 trailing pad bytes are skipped per entry
 _SCRIPT_ENTRY_FMT = '<IIQQQ'
 _SCRIPT_ENTRY_SIZE = struct.calcsize(_SCRIPT_ENTRY_FMT)
-_CONTROL = re.compile('[\x00-\x1f\x7f]')
+_CONTROL = re.compile('[\x00-\x1f\x7f-\x9f\u2028\u2029]')  # C0/C1 controls, DEL, and the Unicode line/paragraph separators
 
 MAX_PACKAGE_CHUNK = 64 << 20  # an ExportBundleData chunk is read whole only up to this many bytes
 

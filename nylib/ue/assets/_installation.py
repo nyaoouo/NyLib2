@@ -45,7 +45,7 @@ _AES_KEY_STR = ('aes_key takes an AesKey, bytes or a list of AesKey; for a hex s
                 'AesKey.from_hex() or AesKey.from_file()')
 _NAME_FORMS = 'a package name, an object path, or an Engine/Content or <project>/Content asset path'
 _MAX_PATH = 1024  # UE's name length limit; longer directory-index paths are not listed
-_BAD_PATH_CHAR = re.compile('[\x00-\x1f\x7f\ud800-\udfff]')  # a lone surrogate is an undecodable index byte
+_BAD_PATH_CHAR = re.compile('[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]')  # a lone surrogate is an undecodable index byte
 _GLOBAL = 'global.utoc'
 
 
@@ -613,6 +613,7 @@ class Installation:
                 counters.seconds_aes += time.perf_counter() - t
             index = read_directory_index(raw, toc.basename)
             del raw
+            seen = bytearray(toc.entry_count)
             for path, idx in iter_directory_index(index, toc.basename, toc.entry_count, max_len=_MAX_PATH,
                                                   checkpoint=self._check_open):
                 if path is None or _BAD_PATH_CHAR.search(path):
@@ -621,6 +622,10 @@ class Installation:
                 cid, chunk_index, extra, chunk_type = toc.chunk_fields(idx)
                 if chunk_index or extra or chunk_type != _EXPORT_BUNDLE_DATA:
                     continue
+                if seen[idx]:  # each TOC entry is listed at most once, checked before its name is hashed
+                    skipped += 1
+                    continue
+                seen[idx] = 1
                 if path.startswith('../../../'):
                     path = path[9:]
                 if _lower(path).endswith(('.o.uasset', '.o.umap')) or (pkg := _asset_package(path, self._project)) is None:
@@ -631,8 +636,8 @@ class Installation:
                 entries.append((pkg, mi, idx))
         entries.sort(key=lambda e: (_lower(e[0]), e[0], self._mounted[e[1]][0].basename))
         _log.debug('list_packages: %d packages listed, %d entries dropped (name hash differs from chunk id), %d entries skipped '
-                   '(path over %d characters, or a control character or undecodable byte)', len(entries), dropped, skipped,
-                   _MAX_PATH)
+                   '(path over %d characters, a control character or undecodable byte, or a repeat TOC entry)', len(entries),
+                   dropped, skipped, _MAX_PATH)
         return entries
 
     def _read_header(self, toc: Toc, container: Container, idx: int, counters) -> ZenHeader:
@@ -640,7 +645,14 @@ class Installation:
         length = toc.chunk_range(idx)[1]
         check_package_chunk_size(length, toc.basename, cid)
         data = container.read_range(idx, 0, length, cache=self._cache, counters=counters, checkpoint=self._check_open)
-        return ZenHeader(data)
+        try:
+            return ZenHeader(data)
+        except CorruptAssetError as e:
+            if e.package is not None:
+                raise
+            # before the package name is parsed, ZenHeader has no location to put in the message; add package()'s.
+            raise CorruptAssetError(f'{toc.basename} chunk {cid:016x} (ExportBundleData): {e.detail}',
+                                    container=toc.basename, detail=e.detail) from None
 
     def _script_objects(self, counters) -> tuple:
         """(ScriptObjects, the Texture2D global index or None, its container), loaded once from global.utoc."""
@@ -662,7 +674,11 @@ class Installation:
                 detail = f'ScriptObjects chunk of {length} bytes exceeds the {MAX_PACKAGE_CHUNK}-byte limit'
                 raise CorruptAssetError(f'{toc.basename} chunk {0:016x} (ScriptObjects): {detail}', detail=detail)
             data = container.read_range(idx, 0, length, counters=counters, checkpoint=self._check_open)
-            script = ScriptObjects(data)
+            try:
+                script = ScriptObjects(data)
+            except CorruptAssetError as e:
+                raise CorruptAssetError(f'{toc.basename} chunk {0:016x} (ScriptObjects): {e.detail}',
+                                        container=toc.basename, detail=e.detail) from None
             texture2d = script.index_of('/Script/Engine.Texture2D')
         except AssetError as e:
             _annotate(e, None, toc.basename)
