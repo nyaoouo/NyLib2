@@ -699,6 +699,10 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, a
                 msg = f'{wr.unreadable:,} of {wr.walked:,} objects ({share:.1%}) could not be read'
                 warning_list.append(msg)
                 logger.warning(msg)
+            if wr.quality['verdict'] == 'degraded':
+                msg = f"export quality degraded: {'; '.join(wr.quality['reasons'])}"
+                warning_list.append(msg)
+                logger.warning(msg)
             if strict and wr.quality['verdict'] == 'degraded':
                 raise errors.UeError(f"export quality degraded ({'; '.join(wr.quality['reasons'])}); "
                                      f'the snapshot was left in {folder}.partial')
