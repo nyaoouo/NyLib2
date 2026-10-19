@@ -1,4 +1,5 @@
 """NameArray, FNameEntry and FName of Dumper-7 @ ea0dab3 (NameArray.cpp, UnrealTypes.cpp), reading names from the pool."""
+import struct
 import typing
 
 from ..errors import DetectionError, MemoryReadError
@@ -10,6 +11,7 @@ if typing.TYPE_CHECKING:
 
 _NAME_WIDE_MASK = 0x1
 _NUMBERED_NAME_LINKS = 16  # DV18
+_INLINE_FNAME = struct.Struct('<iI')  # CompIdx at 0, Number at 4
 
 
 def _i32(value: int) -> int:
@@ -74,6 +76,7 @@ class NameArray:
         self._ByIndex = None
         self._GetStr = None
         self._memo: dict[int, str] = {}
+        self._comp_memo: dict[int, str] = {}
         self._memo_state = None
         self._name_pool_sig_occurrence = 0
 
@@ -89,12 +92,26 @@ class NameArray:
                 o.FNameEntry.NameArray.IndexOffset, o.NameArray.ChunksStart, o.NameArray.MaxChunkIndex, o.NameArray.NumElements,
                 o.NameArray.ByteCursor, self.e.settings.Internal.bUseNamePool)
 
-    def _get_str_memo(self, address: int) -> str:
+    def _check_memo_state(self) -> None:
         if (state := self._memo_key()) != self._memo_state:
             self._memo.clear()
+            self._comp_memo.clear()
             self._memo_state = state
+
+    def _get_str_memo(self, address: int) -> str:
+        self._check_memo_state()
         if (s := self._memo.get(address)) is None:
             s = self._memo[address] = self._GetStr(address)
+        return s
+
+    def _comp_idx_wstring(self, comp_idx: int) -> str:
+        """A11: the entry string of comp_idx; kept only for a non-null entry, so an index past the cursor decodes once appended."""
+        self._check_memo_state()
+        if (s := self._comp_memo.get(comp_idx)) is None:
+            entry = FNameEntry(self.e, self._ByIndex(self.GNames, comp_idx, self.FNameBlockOffsetBits))
+            s = entry.get_wstring()
+            if entry.address:
+                self._comp_memo[comp_idx] = s
         return s
 
     def _fname_entry_init(self, first_chunk_ptr: int = 0, name_entry_string_offset: int = 0) -> None:
@@ -630,11 +647,14 @@ class _LocalBuffer:
         self.base = base
         self.data = data
 
-    def _get(self, address: int, size: int, signed: bool) -> int:
+    def read(self, address: int, size: int) -> bytes:
         offset = address - self.base
         if offset < 0 or offset + size > len(self.data):
             raise MemoryReadError(address, size, 'outside the local FakeFName')
-        return int.from_bytes(self.data[offset:offset + size], 'little', signed=signed)
+        return self.data[offset:offset + size]
+
+    def _get(self, address: int, size: int, signed: bool) -> int:
+        return int.from_bytes(self.read(address, size), 'little', signed=signed)
 
     def i32(self, address: int) -> int:
         return self._get(address, 4, True)
@@ -665,12 +685,19 @@ class FNameStatics:
         self.e.provenance[key] = label
 
     def _to_str_gnames(self, name: FName) -> str:
-        names = self.e.names
-        if not self.e.settings.Internal.bUseOutlineNumberName:
-            number = name.get_number()
+        """A11: CompIdx and an inline Number at 0 and 4 come from one read; entry strings are memoized by CompIdx."""
+        e = self.e
+        names = e.names
+        if not e.settings.Internal.bUseOutlineNumberName:
+            if e.off.FName.CompIdx == 0 and e.off.FName.Number == 4:
+                comp_idx, number = _INLINE_FNAME.unpack(name._src.read(name.address, 8))
+            else:
+                number = name.get_number()
+                comp_idx = name.get_comp_idx()
             if number > 0:
-                return names._get_name_entry_of(name).get_wstring() + '_' + str(number - 1)
-        return names._get_name_entry_of(name).get_wstring()
+                return names._comp_idx_wstring(comp_idx) + '_' + str(number - 1)
+            return names._comp_idx_wstring(comp_idx)
+        return names._comp_idx_wstring(name.get_comp_idx())
 
     def _cerr_found(self) -> None:
         name = self.e.off.InSDK.Name
