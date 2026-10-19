@@ -113,3 +113,5 @@ report = probe(proc.process_id, _open_target=factory)
 没有传入 `closer=`,所以你的句柄仍由你自己持有;只有在你传入了 closer 时,`OpenedTarget.close()` 才会去关闭它。`nylib.ctype` 的访问器会改成 `memory.MemorySource` 的子类(`_read`、`_readable_ranges`、`regions`、`modules`);这个关键字是私有的,可能会变动。
 
 `_readable_ranges` 必须只报告你的后端真正能读取的内存;拿不准的内存就不要报告。dumper 会信任它来决定该解引用哪些指针、读取哪些范围,因此过度报告会导致 probe 失败,或者悄悄丢失被扫描的某一段。`_read` 对无法读取的字节会抛出 `nylib.ue.errors.MemoryReadError`。
+
+如果你的源每次读取都是一次较慢的调用(例如驱动),就在工厂里包装它:`source = memory.PagedSource(my_source)`。包装器以 64 KiB 的页读取你的源。某页读取失败时,它改以 4 KiB 为单位读取该页;某一块也失败时,它用原始地址和大小调用你的 `_read`。因此,一次读取返回的字节或抛出的错误与你的源相同,前提是你的源能读取一整段时,也能读取其中任意一部分。页保留首次读取时的字节,直到 `refresh()`;`dump` 会在遍历(walk)之前调用它一次。`fresh` 不经缓存直接读取你的源,写入会丢弃它触及的页。`page_size=` 取 0x1000 到 0x100000 之间的 2 的幂,`max_cache_bytes=` 是 LRU 上限:默认 1 GiB,`None` 表示不设上限。`ProcessSource` 本身已缓存读取,捕获文件读取的是本地文件,所以包装二者都没有收益。

@@ -655,6 +655,7 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, a
                 'engine': m['engine'], 'globals': m['globals'],
             }
 
+            opened.source.refresh()  # the walk starts a new cache epoch
             img = None
             if IMAGE_EXPORT in fmts:  # (7-c) before the walk, so its facts reach meta.json through meta
                 img = image.write_image(opened.source, base=info.module_base, size_of_image=info.size_of_image,
