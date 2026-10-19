@@ -3,6 +3,7 @@
 Only the unversioned, UE 5.3+ zen layout (UE5 object version 1018, the UE 5.7 profile) is read.
 """
 import bisect
+import re
 import struct
 from array import array
 from typing import NamedTuple
@@ -19,6 +20,7 @@ _EXPORT_FMT = '<QQIIQQQQQIB'
 _EXPORT_SIZE = 72  # the struct above is 69 bytes; 3 trailing pad bytes are skipped per entry
 _SCRIPT_ENTRY_FMT = '<IIQQQ'
 _SCRIPT_ENTRY_SIZE = struct.calcsize(_SCRIPT_ENTRY_FMT)
+_CONTROL = re.compile('[\x00-\x1f\x7f]')
 
 MAX_PACKAGE_CHUNK = 64 << 20  # an ExportBundleData chunk is read whole only up to this many bytes
 
@@ -69,7 +71,10 @@ class Reader:
 
 
 def _load_name_batch(r: Reader) -> tuple:
-    """FNameEntrySerialized.LoadNameBatch: count, string-byte total, hash version, hashes, 2-byte headers, strings."""
+    """FNameEntrySerialized.LoadNameBatch: count, string-byte total, hash version, hashes, 2-byte headers, strings.
+
+    A name that does not decode, or holds a control character, raises ValueError.
+    """
     count = r.i32()
     if count <= 0:
         return ()
@@ -81,10 +86,14 @@ def _load_name_batch(r: Reader) -> tuple:
     for i in range(count):
         d0, d1 = headers[2 * i], headers[2 * i + 1]
         length = ((d0 & 0x7F) << 8) + d1
-        if d0 & 0x80:
-            names.append(r.take(2 * length).decode('utf-16-le'))
-        else:
-            names.append(r.take(length).decode('utf-8', 'surrogateescape'))
+        wide = d0 & 0x80
+        try:
+            name = r.take(2 * length).decode('utf-16-le') if wide else r.take(length).decode('utf-8')
+        except UnicodeDecodeError:
+            raise ValueError(f"name {i} is not valid {'UTF-16' if wide else 'UTF-8'}") from None
+        if _CONTROL.search(name):
+            raise ValueError(f'name {i} contains a control character')
+        names.append(name)
     return tuple(names)
 
 
