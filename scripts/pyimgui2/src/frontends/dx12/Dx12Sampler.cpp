@@ -1,15 +1,16 @@
-// Per-draw DX12 samplers: copies of ImGui_ImplDX12_CreateDeviceObjects' shaders and PSO with a sampler table, and of ImGui_ImplDX12_SetupRenderState's projection.
+// Per-draw DX12 samplers and blends: copies of ImGui_ImplDX12_CreateDeviceObjects' shaders and PSO with a sampler table, and of ImGui_ImplDX12_SetupRenderState's projection.
 #include "./Dx12Window.h"
+#include "../../TextureData.h"
 
 #include <d3dcompiler.h>
 
 START_M_IMGUI_IMPL_DX12_NAMESPACE
 {
-    // The root signature, PSO and shader-visible sampler heap that a store's 18 sampler variants share.
+    // The root signature, straight and premultiplied PSOs and shader-visible sampler heap (18 variants plus the backend default) of a store's scopes.
     struct Dx12TextureStore::SamplerPipeline
     {
         ID3D12RootSignature *rootSignature = nullptr;
-        ID3D12PipelineState *pipelineState = nullptr;
+        ID3D12PipelineState *pipelineState[2] = {}; // 0 Straight, 1 Premultiplied
         ID3D12DescriptorHeap *samplerHeap = nullptr;
         UINT64 samplerStart = 0;
         UINT samplerIncrement = 0;
@@ -101,7 +102,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 
     void Dx12TextureStore::ReleaseSamplerPipeline(SamplerPipeline *pipeline) noexcept
     {
-        for (IUnknown *object : std::initializer_list<IUnknown *>{pipeline->samplerHeap, pipeline->pipelineState, pipeline->rootSignature})
+        for (IUnknown *object : std::initializer_list<IUnknown *>{pipeline->samplerHeap, pipeline->pipelineState[1], pipeline->pipelineState[0], pipeline->rootSignature})
             if (object != nullptr)
                 object->Release();
         delete pipeline;
@@ -210,13 +211,17 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         depth.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
         depth.BackFace = depth.FrontFace;
 
-        HRESULT hr = device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&pipeline->pipelineState));
+        HRESULT hr = device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&pipeline->pipelineState[0]));
         if (FAILED(hr))
             _throwV_("Failed to create the sampler pipeline state: {:#x}", (unsigned)hr);
+        blend.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
+        hr = device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&pipeline->pipelineState[1]));
+        if (FAILED(hr))
+            _throwV_("Failed to create the premultiplied pipeline state: {:#x}", (unsigned)hr);
 
         D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
         heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
-        heapDesc.NumDescriptors = 18;
+        heapDesc.NumDescriptors = 19;
         heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         hr = device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&pipeline->samplerHeap));
         if (FAILED(hr))
@@ -237,27 +242,55 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
             desc.MaxLOD = D3D12_FLOAT32_MAX;
             device->CreateSampler(&desc, {cpuStart.ptr + (SIZE_T)i * pipeline->samplerIncrement});
         }
+        // DEFAULT_SAMPLER: the backend's static sampler (ImGui_ImplDX12_CreateDeviceObjects).
+        D3D12_SAMPLER_DESC backend = {};
+        backend.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        backend.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        backend.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        backend.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        backend.MaxAnisotropy = 1;
+        backend.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+        backend.MinLOD = 0.0f;
+        backend.MaxLOD = 0.0f;
+        device->CreateSampler(&backend, {cpuStart.ptr + (SIZE_T)DEFAULT_SAMPLER * pipeline->samplerIncrement});
         return pipeline.release();
     }
 
-    void *Dx12TextureStore::SamplerScope(UINT index)
+    void Dx12TextureStore::EnsureSamplerPipeline()
     {
-        if (this->samplerPipeline.load() == nullptr)
+        if (this->samplerPipeline.load() != nullptr)
+            return;
+        SamplerPipeline *created = CreateSamplerPipeline(this->device, this->rtvFormat);
+        bool open;
         {
-            SamplerPipeline *created = CreateSamplerPipeline(this->device, this->rtvFormat);
-            bool open;
-            {
-                std::lock_guard<std::mutex> lock(this->mutex);
-                open = this->open;
-                if (open && this->samplerPipeline.load() == nullptr)
-                    this->samplerPipeline = std::exchange(created, nullptr);
-            }
-            if (created != nullptr)
-                ReleaseSamplerPipeline(created);
-            if (!open)
-                _throw_("no D3D12 device; the session of this renderer has closed");
+            std::lock_guard<std::mutex> lock(this->mutex);
+            open = this->open;
+            if (open && this->samplerPipeline.load() == nullptr)
+                this->samplerPipeline = std::exchange(created, nullptr);
         }
-        return &this->samplerRecords[index];
+        if (created != nullptr)
+            ReleaseSamplerPipeline(created);
+        if (!open)
+            _throw_("no D3D12 device; the session of this renderer has closed");
+    }
+
+    std::pair<UINT, UINT> Dx12TextureStore::ScopeOf(ImDrawList *drawList) const
+    {
+        auto it = this->scopeState.find(drawList);
+        return it != this->scopeState.end() ? it->second : std::pair<UINT, UINT>{DEFAULT_SAMPLER, 0};
+    }
+
+    void Dx12TextureStore::UpdateScope(ImDrawList *drawList, UINT sIdx, UINT bIdx)
+    {
+        if (sIdx == DEFAULT_SAMPLER && bIdx == 0)
+        {
+            this->scopeState.erase(drawList);
+            drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+            return;
+        }
+        this->EnsureSamplerPipeline();
+        this->scopeState[drawList] = {sIdx, bIdx};
+        drawList->AddCallback(&Dx12TextureStore::SamplerCallback, &this->samplerRecords[sIdx][bIdx]);
     }
 
     void Dx12TextureStore::SamplerCallback(const ImDrawList *parentList, const ImDrawCmd *cmd) noexcept
@@ -286,9 +319,9 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         ID3D12DescriptorHeap *heaps[2] = {record->store->heap, pipeline->samplerHeap};
         list->SetDescriptorHeaps(2, heaps);
         list->SetGraphicsRootSignature(pipeline->rootSignature);
-        list->SetPipelineState(pipeline->pipelineState);
+        list->SetPipelineState(pipeline->pipelineState[record->blend]);
         list->SetGraphicsRoot32BitConstants(0, 16, mvp, 0);
-        list->SetGraphicsRootDescriptorTable(2, {pipeline->samplerStart + (UINT64)record->index * pipeline->samplerIncrement});
+        list->SetGraphicsRootDescriptorTable(2, {pipeline->samplerStart + (UINT64)record->sampler * pipeline->samplerIncrement});
     }
 
     std::shared_ptr<Dx12TextureStore> Dx12Render::SamplerScopeStore(ImDrawList *drawList)
@@ -304,7 +337,7 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         if (store == nullptr || !store->IsOpen())
             _throw_("no D3D12 device; the session of this renderer is not open");
         if (!store->OnRenderThread())
-            _throw_("called off the render thread; set texture samplers from the render callback");
+            _throw_("called off the render thread; call it from the render callback");
         if (drawList->_Data != ImGui::GetDrawListSharedData())
             throw py::value_error("drawList belongs to another ImGui context");
         return store;
@@ -325,14 +358,28 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         }
         if (anisotropy < 1 || anisotropy > 16)
             throw py::value_error(std::format("anisotropy must be in [1, 16], got {}", anisotropy));
-        UINT index = filter == TextureFilter::Point ? 0 : filter == TextureFilter::Linear ? 1 : 1 + (UINT)anisotropy;
-        drawList->AddCallback(&Dx12TextureStore::SamplerCallback, store->SamplerScope(index));
+        UINT sIdx = filter == TextureFilter::Point ? 0 : filter == TextureFilter::Linear ? 1 : 1 + (UINT)anisotropy;
+        store->UpdateScope(drawList, sIdx, store->ScopeOf(drawList).second);
     }
 
     void Dx12Render::ResetTextureSampler(ImDrawList *drawList)
     {
-        this->SamplerScopeStore(drawList);
-        drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+        std::shared_ptr<Dx12TextureStore> store = this->SamplerScopeStore(drawList);
+        store->UpdateScope(drawList, Dx12TextureStore::DEFAULT_SAMPLER, store->ScopeOf(drawList).second);
+    }
+
+    void Dx12Render::SetTextureBlend(ImDrawList *drawList, OVERLAY_TYPES_NAMESPACE::TextureBlend blend)
+    {
+        std::shared_ptr<Dx12TextureStore> store = this->SamplerScopeStore(drawList);
+        TEXTURE_DATA_NAMESPACE::CheckTextureBlend(blend);
+        UINT bIdx = blend == OVERLAY_TYPES_NAMESPACE::TextureBlend::Premultiplied ? 1 : 0;
+        store->UpdateScope(drawList, store->ScopeOf(drawList).first, bIdx);
+    }
+
+    void Dx12Render::ResetTextureBlend(ImDrawList *drawList)
+    {
+        std::shared_ptr<Dx12TextureStore> store = this->SamplerScopeStore(drawList);
+        store->UpdateScope(drawList, store->ScopeOf(drawList).first, 0);
     }
 }
 END_M_IMGUI_IMPL_DX12_NAMESPACE
