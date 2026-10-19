@@ -314,6 +314,9 @@ class UEEnum(UEField):
             raise DetectionError('UEEnum::GetNameValuePairs', text, explanations=tuple(self.e.messages))
         values = mem.u64(self.address + enum_names_offset + 0x8) & (~0x1 & _U64)
         num_values = mem.i32(self.address + enum_names_offset + 0x10)
+        if not (0 <= num_values <= _ENUM_NAMES_CAP and (num_values == 0 or names_ptr and values)):
+            raise MemoryReadError(self.address + enum_names_offset, 0x14,
+                                  f'corrupt UEnum names (Names {names_ptr:#x}, Values {values:#x}, Num {num_values})')
         i = 0
         while i < (num_values & _U32):
             ret.append((FName(self.e, names_ptr + ((i * fname_size) & _U32)), mem.i64(values + i * 8)))

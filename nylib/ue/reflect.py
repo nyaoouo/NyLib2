@@ -263,7 +263,11 @@ class Reflection:
         fields = self._struct_fields(cls)
         interfaces = []
         if self.e.off.UClass.ImplementedInterfaces >= 0:
-            data, num = cls.get_implemented_interfaces().checked(_MAX_INTERFACES)
+            try:
+                data, num = cls.get_implemented_interfaces().checked(_MAX_INTERFACES)
+            except MemoryReadError as err:
+                self._report('unresolved_reference', f'implemented interfaces header: {err}')
+                data, num = 0, 0
             for i in range(num):
                 item = view(FImplementedInterface, data + i * 0x10, self.e.acc)
                 if (path := self.resolver.path(item.InterfaceClass)) is None:
