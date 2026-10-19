@@ -447,7 +447,8 @@ class _Walk:
             self._ok()
             if not name and fname.get_comp_idx():
                 self.issues.add('unreadable_name', i, name, f'CompIdx {fname.get_comp_idx()}')
-            type_relevant = bool(cast_flags & _TYPE_CAST_FLAGS)
+            # a Package CDO is still counted (as `counts.packages` already does); any other CDO is not a type row
+            type_relevant = bool(cast_flags & _TYPE_CAST_FLAGS) and (cast_flags & CF.Package or not flags & EObjectFlags.ClassDefaultObject)
             if type_relevant:
                 self.type_objects += 1
             if stored_index != i:
