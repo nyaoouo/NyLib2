@@ -396,9 +396,23 @@ class ObjectArray:
             self._indices[kind] = index
         return index.get(key, [])
 
+    def _full_name_is(self, obj: UEObject, full_name: str) -> bool:
+        try:
+            return obj.get_full_name() == full_name
+        except MemoryReadError:
+            return False
+
     def find_object(self, full_name: str, required_type: int = 0) -> UEObject:
-        """ObjectArray::FindObject<UEObject> @ ea0dab3 (A6)."""
-        for obj in self._lookup('full', full_name):
+        """ObjectArray::FindObject<UEObject> @ ea0dab3 (A6: candidates by the name after each ' ' or '.'; the full index if ambiguous)."""
+        found = []
+        for i in (i for i, c in enumerate(full_name) if c in ' .'):
+            if matches := [obj for obj in self._lookup('name', full_name[i + 1:]) if self._full_name_is(obj, full_name)]:
+                found.append(matches)
+        if len(found) > 1 or not any(c in ' .' for c in full_name):
+            candidates = self._lookup('full', full_name)
+        else:
+            candidates = found[0] if found else []
+        for obj in candidates:
             if obj.is_a(required_type):
                 return obj
         return UEObject(self.e, 0)
