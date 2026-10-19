@@ -50,6 +50,7 @@ _U64 = 0xFFFFFFFFFFFFFFFF
 _MAX_NESTING = 8
 _MAX_OUTERS = 256
 _SAMPLE_LIMIT = 200
+_MAX_INTERFACES = 4096  # live TArray cap for UClass.ImplementedInterfaces
 _FIELD_PATH = int(CF.FieldPathProperty)
 _OBJECT_KINDS = frozenset({'ObjectProperty', 'WeakObjectProperty', 'LazyObjectProperty', 'SoftObjectProperty', 'InterfaceProperty'})
 _CLASS_KINDS = frozenset({'ClassProperty', 'SoftClassProperty'})
@@ -261,9 +262,10 @@ class Reflection:
         cls = cls.cast(UEClass)
         fields = self._struct_fields(cls)
         interfaces = []
-        if self.e.off.UClass.ImplementedInterfaces >= 0 and (array := cls.get_implemented_interfaces()).is_valid():
-            for i in range(array.num()):
-                item = view(FImplementedInterface, array.element_address(i, 0x10), self.e.acc)
+        if self.e.off.UClass.ImplementedInterfaces >= 0:
+            data, num = cls.get_implemented_interfaces().checked(_MAX_INTERFACES)
+            for i in range(num):
+                item = view(FImplementedInterface, data + i * 0x10, self.e.acc)
                 if (path := self.resolver.path(item.InterfaceClass)) is None:
                     self._report('unresolved_reference', f'implemented interface class {item.InterfaceClass:#x} does not resolve')
                     continue
