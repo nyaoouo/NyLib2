@@ -361,9 +361,9 @@ class ObjectArray:
 
     def __iter__(self) -> Iterator[UEObject]:
         """Range-for over ObjectArray::begin() / end() @ ea0dab3."""
-        it = _ObjectsIterator(self)
         end = _ObjectsIterator(self, self.num())
-        while it != end:
+        it = _ObjectsIterator(self, 0, end.CurrentIndex)
+        while it.CurrentIndex < end.CurrentIndex:  # DV27
             yield it.CurrentObject
             it.increment()
 
@@ -433,23 +433,28 @@ class ObjectArray:
 
 
 class _ObjectsIterator:
-    """ObjectArray::ObjectsIterator @ ea0dab3."""
-    __slots__ = ('objects', 'CurrentObject', 'CurrentIndex')
+    """ObjectArray::ObjectsIterator @ ea0dab3; DV27: with end_index, its steps never pass end_index."""
+    __slots__ = ('objects', 'CurrentObject', 'CurrentIndex', 'EndIndex')
 
-    def __init__(self, objects: ObjectArray, start_index: int = 0):
+    def __init__(self, objects: ObjectArray, start_index: int = 0, end_index: int | None = None):
         self.objects = objects
         self.CurrentObject = objects.get_by_index(start_index)
         self.CurrentIndex = start_index
+        self.EndIndex = end_index
+
+    def _num(self) -> int:
+        num = self.objects.num()
+        return num if self.EndIndex is None else min(num, self.EndIndex)
 
     def increment(self) -> None:
         """ObjectsIterator::operator++ @ ea0dab3."""
         objects = self.objects
         self.CurrentIndex += 1
         self.CurrentObject = objects.get_by_index(self.CurrentIndex)
-        while not self.CurrentObject and self.CurrentIndex < (objects.num() - 1):
+        while not self.CurrentObject and self.CurrentIndex < (self._num() - 1):
             self.CurrentIndex += 1
             self.CurrentObject = objects.get_by_index(self.CurrentIndex)
-        if not self.CurrentObject and self.CurrentIndex == (objects.num() - 1):
+        if not self.CurrentObject and self.CurrentIndex == (self._num() - 1):
             self.CurrentIndex += 1
 
     def __eq__(self, other) -> bool:
@@ -466,7 +471,7 @@ class _AllFieldCursor:
     def __init__(self, e: 'Engine', start_pos: _ObjectsIterator | None = None):
         objects = e.objects
         self.ObjectEndIterator = _ObjectsIterator(objects, objects.num())  # members initialise in declaration order
-        self.CurrentObject = _ObjectsIterator(objects) if start_pos is None else start_pos
+        self.CurrentObject = _ObjectsIterator(objects, 0, self.ObjectEndIterator.CurrentIndex) if start_pos is None else start_pos
         self.Fields: list[UEProperty] = []
         self.PropertyIndex = 0
         if start_pos is None and not self._is_current_object_struct():
@@ -523,7 +528,7 @@ class AllFieldIterator:
     def __iter__(self) -> Iterator[UEProperty]:
         """Range-for over AllFieldIterator::begin() / end() @ ea0dab3."""
         it = _AllFieldCursor(self.e)
-        end = _AllFieldCursor(self.e, _ObjectsIterator(self.e.objects, self.e.objects.num()))
+        end = _AllFieldCursor(self.e, _ObjectsIterator(self.e.objects, it.ObjectEndIterator.CurrentIndex))  # DV27
         while it != end:
             yield it.deref()
             it.increment()
