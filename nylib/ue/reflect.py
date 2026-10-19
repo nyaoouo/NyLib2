@@ -25,7 +25,7 @@ if typing.TYPE_CHECKING:
 
 ISSUE_KINDS = ('unreadable_object', 'index_mismatch', 'unresolved_class', 'unresolved_outer', 'cyclic_outer', 'unreadable_fields',
                'unreadable_type', 'duplicate_path', 'unresolved_reference', 'enum_names_unsupported', 'enum_size_invalid', 'orphan_function',
-               'unreadable_name')
+               'unreadable_name', 'unreadable_interfaces')
 DEAD_TARGET_RUN = 1000
 PROGRESS_EVERY = 4096
 PROPERTY_KIND_ORDER: tuple[tuple[int, str], ...] = tuple((int(bit), kind) for bit, kind in (
@@ -60,7 +60,8 @@ _COUNT_KEYS = ('objects', 'packages', 'classes', 'structs', 'enums', 'functions'
 # per-slot kind bits of the walk
 _ROW, _CDO, _PACKAGE, _STRUCT, _CLASS, _FUNCTION, _ENUM = 1, 2, 4, 8, 16, 32, 64
 _TYPE_CAST_FLAGS = int(CF.Package | CF.Struct | CF.Class | CF.Function | CF.Enum)  # a row is type-relevant for the quality verdict
-QUALITY_THRESHOLDS = {'unreadable_type': 0, 'unreadable_fields': 0, 'unreadable_name': 0, 'index_mismatch_type_ratio': 0.001}
+QUALITY_THRESHOLDS = {'unreadable_type': 0, 'unreadable_fields': 0, 'unreadable_name': 0, 'unreadable_interfaces': 0,
+                      'index_mismatch_type_ratio': 0.001}
 
 
 def kind_of(cast_flags: int, objptr_instead_of_fieldpath: bool) -> str:
@@ -279,7 +280,7 @@ class Reflection:
             try:
                 data, num = cls.get_implemented_interfaces().checked(_MAX_INTERFACES)
             except MemoryReadError as err:
-                self._report('unresolved_reference', f'implemented interfaces header: {err}')
+                self._report('unreadable_interfaces', f'implemented interfaces header: {err}')
                 data, num = 0, 0
             for i in range(num):
                 item = view(FImplementedInterface, data + i * 0x10, self.e.acc)
@@ -597,12 +598,12 @@ class _Walk:
 def _quality(w: '_Walk') -> dict:
     """The export quality verdict from one walk's final issue and type-relevance counts.
 
-    `degraded` when `unreadable_type`, `unreadable_fields` or `unreadable_name` is nonzero, or when
-    `index_mismatch` over type-relevant rows exceeds `index_mismatch_type_ratio` of the type-relevant row count.
+    `degraded` when `unreadable_type`, `unreadable_fields`, `unreadable_name` or `unreadable_interfaces` is nonzero,
+    or when `index_mismatch` over type-relevant rows exceeds `index_mismatch_type_ratio` of the type-relevant row count.
     """
     issue_counts = {kind: w.issues.entries.get(kind, {}).get('count', 0) for kind in ISSUE_KINDS}
     reasons = []
-    for kind in ('unreadable_type', 'unreadable_fields', 'unreadable_name'):
+    for kind in ('unreadable_type', 'unreadable_fields', 'unreadable_name', 'unreadable_interfaces'):
         if issue_counts[kind] > QUALITY_THRESHOLDS[kind]:
             reasons.append(f'{kind} {issue_counts[kind]} > {QUALITY_THRESHOLDS[kind]}')
     ratio = QUALITY_THRESHOLDS['index_mismatch_type_ratio']
