@@ -492,7 +492,8 @@ def iter_directory_index(index: DirIndex, container: str, entry_count: int, *, m
     """
     dirs, files, strings = index.dirs, index.files, index.strings
     nd, nf, ns = len(dirs), len(files), len(strings)
-    limit = nd + nf + 1
+    seen_dirs = bytearray(nd)
+    seen_files = bytearray(nf)
     visits = 0
     bound = None if max_len is None else max_len + (9 if index.mount.startswith('../../../') else 0)
 
@@ -501,45 +502,62 @@ def iter_directory_index(index: DirIndex, container: str, entry_count: int, *, m
             raise _corrupt(container, f'directory index string index {i} is out of range for {ns} strings')
         return strings[i]
 
-    def visit(what):
+    def tick():
         nonlocal visits
         visits += 1
-        if visits > limit:
-            raise _corrupt(container, f'the directory index {what} is cyclic')
         if checkpoint is not None and visits % _CHECK_EVERY == 0:
             checkpoint()
+
+    def materialize(chain):
+        parts = []
+        while chain is not None:
+            seg, chain, _length = chain
+            parts.append(seg)
+        parts.reverse()
+        return ''.join(parts)
 
     if bound is not None and len(index.mount) > bound:
         yield None, None
         return
-    stack = [(0, index.mount)]
+    stack = [(0, (index.mount, None, len(index.mount)))]
     while stack:
-        visit('tree')
-        d, prefix = stack.pop()
+        tick()
+        d, chain = stack.pop()
         if not 0 <= d < nd:
             raise _corrupt(container, f'directory index directory {d} is out of range for {nd} directories')
+        if seen_dirs[d]:
+            raise _corrupt(container, 'the directory index tree is cyclic')
+        seen_dirs[d] = 1
         name_idx, first_child, next_sib, first_file = dirs[d]
         if next_sib != _INVALID:
-            stack.append((next_sib, prefix))
+            stack.append((next_sib, chain))
+        child_chain = chain
         if name_idx != _INVALID:
             seg = name(name_idx)
             if seg:  # an empty directory name adds no path segment
-                if bound is not None and len(prefix) + len(seg) + 1 > bound:
+                _, _, length = chain
+                length += len(seg) + 1
+                if bound is not None and length > bound:
                     yield None, None
                     continue
-                prefix = prefix + seg + '/'
+                child_chain = (seg + '/', chain, length)
         if first_child != _INVALID:
-            stack.append((first_child, prefix))
+            stack.append((first_child, child_chain))
         f = first_file
+        prefix = materialize(child_chain) if f != _INVALID else ''
+        _, _, prefix_len = child_chain
         while f != _INVALID:
-            visit('file list')
+            tick()
             if not 0 <= f < nf:
                 raise _corrupt(container, f'directory index file {f} is out of range for {nf} files')
+            if seen_files[f]:
+                raise _corrupt(container, 'the directory index file list is cyclic')
+            seen_files[f] = 1
             name_idx, nxt, toc_index = files[f]
             if not 0 <= toc_index < entry_count:
                 raise _corrupt(container, f'directory index file {f} points at TOC entry {toc_index}, outside the {entry_count} entries')
             leaf = name(name_idx)
-            if bound is not None and len(prefix) + len(leaf) > bound:
+            if bound is not None and prefix_len + len(leaf) > bound:
                 yield None, None
             else:
                 yield prefix + leaf, toc_index
