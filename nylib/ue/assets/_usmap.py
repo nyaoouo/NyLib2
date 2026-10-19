@@ -4,6 +4,7 @@ Versions 0-4 (EUsmapVersion.Initial..ExplicitEnumValues), compression methods No
 Brotli is recognised and rejected. Every count, name length and declared decompressed size is checked
 against what remains before anything is built from it.
 """
+import hashlib
 import importlib
 import os
 import struct
@@ -27,6 +28,7 @@ _NESTED_TYPES = frozenset({8, 25, 28})  # ArrayProperty, SetProperty, OptionalPr
 _KNOWN_TYPES = frozenset(range(29)) | {0xFF}  # classic EPropertyType (0-28) plus the Unknown sentinel
 
 _MAX_PAYLOAD = 64 << 20  # the decompressed payload cap
+_MAX_FILE = 2 * _MAX_PAYLOAD + (64 << 10)
 _MAX_TYPE_DEPTH = 32
 
 
@@ -128,18 +130,26 @@ def parse(path) -> Mappings:
 
     `path` is assumed already validated and absolute (the caller applies the path rule).
     """
+    return read(path)[0]
+
+
+def read(path) -> tuple:
+    """(Mappings, sha256 of the file's bytes) of the `.usmap` at `path`, from one bounded read; see parse()."""
     path = os.fspath(path)
     basename = os.path.basename(path)
     try:
         with open(path, 'rb') as f:
-            raw = f.read()
+            size = os.fstat(f.fileno()).st_size
+            if size > _MAX_FILE:
+                raise _malformed(basename, f'file size {size} exceeds the {_MAX_FILE}-byte limit')
+            raw = f.read(size)
     except FileNotFoundError as e:
         raise InvalidMappingError(f'mapping file {basename} not found', usmap=basename, reason='not found', path=path,
                                   errno=e.errno, winerror=getattr(e, 'winerror', None)) from None
     except OSError as e:
         raise InvalidMappingError(f'mapping file {basename} cannot be read', usmap=basename, reason='unreadable', path=path,
                                   errno=e.errno, winerror=getattr(e, 'winerror', None)) from None
-    return _parse_bytes(raw, basename)
+    return _parse_bytes(raw, basename), hashlib.sha256(raw).digest()
 
 
 def _malformed(basename: str, reason: str) -> InvalidMappingError:
