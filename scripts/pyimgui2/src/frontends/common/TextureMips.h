@@ -27,8 +27,8 @@ START_TEXTURE_MIPS_NAMESPACE
         std::vector<int> widths, heights;
     };
 
-    // One alpha-weighted 2x2 box-filter step; clamped duplicates count as samples.
-    inline void DownsampleLevel(const unsigned char *src, int srcWidth, int srcHeight, size_t srcPitch, unsigned char *dst, int dstWidth, int dstHeight)
+    // One 2x2 box-filter step, clamped duplicates count as samples; alpha-weighted colour, or a plain average with premultiplied.
+    inline void DownsampleLevel(const unsigned char *src, int srcWidth, int srcHeight, size_t srcPitch, unsigned char *dst, int dstWidth, int dstHeight, bool premultiplied = false)
     {
         for (int y = 0; y < dstHeight; y++)
         {
@@ -52,14 +52,14 @@ START_TEXTURE_MIPS_NAMESPACE
                     }
                 }
                 for (int c = 0; c < 3; c++)
-                    dst[c] = (unsigned char)(sumA > 0 ? (sumCA[c] + sumA / 2) / sumA : (sumC[c] + 2) / 4);
+                    dst[c] = (unsigned char)(!premultiplied && sumA > 0 ? (sumCA[c] + sumA / 2) / sumA : (sumC[c] + 2) / 4);
                 dst[3] = (unsigned char)((sumA + 2) / 4);
             }
         }
     }
 
     // Levels 1..n-1 of rgba (level 0, rows rowPitch bytes apart). Needs no GIL.
-    inline MipChain BuildMipChain(const unsigned char *rgba, int width, int height, size_t rowPitch)
+    inline MipChain BuildMipChain(const unsigned char *rgba, int width, int height, size_t rowPitch, bool premultiplied = false)
     {
         MipChain chain;
         int levels = MipLevelCount(width, height);
@@ -80,7 +80,7 @@ START_TEXTURE_MIPS_NAMESPACE
         for (size_t k = 0; k < chain.offsets.size(); k++)
         {
             unsigned char *dst = chain.bytes.data() + chain.offsets[k];
-            DownsampleLevel(src, srcWidth, srcHeight, srcPitch, dst, chain.widths[k], chain.heights[k]);
+            DownsampleLevel(src, srcWidth, srcHeight, srcPitch, dst, chain.widths[k], chain.heights[k], premultiplied);
             src = dst;
             srcWidth = chain.widths[k];
             srcHeight = chain.heights[k];

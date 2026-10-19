@@ -31,6 +31,14 @@ START_OVERLAY_TYPES_NAMESPACE
             .value("Point", TextureFilter::Point)
             .value("Linear", TextureFilter::Linear)
             .value("Anisotropic", TextureFilter::Anisotropic);
+
+        py::enum_<TextureFormat>(m, "TextureFormat")
+            .value("RGBA8", TextureFormat::RGBA8)
+            .value("BGRA8", TextureFormat::BGRA8);
+
+        py::enum_<TextureBlend>(m, "TextureBlend")
+            .value("Straight", TextureBlend::Straight)
+            .value("Premultiplied", TextureBlend::Premultiplied);
     }
 }
 END_OVERLAY_TYPES_NAMESPACE
