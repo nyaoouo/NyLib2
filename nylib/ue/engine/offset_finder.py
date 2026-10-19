@@ -3,12 +3,13 @@ import struct
 import typing
 from typing import Callable, Iterable, Sequence
 
+from ..errors import MemoryReadError
 from ..flags import EClassCastFlags, EFunctionFlags, EObjectFlags, EPropertyFlags
 from .accessor import view
 from .containers import FImplementedInterface, TArray
 from .objects import AllFieldIterator
 from .platform import align
-from .unreal import UEFunction, UEObject, UEStruct
+from .unreal import UEFField, UEFunction, UEObject, UEStruct
 
 if typing.TYPE_CHECKING:
     from .core import Engine
@@ -20,6 +21,8 @@ _M32 = 0xFFFFFFFF
 _U64 = 0xFFFFFFFFFFFFFFFF
 _READERS = frozenset({'u8', 'i8', 'u16', 'i16', 'u32', 'i32', 'u64', 'i64', 'ptr'})
 _F32 = struct.Struct('<f')
+_ARRAY_INNER_ANCHORS = (('GetOverlappingComponents', 'OverlappingComponents'), ('K2_GetComponentsByClass', 'ReturnValue'),
+                        ('GetOverlappingActors', 'OverlappingActors'))
 
 
 def _i32(value: int) -> int:
@@ -636,12 +639,13 @@ def find_offset_internal_offset(e: 'Engine') -> int:
 # BoolProperty
 
 def find_bool_property_base_offset(e: 'Engine') -> int:
-    """OffsetFinder::FindBoolPropertyBaseOffset @ ea0dab3."""
+    """OffsetFinder::FindBoolPropertyBaseOffset @ ea0dab3; OffsetNotFound stays OffsetNotFound."""
     engine = e.objects.find_class_fast('Engine')
     infos = [(engine.find_member('bIsOverridingSelectedColor').get_address(), 0xFF),
              (engine.find_member('bEnableOnScreenDebugMessagesDisplay').get_address(), 0b00000010),
              (e.objects.find_class_fast('PlayerController').find_member('bAutoManageActiveCameraTarget').get_address(), 0xFF)]
-    return _i32(find_offset(e, infos, e.off.Property.Offset_Internal, alignment=1, reader='u8') - 0x3)
+    offset = find_offset(e, infos, e.off.Property.Offset_Internal, alignment=1, reader='u8')
+    return OffsetNotFound if offset == OffsetNotFound else _i32(offset - 0x3)
 
 
 # ObjectProperty
@@ -659,7 +663,7 @@ def find_object_property_class_offset(e: 'Engine') -> int:
 # EnumProperty
 
 def find_enum_property_base_offset(e: 'Engine') -> int:
-    """OffsetFinder::FindEnumPropertyBaseOffset @ ea0dab3."""
+    """OffsetFinder::FindEnumPropertyBaseOffset @ ea0dab3; OffsetNotFound stays OffsetNotFound."""
     objects = e.objects
     component_creation_method = objects.find_object_fast('EComponentCreationMethod', EClassCastFlags.Enum).get_address()
     auto_possess_ai = objects.find_object_fast('EAutoPossessAI', EClassCastFlags.Enum).get_address()
@@ -670,7 +674,8 @@ def find_enum_property_base_offset(e: 'Engine') -> int:
     if not creation_method_member or not auto_possess_ai_member:
         return OffsetNotFound
     infos = [(creation_method_member, component_creation_method), (auto_possess_ai_member, auto_possess_ai)]
-    return _i32(find_offset(e, infos, e.off.Property.Offset_Internal, reader='ptr') - 8)
+    offset = find_offset(e, infos, e.off.Property.Offset_Internal, reader='ptr')
+    return OffsetNotFound if offset == OffsetNotFound else _i32(offset - 8)
 
 
 # ByteProperty
@@ -692,7 +697,7 @@ def find_byte_property_enum_offset(e: 'Engine') -> int:
 # StructProperty
 
 def find_struct_property_struct_offset(e: 'Engine') -> int:
-    """OffsetFinder::FindStructPropertyStructOffset @ ea0dab3."""
+    """OffsetFinder::FindStructPropertyStructOffset @ ea0dab3; without v1/v2, V1/V2 must both hold Vector at the offset."""
     vector_class = e.objects.find_struct_fast('Vector').get_address()
     if vector_class == 0:
         vector_class = e.objects.find_class_fast('vector').get_address()
@@ -701,9 +706,16 @@ def find_struct_property_struct_offset(e: 'Engine') -> int:
         return OffsetNotFound
     v1 = two_vectors_struct.find_member('v1', EClassCastFlags.StructProperty).get_address()
     v2 = two_vectors_struct.find_member('v2', EClassCastFlags.StructProperty).get_address()
+    if v1 and v2:
+        return find_offset(e, [(v1, vector_class), (v2, vector_class)], e.off.Property.Offset_Internal, reader='ptr')
+    v1 = two_vectors_struct.find_member('V1', EClassCastFlags.StructProperty).get_address()
+    v2 = two_vectors_struct.find_member('V2', EClassCastFlags.StructProperty).get_address()
     if not v1 or not v2:
         return OffsetNotFound
-    return find_offset(e, [(v1, vector_class), (v2, vector_class)], e.off.Property.Offset_Internal, reader='ptr')
+    offset = find_offset(e, [(v1, vector_class), (v2, vector_class)], e.off.Property.Offset_Internal, reader='ptr')
+    if offset == OffsetNotFound or e.mem.ptr(v1 + offset) != vector_class or e.mem.ptr(v2 + offset) != vector_class:
+        return OffsetNotFound
+    return offset
 
 
 # DelegateProperty
@@ -734,6 +746,41 @@ def find_inner_type_offset(e: 'Engine', property_size: int) -> int:
         if e.platform.is_bad_read_ptr(e.mem.ptr(prop.get_address() + property_size)):
             return _i32(property_size + 8)
     return property_size
+
+
+def has_inner_type_anchor(e: 'Engine') -> bool:
+    """Whether FindInnerTypeOffset's GameViewportClient.DebugProperties anchor exists."""
+    return bool(e.objects.find_class_fast('GameViewportClient').find_member('DebugProperties', EClassCastFlags.ArrayProperty))
+
+
+def _holds_property(e: 'Engine', slot: int, owner: int) -> bool:
+    """Whether the pointer at `slot` is a readable FField, flagged Property, and owned by `owner`."""
+    try:
+        field = UEFField(e, e.mem.ptr(slot))
+        return field.get_class().is_type(EClassCastFlags.Property) and field.get_owner_as_ffield().get_address() == owner
+    except MemoryReadError:
+        return False
+
+
+def find_actor_array_inner_offset(e: 'Engine', property_size: int) -> int:
+    """ArrayProperty::Inner from Actor's TArray parameters: property_size or property_size + 8, else OffsetNotFound.
+    Each anchor votes for the one candidate holding a property it owns; two or more votes, all equal, decide."""
+    actor = e.objects.find_class_fast('Actor')
+    candidates = (property_size, _i32(property_size + 8))
+    votes = []
+    for func_name, param_name in _ARRAY_INNER_ANCHORS:
+        prop = actor.get_function('Actor', func_name).find_member(param_name, EClassCastFlags.ArrayProperty)
+        valid = [c for c in candidates if _holds_property(e, prop.get_address() + c, prop.get_address())] if prop else []
+        if not prop:
+            votes_text = 'not found'
+        elif valid:
+            votes_text = ', '.join(f'0x{c:X}' for c in valid)
+        else:
+            votes_text = 'none'
+        e.cerr(f'ArrayProperty::Inner anchor Actor.{func_name}.{param_name}: {votes_text}\n')
+        if len(valid) == 1:
+            votes.append(valid[0])
+    return votes[0] if len(votes) >= 2 and len(set(votes)) == 1 else OffsetNotFound
 
 
 def find_set_property_base_offset(e: 'Engine', property_size: int) -> int:

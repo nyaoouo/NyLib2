@@ -108,11 +108,45 @@ def _tolerated(e: 'Engine', keys: tuple[str, ...], pins: Mapping[str, int], call
         return False, None
 
 
+def _is_property_key(key: str) -> bool:
+    return key.split('.')[1].endswith('Property')
+
+
 def _find(e: 'Engine', pins: Mapping[str, int], key: str, func: str, finder, *args, zero_is_not_found: bool = False) -> None:
-    """`Off::X = OffsetFinder::<func>(args...)` with its Provenance label."""
+    """`Off::X = OffsetFinder::<func>(args...)` with its Provenance label; a negative property offset is stored as OffsetNotFound."""
     ok, value = _tolerated(e, (key,), pins, lambda: finder(e, *args))
     if ok:
-        _assign(e, key, value, _finder_label(func, value, zero_is_not_found), pins)
+        label = _finder_label(func, value, zero_is_not_found)
+        if value < 0 and _is_property_key(key):
+            value = OffsetFinder.OffsetNotFound
+        _assign(e, key, value, label, pins)
+
+
+def _infer_property_base(e: 'Engine', pins: Mapping[str, int]) -> tuple[int, str]:
+    """PropertySize when the Bool and Enum anchors are missing: two or more subclass finders find it and all agree.
+    Raises DetectionError otherwise, unless PropertySize is pinned."""
+    found, results = {}, []
+    for func, finder in (('FindBytePropertyEnumOffset', OffsetFinder.find_byte_property_enum_offset),
+                         ('FindObjectPropertyClassOffset', OffsetFinder.find_object_property_class_offset),
+                         ('FindStructPropertyStructOffset', OffsetFinder.find_struct_property_struct_offset)):
+        try:
+            value = finder(e)
+        except (MemoryReadError, DetectionError) as exc:
+            results.append(f'{func} raised {type(exc).__name__}')
+            continue
+        results.append(f'{func} returned {_hexs(value)}')
+        if value >= 0:
+            found[func] = value
+    if len(found) >= 2 and len(set(found.values())) == 1:
+        value = next(iter(found.values()))
+        if (key := 'Off.InSDK.Properties.PropertySize') in pins and pins[key] != value:
+            e.cerr(f'{key}: pinned 0x{pins[key]:X} differs from the agreed value 0x{value:X}\n')
+        return value, f'fallback: Off::Init ({", ".join(found)} agree)'
+    if (key := 'Off.InSDK.Properties.PropertySize') in pins:
+        return pins[key], 'fallback: Off::InSDK::Properties::PropertySize (profile)'
+    raise DetectionError('Off::Init', 'cannot establish Off.BoolProperty.Base, Off.EnumProperty.Base and Off.InSDK.Properties.PropertySize: '
+                         f'their anchors are missing and the subclass finders do not agree ({"; ".join(results)})'
+                         '; pin Off.InSDK.Properties.PropertySize in a profile', tuple(e.messages))
 
 
 def _field_class_cast_flags_found(e: 'Engine', value: int) -> bool:
@@ -251,13 +285,19 @@ def off_init(e: 'Engine', *, pins: Mapping[str, int] | None = None) -> None:
     _find(e, pins, 'Off.EnumProperty.Base', 'FindEnumPropertyBaseOffset', OffsetFinder.find_enum_property_base_offset)
     e.cerr(f'Off::EnumProperty::Base: 0x{off.EnumProperty.Base:X}\n\n')
 
-    if off.EnumProperty.Base == OffsetFinder.OffsetNotFound:
+    if off.EnumProperty.Base == OffsetFinder.OffsetNotFound and off.BoolProperty.Base == OffsetFinder.OffsetNotFound:
+        base, label = _infer_property_base(e, pins)
+        for key in ('Off.InSDK.Properties.PropertySize', 'Off.EnumProperty.Base', 'Off.BoolProperty.Base'):
+            _assign(e, key, base, label, pins)
+    elif off.EnumProperty.Base == OffsetFinder.OffsetNotFound:
         label = 'fallback: Off::BoolProperty::Base (no EnumProperty)'
         _assign(e, 'Off.InSDK.Properties.PropertySize', off.BoolProperty.Base, label, pins)
         _assign(e, 'Off.EnumProperty.Base', off.BoolProperty.Base, label, pins)
     else:
         base = off.EnumProperty.Base
         _assign(e, 'Off.InSDK.Properties.PropertySize', base, _computed_label('Off.EnumProperty.Base', base), pins)
+        if off.BoolProperty.Base == OffsetFinder.OffsetNotFound:
+            _assign(e, 'Off.BoolProperty.Base', base, 'fallback: Off::EnumProperty::Base (no BoolProperty)', pins)
 
     e.cerr(f'UPropertySize: 0x{off.InSDK.Properties.PropertySize:X}\n\n')
 
@@ -279,6 +319,13 @@ def off_init(e: 'Engine', *, pins: Mapping[str, int] | None = None) -> None:
     e.cerr(f'Off::DelegateProperty::SignatureFunction: 0x{off.DelegateProperty.SignatureFunction:X}\n\n')
 
     _find(e, pins, 'Off.ArrayProperty.Inner', 'FindInnerTypeOffset', OffsetFinder.find_inner_type_offset, off.InSDK.Properties.PropertySize)
+    if e.settings.Internal.bUseFProperty and 'Off.ArrayProperty.Inner' not in pins and not OffsetFinder.has_inner_type_anchor(e):
+        _find(e, pins, 'Off.ArrayProperty.Inner', 'FindInnerTypeOffset (Actor function anchors)', OffsetFinder.find_actor_array_inner_offset,
+              off.InSDK.Properties.PropertySize)
+        if off.ArrayProperty.Inner == OffsetFinder.OffsetNotFound:
+            raise DetectionError('Off::Init', 'cannot establish Off.ArrayProperty.Inner (pin Off.ArrayProperty.Inner in a profile): '
+                                 'GameViewportClient.DebugProperties is missing and '
+                                 'fewer than two Actor function ArrayProperty anchors agree', tuple(e.messages))
     e.cerr(f'Off::ArrayProperty::Inner: 0x{off.ArrayProperty.Inner:X}\n')
 
     _find(e, pins, 'Off.SetProperty.ElementProp', 'FindSetPropertyBaseOffset', OffsetFinder.find_set_property_base_offset,
