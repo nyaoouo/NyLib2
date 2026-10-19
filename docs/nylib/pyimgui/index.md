@@ -232,9 +232,17 @@ affect textures. DX12 holds up to 4094 live textures at once; beyond that,
 creation raises `RuntimeError`. DX12 `LoadTextureFromFile` changes `handle`,
 and so does DX12 `UpdatePixels`.
 
-Format and memory: `pixels` is RGBA8 with straight alpha, row 0 at the top,
-in a C-contiguous buffer (`bytes`, `bytearray`, `memoryview`, `array.array`,
-or numpy). Tight rows need exactly `width*height*4` bytes; with `rowPitch=n`,
+Format and memory: `pixels` is 4 bytes per texel in `format` order, row 0 at
+the top, in a C-contiguous buffer (`bytes`, `bytearray`, `memoryview`,
+`array.array`, or numpy); the default `format=pyimgui.TextureFormat.RGBA8`
+is straight alpha. `format=pyimgui.TextureFormat.BGRA8` swaps the red and
+blue bytes for the same layout; a device without BGRA8 sampling support
+raises `RuntimeError` at creation. `premultiplied=True` records that colour
+is already multiplied by alpha - needed to draw under `SetTextureBlend`
+(below) - and, with `mips=True`, switches the mip chain to a plain 2x2
+average instead of the default alpha-weighted filter; both are read back as
+`tex.format` and `tex.premultiplied`. Tight rows need exactly
+`width*height*4` bytes; with `rowPitch=n`,
 rows start every `n` bytes and the buffer needs at least `n*height` bytes.
 Short buffers raise `ValueError` before anything is read. A 4096x4096 texture
 is 64 MiB at 4 bytes per pixel, and `mips=True` adds about a third; a side
@@ -243,7 +251,40 @@ may be at most 16384 px, matching the font atlas limits above.
 Drawing: `imgui.Image`, `dl.AddImage`, `dl.AddImageQuad` (rotated or skewed
 quads, with per-corner UVs), and `esp.add_image_triangle` (any textured
 triangle, for example a clipped polygon drawn as a fan; see
-[esp.md](esp.md)). UV (0, 0) is the top-left texel.
+[esp.md](esp.md)). UV (0, 0) is the top-left texel. A premultiplied texture
+(below) needs `SetTextureBlend(dl, pyimgui.TextureBlend.Premultiplied)` and
+`ResetTextureBlend(dl)` on the same draw list around its draws; the scope
+composes with the sampler scope below - each call changes only its own half,
+keeping the other. Draw only premultiplied textures inside it, straight-alpha
+textures (text and shapes included) stay outside, and premultiply any ImGui
+tint yourself (`(r*a, g*a, b*a, a)`).
+
+```python
+# needs: running pyimgui window
+from nylib.pyimgui import Dx11Window, imgui
+import nylib.pyimgui as pyimgui
+
+tinted = {}
+
+def load_tinted(wnd):
+    # one orange texel at ~63% alpha, already multiplied into the colour,
+    # in BGRA8 byte order
+    texel = bytes((25, 75, 126, 160))
+    tinted['tex'] = wnd.CreateTextureFromPixels(
+        1, 1, texel, format=pyimgui.TextureFormat.BGRA8, premultiplied=True)
+
+def render(wnd):
+    if 'tex' not in tinted:
+        return
+    dl = imgui.GetBackgroundDrawList()
+    wnd.SetTextureBlend(dl, pyimgui.TextureBlend.Premultiplied)
+    dl.AddImage(tinted['tex'].handle, imgui.ImVec2(40, 40), imgui.ImVec2(104, 104))
+    wnd.ResetTextureBlend(dl)
+
+wnd = Dx11Window(render)
+wnd.CallBeforeFrameOnce(lambda: load_tinted(wnd))
+wnd.Serve()
+```
 
 Sampling: by default, every texture samples bilinear on mip 0 only, on both
 backends. Both backends add `mips=True` at creation and a per-draw sampler:
@@ -303,18 +344,25 @@ on the stored 8-bit values, output `(Y, Y, Y, A)`. On an ordinary sRGB image
 that is BT.709 luma, not linear luminance. Alpha and size are kept, mips are
 built after the conversion, and without `transform` nothing changes.
 
-Updating pixels: `tex.UpdatePixels(pixels, *, rowPitch=0)` replaces a
-texture's pixels with a new buffer of the same size, with the pixel and
-`rowPitch` rules of `CreateTextureFromPixels`. Call it on the render thread
+Updating pixels: `tex.UpdatePixels(pixels, *, rowPitch=0, rect=None)`
+replaces a texture's pixels with a new buffer of the same size, with the
+pixel and `rowPitch` rules of `CreateTextureFromPixels`. `rect=(x, y, w, h)`
+updates only that rectangle instead, on a texture created with
+`mips=False` (a `mips=True` texture raises `ValueError`); `pixels` and
+`rowPitch` then follow the same rules for a `w` x `h` image, and a rectangle
+outside `0 <= x`, `0 <= y`, `w >= 1`, `h >= 1`, `x + w <= width`,
+`y + h <= height` raises `ValueError` too. Call it on the render thread
 only, from the render callback or `CallBeforeFrameOnce`; off the render
 thread, on an empty or freed texture, or after the session ended it raises
 `RuntimeError`, and a buffer sized for another width or height raises
 `ValueError`. A texture created with `mips=True` gets its whole mip chain
 rebuilt from the new pixels. DX11 updates in place and keeps `handle`, so
-draws already recorded earlier in the frame show the new pixels too; DX12
-uploads a new texture on every call and changes `handle`, so draws recorded
-earlier in the frame still show the old pixels - read `handle` when you
-draw.
+draws already recorded earlier in the frame show the new pixels too, rect
+updates included; DX12 uploads a new texture on every call and changes
+`handle`, so draws recorded earlier in the frame still show the old pixels -
+read `handle` when you draw. DX12 has no cheaper partial path: a `rect`
+update still copies the whole texture into a new resource and slot and
+waits for that copy, exactly like a full update.
 
 ```python
 # needs: running pyimgui window

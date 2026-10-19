@@ -1,6 +1,7 @@
 #pragma once
 #include "./gHeader.h"
 #include "./OverlayTypes.h"
+#include <array>
 #ifndef STBI_INCLUDE_STB_IMAGE_H
 #include "stb_image.h"
 #endif
@@ -99,6 +100,33 @@ START_TEXTURE_DATA_NAMESPACE
     {
         if (transform.has_value() && *transform != OVERLAY_TYPES_NAMESPACE::TextureTransform::GrayscaleBT709)
             throw py::value_error(std::format("unknown TextureTransform value: {}", (int)*transform));
+    }
+
+    // Raises ValueError if format holds a TextureFormat value pybind11 did not reject.
+    inline void CheckTextureFormat(OVERLAY_TYPES_NAMESPACE::TextureFormat format)
+    {
+        using OVERLAY_TYPES_NAMESPACE::TextureFormat;
+        if (format != TextureFormat::RGBA8 && format != TextureFormat::BGRA8)
+            throw py::value_error(std::format("unknown TextureFormat value: {}", (int)format));
+    }
+
+    // Raises ValueError if blend holds a TextureBlend value pybind11 did not reject.
+    inline void CheckTextureBlend(OVERLAY_TYPES_NAMESPACE::TextureBlend blend)
+    {
+        using OVERLAY_TYPES_NAMESPACE::TextureBlend;
+        if (blend != TextureBlend::Straight && blend != TextureBlend::Premultiplied)
+            throw py::value_error(std::format("unknown TextureBlend value: {}", (int)blend));
+    }
+
+    // Returns rect (x, y, w, h) if it lies inside width x height and the texture was created with mips=False, else raises ValueError.
+    inline std::array<int, 4> CheckTextureRect(const std::array<int, 4> &rect, int width, int height, bool mips)
+    {
+        if (mips)
+            throw py::value_error("rect updates need a texture created with mips=False");
+        int x = rect[0], y = rect[1], w = rect[2], h = rect[3];
+        if (x < 0 || y < 0 || w < 1 || h < 1 || w > width - x || h > height - y)
+            throw py::value_error(std::format("rect must satisfy 0 <= x, 0 <= y, 1 <= w, 1 <= h, x + w <= width and y + h <= height, got ({}, {}, {}, {}) for {}x{}", x, y, w, h, width, height));
+        return rect;
     }
 
     // Converts tight RGBA8 rows in place: GrayscaleBT709 sets R = G = B = BT.709 luma, alpha unchanged; nullopt does nothing.

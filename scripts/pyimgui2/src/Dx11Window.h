@@ -4,8 +4,11 @@
 
 #include <d3d11.h>
 #include <dxgi.h>
+#include <array>
 #include <atomic>
 #include <mutex>
+#include <unordered_map>
+#include <utility>
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
 
@@ -28,9 +31,25 @@ START_M_IMGUI_IMPL_NAMESPACE
         bool OnRenderThread() const noexcept;                // renderThread 0 (inbound): inside our hooked frame
         void Retire(ID3D11ShaderResourceView *srv) noexcept; // any thread; open: deferred, closed: released now (single-threaded: leaked)
         void Collect() noexcept;                             // render thread, before the backend NewFrame
-        void Close() noexcept;                               // teardown, unwind guard or open site; releases pending and samplers (single-threaded: leaks); idempotent
+        void Close() noexcept;                               // teardown, unwind guard or open site; releases pending, samplers and blend states (single-threaded: leaks); idempotent
         bool IsOpen() const noexcept;                        // lock-free; read on every handle access
         ID3D11SamplerState *Sampler(OVERLAY_TYPES_NAMESPACE::TextureFilter filter, int anisotropy); // render thread; anisotropy in [1, 16]; cached until Close; RuntimeError on failure
+        static int SamplerIndex(OVERLAY_TYPES_NAMESPACE::TextureFilter filter, int anisotropy);      // 0 Point, 1 Linear, 1 + anisotropy
+        ID3D11BlendState *Blend(OVERLAY_TYPES_NAMESPACE::TextureBlend blend);                       // render thread; cached until Close; RuntimeError on failure
+        bool BgraSupported();                                                                       // render thread; CheckFormatSupport, cached for the store's lifetime
+
+        // Combined sampler+blend scope (render thread only, cleared in Collect): sIdx is a sampler
+        // variant index (as Sampler()'s, 0..17) or DEFAULT_SAMPLER; bIdx is 0 Straight, 1 Premultiplied.
+        static int const DEFAULT_SAMPLER = 18;
+        std::pair<int, int> ScopeOf(ImDrawList *drawList) const;       // (DEFAULT_SAMPLER, 0) when absent
+        void UpdateScope(ImDrawList *drawList, int sIdx, int bIdx);    // appends the combined callback, or ResetRenderState when fully default
+
+        // Public so the free-function draw callback (ImDrawCmd::UserCallbackData) can read it.
+        struct ScopeRecord
+        {
+            ID3D11SamplerState *sampler; // nullptr: use ImGui_ImplDX11_RenderState::SamplerDefault
+            ID3D11BlendState *blend;
+        };
 
     private:
         std::mutex mutex;
@@ -41,6 +60,12 @@ START_M_IMGUI_IMPL_NAMESPACE
         std::vector<ID3D11ShaderResourceView *> pending;
         std::vector<ID3D11ShaderResourceView *> releases; // scratch of Collect and Close, which never run concurrently
         ID3D11SamplerState *samplers[18] = {};            // Point, Linear, then Anisotropic 1..16
+        ID3D11BlendState *blendStates[2] = {};            // 0 Straight, 1 Premultiplied
+        bool bgraChecked = false;
+        bool bgraSupported = false;
+
+        ScopeRecord scopeRecords[19][2] = {};                       // [sIdx][bIdx]; stable addresses for AddCallback
+        std::unordered_map<ImDrawList *, std::pair<int, int>> scopeState; // current (sIdx, bIdx) per drawList this frame
     };
 
     class Dx11Texture
@@ -51,14 +76,20 @@ START_M_IMGUI_IMPL_NAMESPACE
         int width = 0;
         int height = 0;
         int mipLevels = 1;
+        bool mips = false; // creation value
+        OVERLAY_TYPES_NAMESPACE::TextureFormat format = OVERLAY_TYPES_NAMESPACE::TextureFormat::RGBA8;
+        bool premultiplied = false;
 
-        Dx11Texture(std::shared_ptr<Dx11TextureStore> store, int width, int height, const unsigned char *rgba, UINT rowPitch, bool mips); // needs no GIL
+        Dx11Texture(std::shared_ptr<Dx11TextureStore> store, int width, int height, const unsigned char *rgba, UINT rowPitch, bool mips,
+                    OVERLAY_TYPES_NAMESPACE::TextureFormat format = OVERLAY_TYPES_NAMESPACE::TextureFormat::RGBA8, bool premultiplied = false); // needs no GIL
         ~Dx11Texture();
         Dx11Texture(const Dx11Texture &) = delete;
         Dx11Texture &operator=(const Dx11Texture &) = delete;
 
         void FreeTexture();
-        void UpdatePixels(py::buffer pixels, long long rowPitch); // render thread, GIL held on entry; same size, in place (handle kept), mips rebuilt
+        // render thread, GIL held on entry; rect=nullopt: same size, in place (handle kept), mips rebuilt;
+        // rect=(x,y,w,h): in place (handle kept), only that rectangle, texture must have mips=False.
+        void UpdatePixels(py::buffer pixels, long long rowPitch, std::optional<std::array<int, 4>> rect = std::nullopt);
         uintptr_t GetHandle() const;
         ImVec2 GetSize() const;
     };
@@ -79,9 +110,12 @@ START_M_IMGUI_IMPL_NAMESPACE
         void CreateRenderTarget();
         void CleanupRenderTarget();
         Dx11Texture *CreateTexture(const std::string &filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform = std::nullopt, bool mips = false);
-        Dx11Texture *CreateTextureFromPixels(int width, int height, py::buffer pixels, long long rowPitch, bool mips);
+        Dx11Texture *CreateTextureFromPixels(int width, int height, py::buffer pixels, long long rowPitch, bool mips,
+                                             OVERLAY_TYPES_NAMESPACE::TextureFormat format = OVERLAY_TYPES_NAMESPACE::TextureFormat::RGBA8, bool premultiplied = false);
         void SetTextureSampler(ImDrawList *drawList, OVERLAY_TYPES_NAMESPACE::TextureFilter filter, int anisotropy); // the draws added after it to drawList, until Reset
-        void ResetTextureSampler(ImDrawList *drawList);                                                             // restores the backend's render state
+        void ResetTextureSampler(ImDrawList *drawList);                                                             // back to the backend sampler, keeping the blend
+        void SetTextureBlend(ImDrawList *drawList, OVERLAY_TYPES_NAMESPACE::TextureBlend blend); // the draws added after it to drawList, until Reset; composes with SetTextureSampler
+        void ResetTextureBlend(ImDrawList *drawList);                                            // back to Straight, keeping the sampler
         std::shared_ptr<Dx11TextureStore> OpenTextures(); // the open store, else RuntimeError "no D3D11 device"; off the render thread RuntimeError "render thread"
         void InstallTextures(DWORD renderThread);         // open site: closes a leftover store, then opens one on pd3dDevice; 0 for inbound
         void CollectTextures() noexcept;

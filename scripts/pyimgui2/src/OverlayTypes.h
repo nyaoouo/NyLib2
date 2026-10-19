@@ -49,10 +49,22 @@ START_OVERLAY_TYPES_NAMESPACE
         Anisotropic = 2,
     };
 
-    // Register InputPolicy, OverlayZOrder, GamepadPolicy, TextureTransform and
-    // TextureFilter on `m` (the top-level pyimgui module). Must be called exactly
-    // once (DllMain.cpp, core only): all five are shared across py::module_local()
-    // frontend classes.
+    enum class TextureFormat
+    {
+        RGBA8 = 0,
+        BGRA8 = 1,
+    };
+
+    enum class TextureBlend
+    {
+        Straight = 0,
+        Premultiplied = 1,
+    };
+
+    // Register InputPolicy, OverlayZOrder, GamepadPolicy, TextureTransform,
+    // TextureFilter, TextureFormat and TextureBlend on `m` (the top-level pyimgui
+    // module). Must be called exactly once (DllMain.cpp, core only): all seven are
+    // shared across py::module_local() frontend classes.
     void pybind_setup_OverlayTypes(py::module_ m);
 }
 END_OVERLAY_TYPES_NAMESPACE

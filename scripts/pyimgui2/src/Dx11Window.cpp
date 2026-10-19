@@ -84,29 +84,38 @@ START_M_IMGUI_IMPL_NAMESPACE
         for (ID3D11ShaderResourceView *srv : this->releases)
             srv->Release();
         this->releases.clear();
+        this->scopeState.clear(); // render thread only, like the rest of Collect
     }
 
     void Dx11TextureStore::Close() noexcept
     {
-        decltype(this->samplers) closing = {};
+        decltype(this->samplers) closingSamplers = {};
+        decltype(this->blendStates) closingBlends = {};
         {
             std::lock_guard<std::mutex> lock(this->mutex);
             if (!this->open)
                 return;
             this->open = false;
             this->releases.swap(this->pending);
-            std::memcpy(closing, this->samplers, sizeof(closing));
+            std::memcpy(closingSamplers, this->samplers, sizeof(closingSamplers));
             std::memset(this->samplers, 0, sizeof(this->samplers));
+            std::memcpy(closingBlends, this->blendStates, sizeof(closingBlends));
+            std::memset(this->blendStates, 0, sizeof(this->blendStates));
         }
         if (this->singleThreaded)
             return;
         for (ID3D11ShaderResourceView *srv : this->releases)
             srv->Release();
         this->releases.clear();
-        for (ID3D11SamplerState *sampler : closing)
+        for (ID3D11SamplerState *sampler : closingSamplers)
         {
             if (sampler != nullptr)
                 sampler->Release();
+        }
+        for (ID3D11BlendState *blend : closingBlends)
+        {
+            if (blend != nullptr)
+                blend->Release();
         }
     }
 
@@ -115,10 +124,16 @@ START_M_IMGUI_IMPL_NAMESPACE
         return this->open.load();
     }
 
+    int Dx11TextureStore::SamplerIndex(OVERLAY_TYPES_NAMESPACE::TextureFilter filter, int anisotropy)
+    {
+        using OVERLAY_TYPES_NAMESPACE::TextureFilter;
+        return filter == TextureFilter::Point ? 0 : filter == TextureFilter::Linear ? 1 : 1 + anisotropy;
+    }
+
     ID3D11SamplerState *Dx11TextureStore::Sampler(OVERLAY_TYPES_NAMESPACE::TextureFilter filter, int anisotropy)
     {
         using OVERLAY_TYPES_NAMESPACE::TextureFilter;
-        int index = filter == TextureFilter::Point ? 0 : filter == TextureFilter::Linear ? 1 : 1 + anisotropy;
+        int index = SamplerIndex(filter, anisotropy);
         {
             std::lock_guard<std::mutex> lock(this->mutex);
             if (this->open && this->samplers[index] != nullptr)
@@ -154,11 +169,105 @@ START_M_IMGUI_IMPL_NAMESPACE
         return cached;
     }
 
-    Dx11Texture::Dx11Texture(std::shared_ptr<Dx11TextureStore> store, int width, int height, const unsigned char *rgba, UINT rowPitch, bool mips) : store(std::move(store))
+    ID3D11BlendState *Dx11TextureStore::Blend(OVERLAY_TYPES_NAMESPACE::TextureBlend blend)
+    {
+        using OVERLAY_TYPES_NAMESPACE::TextureBlend;
+        int index = blend == TextureBlend::Premultiplied ? 1 : 0;
+        {
+            std::lock_guard<std::mutex> lock(this->mutex);
+            if (this->open && this->blendStates[index] != nullptr)
+                return this->blendStates[index];
+        }
+        D3D11_BLEND_DESC desc = {};
+        desc.RenderTarget[0].BlendEnable = TRUE;
+        desc.RenderTarget[0].SrcBlend = blend == TextureBlend::Premultiplied ? D3D11_BLEND_ONE : D3D11_BLEND_SRC_ALPHA;
+        desc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+        desc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+        desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+        desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+        desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        ID3D11BlendState *state = nullptr;
+        HRESULT hr = this->device->CreateBlendState(&desc, &state);
+        if (FAILED(hr))
+            _throwV_("Failed to create blend state: {:#x}", (unsigned)hr);
+        ID3D11BlendState *cached = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(this->mutex);
+            if (this->open)
+            {
+                if (this->blendStates[index] == nullptr)
+                    this->blendStates[index] = state;
+                cached = this->blendStates[index];
+            }
+        }
+        if (cached != state)
+            state->Release();
+        if (cached == nullptr)
+            _throw_("no D3D11 device; the session of this renderer has closed");
+        return cached;
+    }
+
+    bool Dx11TextureStore::BgraSupported()
+    {
+        {
+            std::lock_guard<std::mutex> lock(this->mutex);
+            if (this->bgraChecked)
+                return this->bgraSupported;
+        }
+        UINT support = 0;
+        HRESULT hr = this->device->CheckFormatSupport(DXGI_FORMAT_B8G8R8A8_UNORM, &support);
+        bool ok = SUCCEEDED(hr) && (support & D3D11_FORMAT_SUPPORT_TEXTURE2D) && (support & D3D11_FORMAT_SUPPORT_SHADER_SAMPLE);
+        std::lock_guard<std::mutex> lock(this->mutex);
+        this->bgraChecked = true;
+        this->bgraSupported = ok;
+        return ok;
+    }
+
+    std::pair<int, int> Dx11TextureStore::ScopeOf(ImDrawList *drawList) const
+    {
+        auto it = this->scopeState.find(drawList);
+        return it != this->scopeState.end() ? it->second : std::pair<int, int>{DEFAULT_SAMPLER, 0};
+    }
+
+    // Binds the sampler and blend state stored in the command for the draws after it in this viewport.
+    static void SetScopeCallback(const ImDrawList *, const ImDrawCmd *cmd)
+    {
+        auto *state = (ImGui_ImplDX11_RenderState *)ImGui::GetPlatformIO().Renderer_RenderState;
+        if (state == nullptr)
+            return;
+        auto *rec = (Dx11TextureStore::ScopeRecord *)cmd->UserCallbackData;
+        ID3D11SamplerState *sampler = rec->sampler != nullptr ? rec->sampler : state->SamplerDefault;
+        state->DeviceContext->PSSetSamplers(0, 1, &sampler);
+        const float factor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        state->DeviceContext->OMSetBlendState(rec->blend, factor, 0xffffffff);
+    }
+
+    void Dx11TextureStore::UpdateScope(ImDrawList *drawList, int sIdx, int bIdx)
+    {
+        if (sIdx == DEFAULT_SAMPLER && bIdx == 0)
+        {
+            this->scopeState.erase(drawList);
+            drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+            return;
+        }
+        ID3D11BlendState *blend = this->Blend(bIdx == 1 ? OVERLAY_TYPES_NAMESPACE::TextureBlend::Premultiplied : OVERLAY_TYPES_NAMESPACE::TextureBlend::Straight);
+        ScopeRecord &rec = this->scopeRecords[sIdx][bIdx];
+        {
+            std::lock_guard<std::mutex> lock(this->mutex);
+            rec.sampler = sIdx == DEFAULT_SAMPLER ? nullptr : this->samplers[sIdx]; // created by Sampler() before the scope named sIdx
+        }
+        rec.blend = blend;
+        this->scopeState[drawList] = {sIdx, bIdx};
+        drawList->AddCallback(&SetScopeCallback, &rec);
+    }
+
+    Dx11Texture::Dx11Texture(std::shared_ptr<Dx11TextureStore> store, int width, int height, const unsigned char *rgba, UINT rowPitch, bool mips,
+                             OVERLAY_TYPES_NAMESPACE::TextureFormat format, bool premultiplied) : store(std::move(store))
     {
         TEXTURE_MIPS_NAMESPACE::MipChain chain;
         if (mips)
-            chain = TEXTURE_MIPS_NAMESPACE::BuildMipChain(rgba, width, height, rowPitch);
+            chain = TEXTURE_MIPS_NAMESPACE::BuildMipChain(rgba, width, height, rowPitch, premultiplied);
         UINT levels = (UINT)chain.offsets.size() + 1;
 
         D3D11_TEXTURE2D_DESC desc = {};
@@ -166,7 +275,7 @@ START_M_IMGUI_IMPL_NAMESPACE
         desc.Height = height;
         desc.MipLevels = levels;
         desc.ArraySize = 1;
-        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        desc.Format = format == OVERLAY_TYPES_NAMESPACE::TextureFormat::BGRA8 ? DXGI_FORMAT_B8G8R8A8_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
         desc.SampleDesc.Count = 1;
         desc.Usage = D3D11_USAGE_DEFAULT;
         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -197,6 +306,9 @@ START_M_IMGUI_IMPL_NAMESPACE
         this->width = width;
         this->height = height;
         this->mipLevels = (int)levels;
+        this->mips = mips;
+        this->format = format;
+        this->premultiplied = premultiplied;
     }
 
     Dx11Texture::~Dx11Texture()
@@ -228,17 +340,23 @@ START_M_IMGUI_IMPL_NAMESPACE
         };
     }
 
-    void Dx11Texture::UpdatePixels(py::buffer pixels, long long rowPitch)
+    void Dx11Texture::UpdatePixels(py::buffer pixels, long long rowPitch, std::optional<std::array<int, 4>> rect)
     {
         if (this->textureView == nullptr)
             _throw_("UpdatePixels: empty texture; it was freed or never loaded");
-        TEXTURE_DATA_NAMESPACE::PixelView view(pixels, this->width, this->height, rowPitch);
+        int viewWidth = this->width, viewHeight = this->height;
+        std::array<int, 4> r = {0, 0, this->width, this->height};
+        if (rect.has_value())
+        {
+            r = TEXTURE_DATA_NAMESPACE::CheckTextureRect(*rect, this->width, this->height, this->mips);
+            viewWidth = r[2];
+            viewHeight = r[3];
+        }
+        TEXTURE_DATA_NAMESPACE::PixelView view(pixels, viewWidth, viewHeight, rowPitch);
         if (!this->store->IsOpen())
             _throw_("no D3D11 device; the session of this texture has ended");
         if (!this->store->OnRenderThread())
             _throw_("UpdatePixels: called off the render thread; update textures from the render callback or CallBeforeFrameOnce");
-        int width = this->width;
-        int height = this->height;
         UINT levels = (UINT)this->mipLevels;
         ID3D11Resource *resource = nullptr;
         this->textureView->GetResource(&resource);
@@ -248,9 +366,15 @@ START_M_IMGUI_IMPL_NAMESPACE
         ComRelease contextRef{context};
 
         py::gil_scoped_release release;
+        if (rect.has_value())
+        {
+            D3D11_BOX box = {(UINT)r[0], (UINT)r[1], 0, (UINT)(r[0] + r[2]), (UINT)(r[1] + r[3]), 1};
+            context->UpdateSubresource(resource, 0, &box, view.Bytes(), view.Pitch(), 0);
+            return;
+        }
         TEXTURE_MIPS_NAMESPACE::MipChain chain;
         if (levels > 1)
-            chain = TEXTURE_MIPS_NAMESPACE::BuildMipChain(view.Bytes(), width, height, view.Pitch());
+            chain = TEXTURE_MIPS_NAMESPACE::BuildMipChain(view.Bytes(), viewWidth, viewHeight, view.Pitch(), this->premultiplied);
         context->UpdateSubresource(resource, 0, nullptr, view.Bytes(), view.Pitch(), 0);
         for (UINT k = 1; k < levels; k++)
             context->UpdateSubresource(resource, D3D11CalcSubresource(k, 0, levels), nullptr, chain.bytes.data() + chain.offsets[k - 1], (UINT)chain.widths[k - 1] * 4, 0);
@@ -670,23 +794,17 @@ START_M_IMGUI_IMPL_NAMESPACE
         return new Dx11Texture(std::move(store), image.width, image.height, image.data.get(), (UINT)image.width * 4, mips);
     }
 
-    Dx11Texture *Dx11Render::CreateTextureFromPixels(int width, int height, py::buffer pixels, long long rowPitch, bool mips)
+    Dx11Texture *Dx11Render::CreateTextureFromPixels(int width, int height, py::buffer pixels, long long rowPitch, bool mips,
+                                                      OVERLAY_TYPES_NAMESPACE::TextureFormat format, bool premultiplied)
     {
         TEXTURE_DATA_NAMESPACE::CheckTextureSize(width, height);
+        TEXTURE_DATA_NAMESPACE::CheckTextureFormat(format);
         TEXTURE_DATA_NAMESPACE::PixelView view(pixels, width, height, rowPitch);
         std::shared_ptr<Dx11TextureStore> store = this->OpenTextures();
+        if (format == OVERLAY_TYPES_NAMESPACE::TextureFormat::BGRA8 && !store->BgraSupported())
+            _throw_("BGRA8 textures are not supported by this device");
         py::gil_scoped_release release;
-        return new Dx11Texture(std::move(store), width, height, view.Bytes(), view.Pitch(), mips);
-    }
-
-    // Binds the sampler stored in the command for the draws after it in this viewport.
-    static void SetSamplerCallback(const ImDrawList *, const ImDrawCmd *cmd)
-    {
-        auto *state = (ImGui_ImplDX11_RenderState *)ImGui::GetPlatformIO().Renderer_RenderState;
-        if (state == nullptr)
-            return;
-        ID3D11SamplerState *sampler = (ID3D11SamplerState *)cmd->UserCallbackData;
-        state->DeviceContext->PSSetSamplers(0, 1, &sampler);
+        return new Dx11Texture(std::move(store), width, height, view.Bytes(), view.Pitch(), mips, format, premultiplied);
     }
 
     std::shared_ptr<Dx11TextureStore> Dx11Render::SamplerScopeStore(ImDrawList *drawList)
@@ -702,7 +820,7 @@ START_M_IMGUI_IMPL_NAMESPACE
         if (store == nullptr || !store->IsOpen())
             _throw_("no D3D11 device; the session of this renderer is not open");
         if (!store->OnRenderThread())
-            _throw_("called off the render thread; set texture samplers from the render callback");
+            _throw_("called off the render thread; call it from the render callback");
         if (drawList->_Data != ImGui::GetDrawListSharedData())
             throw py::value_error("drawList belongs to another ImGui context");
         return store;
@@ -723,13 +841,31 @@ START_M_IMGUI_IMPL_NAMESPACE
         }
         if (anisotropy < 1 || anisotropy > 16)
             throw py::value_error(std::format("anisotropy must be in [1, 16], got {}", anisotropy));
-        drawList->AddCallback(&SetSamplerCallback, store->Sampler(filter, anisotropy));
+        store->Sampler(filter, anisotropy);
+        store->UpdateScope(drawList, Dx11TextureStore::SamplerIndex(filter, anisotropy), store->ScopeOf(drawList).second);
     }
 
     void Dx11Render::ResetTextureSampler(ImDrawList *drawList)
     {
-        this->SamplerScopeStore(drawList);
-        drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+        std::shared_ptr<Dx11TextureStore> store = this->SamplerScopeStore(drawList);
+        int bIdx = store->ScopeOf(drawList).second;
+        store->UpdateScope(drawList, Dx11TextureStore::DEFAULT_SAMPLER, bIdx);
+    }
+
+    void Dx11Render::SetTextureBlend(ImDrawList *drawList, OVERLAY_TYPES_NAMESPACE::TextureBlend blend)
+    {
+        std::shared_ptr<Dx11TextureStore> store = this->SamplerScopeStore(drawList);
+        TEXTURE_DATA_NAMESPACE::CheckTextureBlend(blend);
+        int sIdx = store->ScopeOf(drawList).first;
+        int bIdx = blend == OVERLAY_TYPES_NAMESPACE::TextureBlend::Premultiplied ? 1 : 0;
+        store->UpdateScope(drawList, sIdx, bIdx);
+    }
+
+    void Dx11Render::ResetTextureBlend(ImDrawList *drawList)
+    {
+        std::shared_ptr<Dx11TextureStore> store = this->SamplerScopeStore(drawList);
+        int sIdx = store->ScopeOf(drawList).first;
+        store->UpdateScope(drawList, sIdx, 0);
     }
 
     typedef HRESULT(__stdcall *Present)(IDXGISwapChain *, UINT, UINT);
@@ -1240,13 +1376,15 @@ START_M_IMGUI_IMPL_NAMESPACE
     {
         py::class_<Dx11Texture>(m, "Dx11Texture", py::dynamic_attr(), py::module_local())
             .def("FreeTexture", &Dx11Texture::FreeTexture)
-            .def("UpdatePixels", &Dx11Texture::UpdatePixels, py::arg("pixels"), py::kw_only(), py::arg("rowPitch") = 0)
+            .def("UpdatePixels", &Dx11Texture::UpdatePixels, py::arg("pixels"), py::kw_only(), py::arg("rowPitch") = 0, py::arg("rect") = py::none())
             .def("__bool__", [](const Dx11Texture &self) { return self.textureView != nullptr; })
             .def_property_readonly("handle", &Dx11Texture::GetHandle)
             .def_readonly("width", &Dx11Texture::width)
             .def_readonly("height", &Dx11Texture::height)
             .def_property_readonly("size", &Dx11Texture::GetSize)
-            .def_readonly("mipLevels", &Dx11Texture::mipLevels);
+            .def_readonly("mipLevels", &Dx11Texture::mipLevels)
+            .def_readonly("format", &Dx11Texture::format)
+            .def_readonly("premultiplied", &Dx11Texture::premultiplied);
 
         pybind_setup_mImguiImpl_RenderBase(m);
 
@@ -1254,9 +1392,12 @@ START_M_IMGUI_IMPL_NAMESPACE
             .def_static("InvalidateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); })
             .def_static("CreateDeviceObjects", []() { RenderBase::RequestInvalidateForCurrentContext(); return true; })
             .def("CreateTexture", &Dx11Render::CreateTexture, py::arg("filename"), py::kw_only(), py::arg("transform") = py::none(), py::arg("mips") = false, py::return_value_policy::take_ownership)
-            .def("CreateTextureFromPixels", &Dx11Render::CreateTextureFromPixels, py::arg("width"), py::arg("height"), py::arg("pixels"), py::kw_only(), py::arg("rowPitch") = 0, py::arg("mips") = false, py::return_value_policy::take_ownership)
+            .def("CreateTextureFromPixels", &Dx11Render::CreateTextureFromPixels, py::arg("width"), py::arg("height"), py::arg("pixels"), py::kw_only(), py::arg("rowPitch") = 0, py::arg("mips") = false,
+                 py::arg("format") = OVERLAY_TYPES_NAMESPACE::TextureFormat::RGBA8, py::arg("premultiplied").noconvert() = false, py::return_value_policy::take_ownership)
             .def("SetTextureSampler", &Dx11Render::SetTextureSampler, py::arg("drawList").none(false), py::arg("filter"), py::arg("anisotropy") = 16)
-            .def("ResetTextureSampler", &Dx11Render::ResetTextureSampler, py::arg("drawList").none(false));
+            .def("ResetTextureSampler", &Dx11Render::ResetTextureSampler, py::arg("drawList").none(false))
+            .def("SetTextureBlend", &Dx11Render::SetTextureBlend, py::arg("drawList").none(false), py::arg("blend"))
+            .def("ResetTextureBlend", &Dx11Render::ResetTextureBlend, py::arg("drawList").none(false));
 
         py::class_<Dx11Window, Dx11Render> dx11Window(m, "Dx11Window", py::dynamic_attr(), py::module_local());
         dx11Window.def(py::init<std::optional<py::function>>(), py::arg("renderCallback") = py::none())

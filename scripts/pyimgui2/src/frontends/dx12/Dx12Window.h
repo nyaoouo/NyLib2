@@ -4,8 +4,11 @@
 #include "../common/Win32Hook.h"
 #include "../overlay/OverlayConfig.h"
 
+#include <array>
 #include <atomic>
 #include <mutex>
+#include <unordered_map>
+#include <utility>
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include "imgui_impl_win32.h"
@@ -41,10 +44,18 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         UINT64 GpuHandle(UINT slot) const;
         // Records one copy per subresource and the barrier on the store's upload context, submits them and waits for them; needs no GIL.
         // Sets inFlight once submitted and clears it once the copy completed; while it stays set, the caller leaks the copy's resources.
-        void Upload(ID3D12Resource *texture, ID3D12Resource *uploadBuffer, const D3D12_PLACED_SUBRESOURCE_FOOTPRINT *layouts, UINT levels, bool &inFlight);
-        // Render thread: user data of SamplerCallback for variant index (0 Point, 1 Linear, 1 + anisotropy); the first call creates the pipeline.
-        void *SamplerScope(UINT index);
-        static void SamplerCallback(const ImDrawList *parentList, const ImDrawCmd *cmd) noexcept; // binds the variant for the draws after it
+        // copyFrom (same size and format, combined read state, one level): its texels outside level 0's box at (dstX, dstY) are copied too.
+        void Upload(ID3D12Resource *texture, ID3D12Resource *uploadBuffer, const D3D12_PLACED_SUBRESOURCE_FOOTPRINT *layouts, UINT levels, bool &inFlight,
+                    ID3D12Resource *copyFrom = nullptr, UINT dstX = 0, UINT dstY = 0);
+        bool BgraSupported(); // CheckFeatureSupport, cached for the store's lifetime
+
+        // Combined sampler+blend scope (render thread only, cleared in Collect): sIdx is a sampler variant
+        // (0 Point, 1 Linear, 1 + anisotropy) or DEFAULT_SAMPLER; bIdx is 0 Straight, 1 Premultiplied.
+        static UINT const DEFAULT_SAMPLER = 18;
+        std::pair<UINT, UINT> ScopeOf(ImDrawList *drawList) const;  // (DEFAULT_SAMPLER, 0) when absent
+        void EnsureSamplerPipeline();                               // the first call creates both PSOs and the sampler heap
+        void UpdateScope(ImDrawList *drawList, UINT sIdx, UINT bIdx); // appends SamplerCallback, or ResetRenderState when fully default
+        static void SamplerCallback(const ImDrawList *parentList, const ImDrawCmd *cmd) noexcept; // binds the pair for the draws after it
 
     private:
         struct Entry
@@ -58,7 +69,8 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         struct SamplerRecord
         {
             Dx12TextureStore *store;
-            UINT index;
+            UINT sampler;
+            UINT blend;
         };
 
         static SamplerPipeline *CreateSamplerPipeline(ID3D12Device *device, DXGI_FORMAT rtvFormat); // RuntimeError with the HRESULT on failure
@@ -70,8 +82,11 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         std::mutex mutex;
         std::mutex uploadMutex;                       // serializes uploads on the context; never held together with mutex
         std::shared_ptr<UploadContext> uploadContext; // created by the first upload; guarded by mutex
-        std::atomic<SamplerPipeline *> samplerPipeline{nullptr}; // created by the first SamplerScope; installed and removed under mutex
-        SamplerRecord samplerRecords[18];                         // Point, Linear, then Anisotropic 1..16
+        std::atomic<SamplerPipeline *> samplerPipeline{nullptr}; // created by the first EnsureSamplerPipeline; installed and removed under mutex
+        SamplerRecord samplerRecords[19][2];                      // [sIdx][bIdx]; stable addresses for AddCallback
+        std::unordered_map<ImDrawList *, std::pair<UINT, UINT>> scopeState; // current (sIdx, bIdx) per drawList this frame
+        bool bgraChecked = false;
+        bool bgraSupported = false;
         DXGI_FORMAT rtvFormat;
         std::atomic<bool> open{true};
         bool leaky = false;
@@ -97,6 +112,9 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         int width = 0;
         int height = 0;
         int mipLevels = 1;
+        bool mips = false; // creation value
+        OVERLAY_TYPES_NAMESPACE::TextureFormat format = OVERLAY_TYPES_NAMESPACE::TextureFormat::RGBA8;
+        bool premultiplied = false;
 
         explicit Dx12TextureHelper(std::shared_ptr<Dx12TextureStore> store);
         ~Dx12TextureHelper();
@@ -105,8 +123,11 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
 
         void FreeTexture();
         void LoadTextureFromFile(const std::string &filename, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform = std::nullopt, bool mips = false); // GIL held on entry; released for decode, transform, mips and upload
-        void Assign(ID3D12Resource *resource, UINT slot, int width, int height, int mipLevels); // GIL held; retires the previous resource and slot
-        void UpdatePixels(py::buffer pixels, long long rowPitch); // render thread, GIL held on entry; same size into a new slot (handle changes), mips rebuilt
+        void Assign(ID3D12Resource *resource, UINT slot, int width, int height, int mipLevels, bool mips,
+                    OVERLAY_TYPES_NAMESPACE::TextureFormat format, bool premultiplied); // GIL held; retires the previous resource and slot
+        // render thread, GIL held on entry; into a new slot (handle changes). rect=nullopt: same size, mips rebuilt;
+        // rect=(x,y,w,h): a GPU copy of the old texels plus that rectangle, texture must have mips=False.
+        void UpdatePixels(py::buffer pixels, long long rowPitch, std::optional<std::array<int, 4>> rect = std::nullopt);
         uintptr_t GetHandle() const;
         ImVec2 GetSize() const;
     };
@@ -126,9 +147,12 @@ START_M_IMGUI_IMPL_DX12_NAMESPACE
         Dx12Render(std::optional<py::function> renderCallback = std::nullopt) : RenderBase(renderCallback) {}
 
         Dx12TextureHelper *CreateTexture(const char *filename = nullptr, std::optional<OVERLAY_TYPES_NAMESPACE::TextureTransform> transform = std::nullopt, bool mips = false);
-        Dx12TextureHelper *CreateTextureFromPixels(int width, int height, py::buffer pixels, long long rowPitch, bool mips);
+        Dx12TextureHelper *CreateTextureFromPixels(int width, int height, py::buffer pixels, long long rowPitch, bool mips,
+                                                   OVERLAY_TYPES_NAMESPACE::TextureFormat format = OVERLAY_TYPES_NAMESPACE::TextureFormat::RGBA8, bool premultiplied = false);
         void SetTextureSampler(ImDrawList *drawList, OVERLAY_TYPES_NAMESPACE::TextureFilter filter, int anisotropy); // the draws added after it to drawList, until Reset
-        void ResetTextureSampler(ImDrawList *drawList);                                                             // restores the backend's render state
+        void ResetTextureSampler(ImDrawList *drawList);                                                             // back to the backend sampler, keeping the blend
+        void SetTextureBlend(ImDrawList *drawList, OVERLAY_TYPES_NAMESPACE::TextureBlend blend); // the draws added after it to drawList, until Reset; composes with SetTextureSampler
+        void ResetTextureBlend(ImDrawList *drawList);                                            // back to Straight, keeping the sampler
         std::shared_ptr<Dx12TextureStore> OpenTextures();           // the open store, else RuntimeError "no D3D12 device"; off the render thread RuntimeError "render thread"
         void InstallTextures(DWORD renderThread, DXGI_FORMAT rtvFormat); // open site: closes a leftover store leaky, then opens one on pd3dDevice and pd3dSrvDescHeap; 0 for inbound
         void CollectTextures(UINT64 submitted, UINT64 completed) noexcept;
