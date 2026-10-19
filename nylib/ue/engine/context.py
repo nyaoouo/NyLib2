@@ -110,28 +110,32 @@ def init_engine_rest(e: Engine, *, offsets_pins: Mapping[str, int] | None = None
     """Generator::InitEngineCore @ ea0dab3 from Off::Init on, plus the stem; ObjectArray::Init and FName::Init must have run."""
     _validate(offsets_pins, pe_index, on_step)
     step = on_step or (lambda name: None)
-    step('Off::Init')
-    off_init(e, pins=offsets_pins)
-    step('PropertySizes::Init')
-    property_sizes_init(e, pins=offsets_pins)
-    step('InitPE')
-    if pe_index is not None:
-        init_pe(e, pe_index)
-        for key in _PE_KEYS:
+    e.cast_cache = {}  # A12
+    try:
+        step('Off::Init')
+        off_init(e, pins=offsets_pins)
+        step('PropertySizes::Init')
+        property_sizes_init(e, pins=offsets_pins)
+        step('InitPE')
+        if pe_index is not None:
+            init_pe(e, pe_index)
+            for key in _PE_KEYS:
+                e.provenance[key] = 'profile: value'
+        else:
+            init_pe_windows(e)
+        step('InitGWorld')
+        init_gworld(e)
+        step('InitTextOffsets')
+        init_text_offsets(e)
+        step('InitSettings')
+        init_settings(e)
+        for key, value in (offsets_pins or {}).items():
+            setattr(*_holder(e, key), value)
             e.provenance[key] = 'profile: value'
-    else:
-        init_pe_windows(e)
-    step('InitGWorld')
-    init_gworld(e)
-    step('InitTextOffsets')
-    init_text_offsets(e)
-    step('InitSettings')
-    init_settings(e)
-    for key, value in (offsets_pins or {}).items():
-        setattr(*_holder(e, key), value)
-        e.provenance[key] = 'profile: value'
-    step('Stem')
-    return EngineContext(e, detect_stem(e))
+        step('Stem')
+        return EngineContext(e, detect_stem(e))
+    finally:
+        e.cast_cache = None
 
 
 def init_engine_core(e: Engine, *, offsets_pins: Mapping[str, int] | None = None, pe_index: int | None = None,

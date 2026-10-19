@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from ..errors import DetectionError, MemoryReadError
 from ..flags import EClassCastFlags, EObjectFlags, EPropertyFlags
 from . import offset_finder as OffsetFinder
-from .unreal import UEClass, UEFunction, UEProperty
+from .unreal import UEClass, UEFunction, UEObject, UEProperty, _PARENT_LINKS, _Chain
 
 if typing.TYPE_CHECKING:
     from .core import Engine
@@ -479,12 +479,28 @@ def init_pe(e: 'Engine', index: int) -> None:
     e.cerr(f'PE-Offset: 0x{e.off.InSDK.ProcessEvent.PEOffset:X}\n')
 
 
+def _is_a_class_memo(obj: UEObject, cls: UEClass, memo: dict[int, bool]) -> bool:
+    """A13: obj.is_a_class(cls) for a non-null cls, memoized per class address; a walk that raises is not stored."""
+    clss = obj.get_class()
+    if (found := memo.get(start := clss.address)) is None:
+        found = False
+        chain = _Chain(obj.address, 'super', _PARENT_LINKS)
+        while clss:
+            if clss == cls:
+                found = True
+                break
+            clss = chain.follow(clss.get_super().cast(UEClass))
+        memo[start] = found
+    return found
+
+
 def init_gworld(e: 'Engine') -> None:
-    """Off::InSDK::World::InitGWorld @ ea0dab3 (K4: the poll reads e.mem.fresh)."""
+    """Off::InSDK::World::InitGWorld @ ea0dab3 (K4: the poll reads e.mem.fresh; A13: World classes memoized)."""
     uworld = e.objects.find_class_fast('World')
 
+    worlds: dict[int, bool] = {}
     for obj in e.objects:
-        if obj.has_any_flags(EObjectFlags.ClassDefaultObject) or not obj.is_a_class(uworld):
+        if obj.has_any_flags(EObjectFlags.ClassDefaultObject) or not (_is_a_class_memo(obj, uworld, worlds) if uworld else obj.is_a_class(uworld)):
             continue
 
         results = e.platform.find_all_aligned_values_in_process(obj.get_address())
