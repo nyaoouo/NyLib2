@@ -15,6 +15,8 @@ if typing.TYPE_CHECKING:
 
 _M32 = 0xFFFFFFFF
 _I32 = struct.Struct('<i')
+_U64 = struct.Struct('<Q')
+_ITEM_WINDOW = 0x10000  # A10: bytes of FUObjectItems per read
 # A1 anchors: NumObjects in [0x1000, 0x400000] (fixed rows), NumChunks in [1, 0x14] (chunked rows)
 _RE_FIXED_NUM = re.compile(rb'(?=(?:[\x00-\xff][\x10-\xff]\x00|[\x00-\xff][\x00-\xff][\x01-\x3f]|\x00\x00\x40)\x00)')
 _RE_CHUNKED_NUM_CHUNKS = re.compile(rb'(?=[\x01-\x14]\x00\x00\x00)')
@@ -360,12 +362,60 @@ class ObjectArray:
         return UEObject(self.e, address)
 
     def __iter__(self) -> Iterator[UEObject]:
-        """Range-for over ObjectArray::begin() / end() @ ea0dab3."""
-        end = _ObjectsIterator(self, self.num())
-        it = _ObjectsIterator(self, 0, end.CurrentIndex)
-        while it.CurrentIndex < end.CurrentIndex:  # DV27
-            yield it.CurrentObject
-            it.increment()
+        """Range-for over ObjectArray::begin() / end() @ ea0dab3; A10: num() read once, items read in windows."""
+        if not self._windowed():
+            end = _ObjectsIterator(self, self.num())
+            it = _ObjectsIterator(self, 0, end.CurrentIndex)
+            while it.CurrentIndex < end.CurrentIndex:  # DV27
+                yield it.CurrentObject
+                it.increment()
+            return
+        for index, ptr, err in self._item_slots(self.num()):
+            obj = self.get_by_index(index) if err else UEObject(self.e, ptr)
+            if obj or index == 0:
+                yield obj
+
+    def _windowed(self) -> bool:
+        """A10: a pass can read its items in windows (a built-in ByIndex and a plausible item size)."""
+        if not 8 <= self.SizeOfFUObjectItem <= 0x1000:
+            return False
+        if self._ByIndex in (self._by_index_chunked, self._by_index_chunked_override):
+            return self.NumElementsPerChunk > 0
+        return self._ByIndex in (self._by_index_fixed, self._by_index_fixed_override)
+
+    def _item_slots(self, num: int) -> Iterator[tuple[int, int, MemoryReadError | None]]:
+        """A10: (index, object pointer, None) for slots 0..num-1 of a built-in layout; (index, 0, error) where a read failed."""
+        mem, size, offset = self.e.mem, self.SizeOfFUObjectItem, self.FUObjectItemInitialOffset
+        chunked = self._ByIndex in (self._by_index_chunked, self._by_index_chunked_override)
+        per_chunk = self.NumElementsPerChunk if chunked else max(num, 1)
+        table, err = 0, None
+        try:
+            table = mem.ptr(self.GObjects + self.e.off.FUObjectArray.get_objects_offset())
+            if self._ByIndex in (self._by_index_fixed, self._by_index_chunked):
+                table = self.DecryptPtr(table)
+        except MemoryReadError as ex:
+            err = ex
+        for first in range(0, num, per_chunk):
+            base, chunk_err = table, err
+            if chunked and not err:
+                try:
+                    base = mem.ptr(table + (first // per_chunk) * 8)
+                except MemoryReadError as ex:
+                    chunk_err = ex
+            last = min(first + per_chunk, num)
+            for lo in range(first, last, _ITEM_WINDOW // size):
+                hi = min(lo + _ITEM_WINDOW // size, last)
+                start, span = base + (((lo - first) * size) & _M32) + offset, (hi - 1 - lo) * size + 8
+                data, window_err = b'', chunk_err
+                if not window_err and (hi - 1 - first) * size > _M32:
+                    window_err = MemoryReadError(start, span, 'FUObjectItem offsets wrap 32 bits')
+                if not window_err:
+                    try:
+                        data = mem.read(start, span)
+                    except MemoryReadError as ex:
+                        window_err = ex
+                for i in range(lo, hi):
+                    yield (i, 0, window_err) if window_err else (i, _U64.unpack_from(data, (i - lo) * size)[0], None)
 
     def _lookup(self, kind: str, key) -> list[UEObject]:
         """A6: objects whose name of `kind` equals `key`, in iteration order."""
