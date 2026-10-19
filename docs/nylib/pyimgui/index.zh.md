@@ -105,7 +105,7 @@ wnd.Serve()
 在显存足够的 GPU 上需要更大的 CJK 字号时调大 `max_mib`，在 DX10 下设置
 `max_side=8192`。
 
-<!-- dt:section id="textures-0" hash="b4369fd03f1a" -->
+<!-- dt:section id="textures-0" hash="1a4b09708557" -->
 ## 纹理
 
 `CreateTexture(filename)` 和 `CreateTextureFromPixels(width, height,
@@ -224,19 +224,59 @@ DX12 上则要等到 GPU 使用完毕之后才释放。调用 `FreeTexture()` �
 `RuntimeError`。DX12 的 `LoadTextureFromFile` 会改变 `handle`，
 DX12 的 `UpdatePixels` 也一样。
 
-格式与内存：`pixels` 是非预乘 alpha 的 RGBA8 格式，第 0 行在顶部，
-存放在一个 C 连续的缓冲区中（`bytes`、`bytearray`、`memoryview`、
-`array.array`，或 numpy）。紧密排列的行需要恰好
-`width*height*4` 字节；使用 `rowPitch=n` 时，每行间隔 `n` 字节，
-缓冲区至少需要 `n*height` 字节。过短的缓冲区会在读取任何内容之前
-就抛出 `ValueError`。一张 4096x4096 的纹理在每像素 4 字节下占用
-64 MiB，`mips=True` 会额外增加大约三分之一；单边最多为 16384 px，
-与上文字体图集的限制一致。
+格式与内存：`pixels` 是每个像素 4 字节、按 `format` 指定的通道顺序
+排列，第 0 行在顶部，存放在一个 C 连续的缓冲区中（`bytes`、
+`bytearray`、`memoryview`、`array.array`，或 numpy）；默认的
+`format=pyimgui.TextureFormat.RGBA8` 是非预乘 alpha。
+`format=pyimgui.TextureFormat.BGRA8` 在相同布局下交换红、蓝两个
+字节；设备不支持 BGRA8 采样时，创建会抛出 `RuntimeError`。
+`premultiplied=True` 用于记录颜色已经预先乘以 alpha——绘制时需要
+配合下文的 `SetTextureBlend`——并且在 `mips=True` 时会把 mip 链的
+生成方式切换为简单的 2x2 平均，而不是默认的按 alpha 加权的过滤器；
+两者都可以通过 `tex.format` 和 `tex.premultiplied` 读回。紧密排列
+的行需要恰好 `width*height*4` 字节；使用 `rowPitch=n` 时，每行间隔
+`n` 字节，缓冲区至少需要 `n*height` 字节。过短的缓冲区会在读取任何
+内容之前就抛出 `ValueError`。一张 4096x4096 的纹理在每像素 4 字节
+下占用 64 MiB，`mips=True` 会额外增加大约三分之一；单边最多为
+16384 px，与上文字体图集的限制一致。
 
 绘制：`imgui.Image`、`dl.AddImage`、`dl.AddImageQuad`（旋转或斜切
 四边形，支持逐角 UV），以及 `esp.add_image_triangle`（任意带纹理的
 三角形，例如把裁剪后的多边形绘制为扇形；参见
-[esp.md](esp.md)）。UV (0, 0) 对应左上角的像素。
+[esp.md](esp.md)）。UV (0, 0) 对应左上角的像素。预乘纹理（见下文）
+需要在同一绘制列表上用 `SetTextureBlend(dl, pyimgui.TextureBlend.Premultiplied)`
+和 `ResetTextureBlend(dl)` 包裹其绘制调用；该作用域可以与下文的
+采样器作用域组合使用——每次调用只改变自己的那一半状态，保留另一半。
+只在该作用域内绘制预乘纹理，非预乘（直通）alpha 的纹理（包括文本和
+形状）应留在作用域之外，并且需要自己对任何 ImGui 的着色（tint）做
+预乘（`(r*a, g*a, b*a, a)`）。
+
+```python
+# needs: running pyimgui window
+from nylib.pyimgui import Dx11Window, imgui
+import nylib.pyimgui as pyimgui
+
+tinted = {}
+
+def load_tinted(wnd):
+    # one orange texel at ~63% alpha, already multiplied into the colour,
+    # in BGRA8 byte order
+    texel = bytes((25, 75, 126, 160))
+    tinted['tex'] = wnd.CreateTextureFromPixels(
+        1, 1, texel, format=pyimgui.TextureFormat.BGRA8, premultiplied=True)
+
+def render(wnd):
+    if 'tex' not in tinted:
+        return
+    dl = imgui.GetBackgroundDrawList()
+    wnd.SetTextureBlend(dl, pyimgui.TextureBlend.Premultiplied)
+    dl.AddImage(tinted['tex'].handle, imgui.ImVec2(40, 40), imgui.ImVec2(104, 104))
+    wnd.ResetTextureBlend(dl)
+
+wnd = Dx11Window(render)
+wnd.CallBeforeFrameOnce(lambda: load_tinted(wnd))
+wnd.Serve()
+```
 
 采样：默认情况下，每个纹理在两种后端上都只在 mip 0 上进行双线性
 采样。两种后端都在创建时额外支持 `mips=True`，以及一个逐次绘制的采样器
@@ -298,15 +338,23 @@ wnd.Serve()
 而不是线性亮度。alpha 和尺寸保持不变，mipmap 会在转换之后生成，
 不指定 `transform` 则什么都不会改变。
 
-更新像素：`tex.UpdatePixels(pixels, *, rowPitch=0)` 用一个同样尺寸的新缓冲区
-替换纹理的像素，像素和 `rowPitch` 的规则与 `CreateTextureFromPixels` 相同。
-只能在渲染线程上调用，即在渲染回调或 `CallBeforeFrameOnce` 中；在其他线程
-调用、对空的或已释放的纹理调用、或在会话结束之后调用，都会抛出
-`RuntimeError`；缓冲区尺寸与纹理的宽高不符时抛出 `ValueError`。用
-`mips=True` 创建的纹理会根据新像素重建整条 mip 链。DX11 原地更新并保持
-`handle` 不变，所以本帧中更早记录的绘制也会显示新像素；DX12 每次调用都会
-上传一张新纹理并改变 `handle`，所以本帧中更早记录的绘制仍显示旧像素——
-请在绘制时再读取 `handle`。
+更新像素：`tex.UpdatePixels(pixels, *, rowPitch=0, rect=None)` 用
+一个同样尺寸的新缓冲区替换纹理的像素，像素和 `rowPitch` 的规则与
+`CreateTextureFromPixels` 相同。`rect=(x, y, w, h)` 则只更新该矩形
+区域，要求纹理创建时使用 `mips=False`（`mips=True` 的纹理会抛出
+`ValueError`）；这时 `pixels` 和 `rowPitch` 遵循同样的规则，但针对
+的是一张 `w` x `h` 的图像，矩形超出 `0 <= x`、`0 <= y`、`w >= 1`、
+`h >= 1`、`x + w <= width`、`y + h <= height` 的范围同样会抛出
+`ValueError`。只能在渲染线程上调用，即在渲染回调或
+`CallBeforeFrameOnce` 中；在其他线程调用、对空的或已释放的纹理调用、
+或在会话结束之后调用，都会抛出 `RuntimeError`；缓冲区尺寸与纹理的
+宽高不符时抛出 `ValueError`。用 `mips=True` 创建的纹理会根据新像素
+重建整条 mip 链。DX11 原地更新并保持 `handle` 不变，所以本帧中更早
+记录的绘制也会显示新像素，矩形更新也是如此；DX12 每次调用都会上传
+一张新纹理并改变 `handle`，所以本帧中更早记录的绘制仍显示旧像素——
+请在绘制时再读取 `handle`。DX12 没有更便宜的局部更新路径：即使是
+`rect` 更新，也会把整张纹理拷贝进一个新的资源和插槽并等待这次拷贝
+完成，和一次完整更新的开销完全相同。
 
 ```python
 # needs: running pyimgui window
