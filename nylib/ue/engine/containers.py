@@ -36,6 +36,19 @@ class TArray(ViewStruct):
             raise IndexError('Index was out of range!')
         return self.Data + index * element_size
 
+    def checked(self, cap: int) -> tuple[int, int]:
+        """Data/NumElements/MaxElements read once; (data, num) with a consistent header and num <= cap.
+
+        Raises MemoryReadError, never IndexError, for a corrupt or oversized header; index from the
+        returned (data, num) afterwards without touching NumElements/MaxElements again.
+        """
+        data, num, mx = self.Data, self.NumElements, self.MaxElements
+        if not (0 <= num <= mx and (num == 0 or data != 0)):
+            raise MemoryReadError(self._address_, self._size_, f'corrupt TArray header (Data {data:#x}, Num {num}, Max {mx})')
+        if num > cap:
+            raise MemoryReadError(self._address_, self._size_, f'TArray num {num} exceeds cap {cap}')
+        return data, num
+
 
 class FString(TArray):
     """UC::FString @ ea0dab3 (TArray<wchar_t>)."""

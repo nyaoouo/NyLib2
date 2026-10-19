@@ -14,6 +14,7 @@ _U32 = 0xFFFFFFFF
 _U64 = 0xFFFFFFFFFFFFFFFF
 _MEMBER_LINKS = 0x10000  # DV18
 _PARENT_LINKS = 256  # DV18
+_ENUM_NAMES_CAP = 0x10000  # live TArray cap for UEnum.Names
 
 
 class _Chain:
@@ -315,21 +316,16 @@ class UEEnum(UEField):
         ret = []
         pairs = view(TArray, self.address + self.e.off.UEnum.Names, self.e.acc)
         element_size = name_size + 8  # TPair<NameXXByte, int64 | UInt8As64>
-        i = 0
-        while i < pairs.num():
-            element = pairs.element_address(i, element_size)
+        data, num = pairs.checked(_ENUM_NAMES_CAP)
+        for i in range(num):
+            element = data + i * element_size
             ret.append((FName(self.e, element), mem.u8(element + name_size) if small_value else mem.i64(element + name_size)))
-            i += 1
         return ret
 
     def _get_name_value_pairs_names_only(self, name_size: int) -> list[tuple[FName, int]]:
-        ret = []
         names = view(TArray, self.address + self.e.off.UEnum.Names, self.e.acc)
-        i = 0
-        while i < names.num():
-            ret.append((FName(self.e, names.element_address(i, name_size)), i))
-            i += 1
-        return ret
+        data, num = names.checked(_ENUM_NAMES_CAP)
+        return [(FName(self.e, data + i * name_size), i) for i in range(num)]
 
     def get_name_value_pairs(self) -> list[tuple[FName, int]]:
         """UEEnum::GetNameValuePairs @ ea0dab3 (DV9 kept, DV10)."""
