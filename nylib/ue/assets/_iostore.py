@@ -25,7 +25,9 @@ _FLAG_ENCRYPTED = 2
 _FLAG_SIGNED = 4
 _FLAG_INDEXED = 8
 _FLAG_ON_DEMAND = 16
+_MIN_BLOCK_SIZE = 4096
 _MAX_BLOCK_SIZE = 1 << 24
+_CHECK_EVERY = 4096
 _INVALID = 0xFFFFFFFF
 
 CHUNK_TYPE_NAMES = {
@@ -276,8 +278,9 @@ class Toc:
                                                  feature='OnDemand container', container=name)
             if block_entry_size != 12:
                 raise _corrupt(name, f'the compressed block entry size is {block_entry_size}, expected 12')
-            if block_size == 0 or block_size > _MAX_BLOCK_SIZE:
-                raise _corrupt(name, f'the compression block size {block_size} is 0 or above {_MAX_BLOCK_SIZE}')
+            if not _MIN_BLOCK_SIZE <= block_size <= _MAX_BLOCK_SIZE or block_size & (block_size - 1):
+                raise _corrupt(name, f'the compression block size {block_size} is not a power of two from '
+                                     f'{_MIN_BLOCK_SIZE} to {_MAX_BLOCK_SIZE}')
             if method_count > 255:
                 raise _corrupt(name, f'the compression method count {method_count} is above 255')
             if method_count and method_len == 0:
@@ -480,59 +483,66 @@ def read_directory_index(data: bytes, container: str) -> DirIndex:
     return DirIndex(mount, dirs, files, strings)
 
 
-def iter_directory_index(index: DirIndex, container: str, entry_count: int):
+def iter_directory_index(index: DirIndex, container: str, entry_count: int, *, max_len: int | None = None,
+                         checkpoint=None):
     """Yield (path, toc_index) by walking the directory tree, like CUE4Parse IoStoreReader.ReadIndex.
 
-    `entry_count` bounds a file entry's `toc_index`.
+    `entry_count` bounds `toc_index`. With `max_len`, a longer path (less a leading '../../../') yields (None, None), and
+    so does a directory that long, which is not walked; `checkpoint()` runs every 4,096 entries visited.
     """
     dirs, files, strings = index.dirs, index.files, index.strings
     nd, nf, ns = len(dirs), len(files), len(strings)
     limit = nd + nf + 1
     visits = 0
+    bound = None if max_len is None else max_len + (9 if index.mount.startswith('../../../') else 0)
 
     def name(i):
         if not 0 <= i < ns:
             raise _corrupt(container, f'directory index string index {i} is out of range for {ns} strings')
         return strings[i]
 
-    def materialize(chain):
-        parts = []
-        while chain is not None:
-            seg, chain = chain
-            parts.append(seg)
-        parts.reverse()
-        return ''.join(parts)
-
-    stack = [(0, (index.mount, None))]
-    while stack:
+    def visit(what):
+        nonlocal visits
         visits += 1
         if visits > limit:
-            raise _corrupt(container, 'the directory index tree is cyclic')
-        d, chain = stack.pop()
+            raise _corrupt(container, f'the directory index {what} is cyclic')
+        if checkpoint is not None and visits % _CHECK_EVERY == 0:
+            checkpoint()
+
+    if bound is not None and len(index.mount) > bound:
+        yield None, None
+        return
+    stack = [(0, index.mount)]
+    while stack:
+        visit('tree')
+        d, prefix = stack.pop()
         if not 0 <= d < nd:
             raise _corrupt(container, f'directory index directory {d} is out of range for {nd} directories')
         name_idx, first_child, next_sib, first_file = dirs[d]
-        child_chain = chain
+        if next_sib != _INVALID:
+            stack.append((next_sib, prefix))
         if name_idx != _INVALID:
             seg = name(name_idx)
             if seg:  # an empty directory name adds no path segment
-                child_chain = (seg + '/', chain)
-        if next_sib != _INVALID:
-            stack.append((next_sib, chain))
+                if bound is not None and len(prefix) + len(seg) + 1 > bound:
+                    yield None, None
+                    continue
+                prefix = prefix + seg + '/'
         if first_child != _INVALID:
-            stack.append((first_child, child_chain))
+            stack.append((first_child, prefix))
         f = first_file
-        prefix = materialize(child_chain) if f != _INVALID else ''
         while f != _INVALID:
-            visits += 1
-            if visits > limit:
-                raise _corrupt(container, 'the directory index file list is cyclic')
+            visit('file list')
             if not 0 <= f < nf:
                 raise _corrupt(container, f'directory index file {f} is out of range for {nf} files')
             name_idx, nxt, toc_index = files[f]
             if not 0 <= toc_index < entry_count:
                 raise _corrupt(container, f'directory index file {f} points at TOC entry {toc_index}, outside the {entry_count} entries')
-            yield prefix + name(name_idx), toc_index
+            leaf = name(name_idx)
+            if bound is not None and len(prefix) + len(leaf) > bound:
+                yield None, None
+            else:
+                yield prefix + leaf, toc_index
             f = nxt
 
 
