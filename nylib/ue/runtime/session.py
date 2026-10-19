@@ -235,6 +235,12 @@ def _pre_gate(keys, *, write, calls, allow_unverified, source, target) -> bool:
     return True
 
 
+def _warn_degraded_quality(quality, where: str) -> None:
+    """Warn when a dumped or picked snapshot's `meta.json` quality verdict is `degraded`; never raises."""
+    if isinstance(quality, dict) and quality.get('verdict') == 'degraded':
+        logger.warning('%s has a degraded export quality verdict: %s', where, '; '.join(quality.get('reasons', ())))
+
+
 def _policy_warning(calls: str) -> None:
     """The calls session's crash-risk WARNING, logged once per session before its first call."""
     if calls == 'remote-thread':
@@ -451,6 +457,7 @@ class Unreal:
             refs = [r for r in store.find_snapshots(root, exe=exe, pe_timestamp=ts, size_of_image=size) if _schema_major(r) == SCHEMA_MAJOR]
             if refs:
                 snap = loaded = Snapshot.load(refs[0].path)
+                _warn_degraded_quality(snap.meta.get('quality'), snap.path)
             elif dump == 'latest':
                 newest = next(iter(store.find_snapshots(root, exe=exe)), None)
                 text = f'no snapshot matches the running build\n  running   {exe}  pe {hexs(ts)} / {hexs(size)}\n'
@@ -467,6 +474,7 @@ class Unreal:
                 res = pipeline.dump(target, profile=profile, out=root, _open_target=lambda *a, **k: shared)
                 attempt = _pre_gate(res.unverified, write=write, calls=calls, allow_unverified=allow_unverified, source='dump', target=exe)
                 snap = loaded = Snapshot.load(res.path)
+                _warn_degraded_quality(res.quality, res.path)
                 dumped = True
         else:
             t = snap.meta.get('target')
