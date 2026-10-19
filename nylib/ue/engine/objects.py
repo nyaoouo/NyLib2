@@ -381,12 +381,7 @@ class ObjectArray:
             unreadable = 0
             for obj in self:
                 try:
-                    if kind == 'name':
-                        name = obj.get_name()
-                    elif kind == 'outer':
-                        name = (obj.get_name(), obj.get_outer().get_name())
-                    else:
-                        name = obj.get_full_name()
+                    name = obj.get_name() if kind == 'name' else obj.get_full_name()
                 except MemoryReadError:
                     unreadable += 1
                     continue
@@ -425,9 +420,14 @@ class ObjectArray:
         return UEObject(self.e, 0)
 
     def find_object_fast_in_outer(self, name: str, outer: str) -> UEObject:
-        """ObjectArray::FindObjectFastInOuter<UEObject> @ ea0dab3 (A6)."""
-        matches = self._lookup('outer', (name, outer))
-        return matches[0] if matches else UEObject(self.e, 0)
+        """ObjectArray::FindObjectFastInOuter<UEObject> @ ea0dab3 (A6: the first in the name index whose outer has that name)."""
+        for obj in self._lookup('name', name):
+            try:
+                if obj.get_outer().get_name() == outer:
+                    return obj
+            except MemoryReadError:
+                continue
+        return UEObject(self.e, 0)
 
     def find_struct(self, name: str) -> UEStruct:
         """ObjectArray::FindStruct @ ea0dab3."""
