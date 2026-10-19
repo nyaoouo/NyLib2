@@ -105,14 +105,31 @@ class NameArray:
         return s
 
     def _comp_idx_wstring(self, comp_idx: int) -> str:
-        """A11: the entry string of comp_idx; kept only for a non-null entry, so an index past the cursor decodes once appended."""
+        """A11: the entry string of comp_idx; a name-pool miss gets one fresh recheck of the cursor, kept only once resolved."""
         self._check_memo_state()
         if (s := self._comp_memo.get(comp_idx)) is None:
-            entry = FNameEntry(self.e, self._ByIndex(self.GNames, comp_idx, self.FNameBlockOffsetBits))
-            s = entry.get_wstring()
-            if entry.address:
+            address = self._ByIndex(self.GNames, comp_idx, self.FNameBlockOffsetBits)
+            if address:
+                s = FNameEntry(self.e, address).get_wstring()
+            elif self._ByIndex == self._by_index_name_pool:
+                address, s = self._fresh_name_pool_lookup(comp_idx)
+            else:
+                s = ''
+            if address:
                 self._comp_memo[comp_idx] = s
         return s
+
+    def _fresh_name_pool_lookup(self, comp_idx: int) -> tuple[int, str]:
+        """Re-reads CurrentBlock and CurrentByteCursor through `e.mem.fresh`; decodes through `fresh` when now covered."""
+        mem, off = self.e.mem.fresh, self.e.off.NameArray
+        chunk_idx = comp_idx >> self.FNameBlockOffsetBits
+        in_chunk_offset = (comp_idx & ((1 << self.FNameBlockOffsetBits) - 1)) * self.NameEntryStride
+        num_chunks = mem.i32(self.GNames + off.MaxChunkIndex)
+        byte_cursor = mem.i32(self.GNames + off.ByteCursor)
+        if chunk_idx < 0 or chunk_idx > num_chunks or (chunk_idx == num_chunks and in_chunk_offset > byte_cursor):
+            return 0, ''
+        address = mem.ptr(self.GNames + off.ChunksStart + chunk_idx * 8) + in_chunk_offset
+        return address, self._get_str_name_pool(address, mem=mem)
 
     def _fname_entry_init(self, first_chunk_ptr: int = 0, name_entry_string_offset: int = 0) -> None:
         """FNameEntry::Init @ ea0dab3."""
@@ -169,8 +186,8 @@ class NameArray:
     def _get_str_invalid_shift_count(name_entry: int) -> str:
         return 'Invalid FNameEntryLengthShiftCount!'
 
-    def _get_str_name_pool(self, name_entry: int, start: int = 0, hops: int = 0) -> str:
-        mem, pool = self.e.mem, self.e.off.FNameEntry.NamePool
+    def _get_str_name_pool(self, name_entry: int, start: int = 0, hops: int = 0, mem=None) -> str:
+        mem, pool = mem or self.e.mem, self.e.off.FNameEntry.NamePool
         header_without_number = mem.u16(name_entry + pool.HeaderOffset)
         name_len = header_without_number >> self.FNameEntryLengthShiftCount
 
@@ -182,7 +199,7 @@ class NameArray:
             next_entry_index = mem.i32(name_entry + entry_id_offset)
             number = mem.i32(name_entry + entry_id_offset + 4)
             next_entry = self.get_name_entry(next_entry_index).get_address()
-            next_wstring = self._get_str_name_pool(next_entry, start, hops + 1) if next_entry else ''
+            next_wstring = self._get_str_name_pool(next_entry, start, hops + 1, mem) if next_entry else ''
             if number > 0:
                 return next_wstring + '_' + str(number - 1)
             return next_wstring

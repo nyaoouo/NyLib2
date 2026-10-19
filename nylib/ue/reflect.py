@@ -24,7 +24,8 @@ if typing.TYPE_CHECKING:
     from .engine.core import Engine
 
 ISSUE_KINDS = ('unreadable_object', 'index_mismatch', 'unresolved_class', 'unresolved_outer', 'cyclic_outer', 'unreadable_fields',
-               'unreadable_type', 'duplicate_path', 'unresolved_reference', 'enum_names_unsupported', 'enum_size_invalid', 'orphan_function')
+               'unreadable_type', 'duplicate_path', 'unresolved_reference', 'enum_names_unsupported', 'enum_size_invalid', 'orphan_function',
+               'unreadable_name')
 DEAD_TARGET_RUN = 1000
 PROGRESS_EVERY = 4096
 PROPERTY_KIND_ORDER: tuple[tuple[int, str], ...] = tuple((int(bit), kind) for bit, kind in (
@@ -59,7 +60,7 @@ _COUNT_KEYS = ('objects', 'packages', 'classes', 'structs', 'enums', 'functions'
 # per-slot kind bits of the walk
 _ROW, _CDO, _PACKAGE, _STRUCT, _CLASS, _FUNCTION, _ENUM = 1, 2, 4, 8, 16, 32, 64
 _TYPE_CAST_FLAGS = int(CF.Package | CF.Struct | CF.Class | CF.Function | CF.Enum)  # a row is type-relevant for the quality verdict
-QUALITY_THRESHOLDS = {'unreadable_type': 0, 'unreadable_fields': 0, 'index_mismatch_type_ratio': 0.001}
+QUALITY_THRESHOLDS = {'unreadable_type': 0, 'unreadable_fields': 0, 'unreadable_name': 0, 'index_mismatch_type_ratio': 0.001}
 
 
 def kind_of(cast_flags: int, objptr_instead_of_fieldpath: bool) -> str:
@@ -190,6 +191,12 @@ class Reflection:
     def _path(self, obj) -> str | None:
         return self.resolver.path(obj.address)
 
+    def _checked_name(self, fname, value: str) -> str:
+        """An already-decoded name, reporting `unreadable_name` for a non-zero CompIdx that decoded to ''."""
+        if not value and fname.get_comp_idx():
+            self._report('unreadable_name', f'CompIdx {fname.get_comp_idx()}')
+        return value
+
     def _nested(self, prop: UEProperty, depth: int) -> PropType | None:
         return self._prop_type(prop, depth + 1) if prop.address else None
 
@@ -235,11 +242,14 @@ class Reflection:
 
     def property_record(self, prop: UEProperty) -> PropertyRecord:
         _check_wrapper(prop)
-        return PropertyRecord(name=prop.get_name(), offset=prop.get_offset(), size=prop.get_size(), array_dim=prop.get_array_dim(),
-                              flags=prop.get_property_flags() & _U64, type=self._prop_type(prop, 0), address=prop.address)
+        fname = prop.get_fname()
+        return PropertyRecord(name=self._checked_name(fname, prop.get_name()), offset=prop.get_offset(), size=prop.get_size(),
+                              array_dim=prop.get_array_dim(), flags=prop.get_property_flags() & _U64, type=self._prop_type(prop, 0),
+                              address=prop.address)
 
     def _struct_fields(self, obj: UEStruct) -> dict:
-        return dict(path=self.resolver.path(obj.address), name=obj.get_fname().to_raw_string(), cpp_name=obj.get_cpp_name(),
+        fname = obj.get_fname()
+        return dict(path=self.resolver.path(obj.address), name=self._checked_name(fname, fname.to_raw_string()), cpp_name=obj.get_cpp_name(),
                     package=self.resolver.package(obj.address), super=self._path(obj.get_super()), size=obj.get_struct_size(),
                     min_alignment=obj.get_min_alignment(), properties=[self.property_record(p) for p in obj.get_properties()])
 
@@ -253,7 +263,8 @@ class Reflection:
         exec_rva = None
         if self.e.off.UFunction.ExecFunction > 0 and (exec_function := fn.get_exec_function()):
             exec_rva = exec_function - self.e.platform.get_module_base()
-        return FunctionRecord(path=self.resolver.path(fn.address), name=fn.get_fname().to_raw_string(),
+        fname = fn.get_fname()
+        return FunctionRecord(path=self.resolver.path(fn.address), name=self._checked_name(fname, fname.to_raw_string()),
                               package=self.resolver.package(fn.address), flags=fn.get_function_flags() & _U32,
                               params_size=fn.get_struct_size(), params=[self.property_record(p) for p in fn.get_properties()],
                               exec_rva=exec_rva)
@@ -304,7 +315,8 @@ class Reflection:
             underlying = (enum_size_for_values([(name.to_wstring(), value) for name, value in pairs]), 'max_value')
         else:
             underlying = (size, 'property')
-        return EnumRecord(path=self.resolver.path(enum.address), name=enum.get_fname().to_raw_string(),
+        fname = enum.get_fname()
+        return EnumRecord(path=self.resolver.path(enum.address), name=self._checked_name(fname, fname.to_raw_string()),
                           cpp_name=valid_name if valid_name[:1] == 'E' else 'E' + valid_name,  # UEEnum::GetEnumPrefixedName @ ea0dab3
                           package=self.resolver.package(enum.address), underlying_size=underlying[0], underlying_size_from=underlying[1],
                           underlying_signed=None, values=[(name.to_string(), value) for name, value in pairs])
@@ -419,7 +431,8 @@ class _Walk:
         for i, address in slots:
             obj, name = UEObject(e, address), '?'
             try:
-                name = obj.get_fname().to_raw_string()
+                fname = obj.get_fname()
+                name = fname.to_raw_string()
                 flags = obj.get_flags() & _U32
                 stored_index = obj.get_index()
                 cls, outer = obj.get_class().address, obj.get_outer().address
@@ -431,6 +444,8 @@ class _Walk:
                 self._tick()
                 continue
             self._ok()
+            if not name and fname.get_comp_idx():
+                self.issues.add('unreadable_name', i, name, f'CompIdx {fname.get_comp_idx()}')
             type_relevant = bool(cast_flags & _TYPE_CAST_FLAGS)
             if type_relevant:
                 self.type_objects += 1
@@ -582,15 +597,14 @@ class _Walk:
 def _quality(w: '_Walk') -> dict:
     """The export quality verdict from one walk's final issue and type-relevance counts.
 
-    `degraded` when `unreadable_type` or `unreadable_fields` is nonzero, or when `index_mismatch`
-    over type-relevant rows exceeds `index_mismatch_type_ratio` of the type-relevant row count.
+    `degraded` when `unreadable_type`, `unreadable_fields` or `unreadable_name` is nonzero, or when
+    `index_mismatch` over type-relevant rows exceeds `index_mismatch_type_ratio` of the type-relevant row count.
     """
     issue_counts = {kind: w.issues.entries.get(kind, {}).get('count', 0) for kind in ISSUE_KINDS}
     reasons = []
-    if issue_counts['unreadable_type'] > QUALITY_THRESHOLDS['unreadable_type']:
-        reasons.append(f"unreadable_type {issue_counts['unreadable_type']} > {QUALITY_THRESHOLDS['unreadable_type']}")
-    if issue_counts['unreadable_fields'] > QUALITY_THRESHOLDS['unreadable_fields']:
-        reasons.append(f"unreadable_fields {issue_counts['unreadable_fields']} > {QUALITY_THRESHOLDS['unreadable_fields']}")
+    for kind in ('unreadable_type', 'unreadable_fields', 'unreadable_name'):
+        if issue_counts[kind] > QUALITY_THRESHOLDS[kind]:
+            reasons.append(f'{kind} {issue_counts[kind]} > {QUALITY_THRESHOLDS[kind]}')
     ratio = QUALITY_THRESHOLDS['index_mismatch_type_ratio']
     if w.type_objects and w.type_mismatch > ratio * w.type_objects:
         reasons.append(f'index_mismatch {w.type_mismatch}/{w.type_objects} type-relevant rows > {ratio:.1%}')
