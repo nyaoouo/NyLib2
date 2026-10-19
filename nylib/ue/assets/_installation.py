@@ -94,6 +94,11 @@ def _annotate(e: AssetError, package, container) -> None:
         e.container = container
 
 
+def _script_error(e: CorruptAssetError, container: str) -> CorruptAssetError:
+    """`e` from the global ScriptObjects chunk, re-located at that chunk."""
+    return CorruptAssetError(f'{container} chunk {0:016x} (ScriptObjects): {e.detail}', container=container, detail=e.detail)
+
+
 def _asset_package(path: str, project: str | None) -> str | None:
     """The package of an asset path 'Engine/Content/...' or '<project>/Content/...' ending in .uasset or .umap, else None."""
     if not _lower(path).endswith(('.uasset', '.umap')):
@@ -622,14 +627,14 @@ class Installation:
                 cid, chunk_index, extra, chunk_type = toc.chunk_fields(idx)
                 if chunk_index or extra or chunk_type != _EXPORT_BUNDLE_DATA:
                     continue
-                if seen[idx]:  # each TOC entry is listed at most once, checked before its name is hashed
-                    skipped += 1
-                    continue
-                seen[idx] = 1
                 if path.startswith('../../../'):
                     path = path[9:]
                 if _lower(path).endswith(('.o.uasset', '.o.umap')) or (pkg := _asset_package(path, self._project)) is None:
                     continue
+                if seen[idx]:  # the first entry to reach the hash claims its TOC entry; later ones are not hashed
+                    skipped += 1
+                    continue
+                seen[idx] = 1
                 if package_id(pkg) != cid:
                     dropped += 1
                     continue
@@ -676,10 +681,9 @@ class Installation:
             data = container.read_range(idx, 0, length, counters=counters, checkpoint=self._check_open)
             try:
                 script = ScriptObjects(data)
+                texture2d = script.index_of('/Script/Engine.Texture2D')
             except CorruptAssetError as e:
-                raise CorruptAssetError(f'{toc.basename} chunk {0:016x} (ScriptObjects): {e.detail}',
-                                        container=toc.basename, detail=e.detail) from None
-            texture2d = script.index_of('/Script/Engine.Texture2D')
+                raise _script_error(e, toc.basename) from None
         except AssetError as e:
             _annotate(e, None, toc.basename)
             raise
@@ -694,6 +698,8 @@ class Installation:
         def class_name(index):
             try:
                 return table.class_name(index)
+            except CorruptAssetError as e:
+                raise _script_error(e, script_container) from None
             except AssetError as e:
                 _annotate(e, None, script_container)
                 raise
