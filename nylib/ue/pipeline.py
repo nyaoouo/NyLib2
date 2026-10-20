@@ -687,7 +687,7 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, a
             if progress is not None:
                 progress('snapshot', wr.counts)
 
-            warning_list = list(report.warnings)  # order: the report's, the calls', the image's (7-c), the unreadable share's
+            warning_list = list(report.warnings)  # order: the report's, the calls', the image's (7-c), the unreadable share's, the quality verdict's
             warning_list.extend(f'--allow-calls {r.feature}: {r.detail}' for r in results if not r.ok)
             if img is not None:
                 warning_list.extend(img.warnings)
