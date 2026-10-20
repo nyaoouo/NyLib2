@@ -2,12 +2,12 @@
 
 <!-- dt:meta v="1" lang="zh" source="assets.md" -->
 
-<!-- dt:section id="__preamble__" hash="f25c92fd400e" -->
+<!-- dt:section id="__preamble__" hash="31874d9e3942" -->
 # nylib.ue.assets
 
-用于 UE 5.7 游戏的 IoStore（`.utoc`/`.ucas`）容器的只读读取器：枚举包、读取 `Texture2D` 元数据，并将虚拟纹理 BC1 瓦片的有界区域解码为 RGBA8。Python，使用 Windows BCrypt 进行 AES 加密和捆绑的 Oodle DLL 进行解压缩；不依赖 FModel、CUE4Parse 或 Unreal。
+用于 UE 5.7 游戏的 IoStore（`.utoc`/`.ucas`）容器的只读读取器：枚举包（包括插件挂载根下的包）、读取 `Texture2D` 元数据，并将虚拟纹理 BC1 瓦片和普通 `PF_B8G8R8A8` 纹理的有界区域解码为 RGBA8。Python，使用 Windows BCrypt 进行 AES 加密和捆绑的 Oodle DLL 进行解压缩；不依赖 FModel、CUE4Parse 或 Unreal。
 
-关键词：IoStore, utoc, ucas, AesKey, open_installation, Installation, Texture, virtual texture, VT, BC1, DXT1, read_region, usmap, mapping, zen package, PackageInfo, TextureInfo, Region, ScriptObjects, Oodle
+关键词：IoStore, utoc, ucas, AesKey, open_installation, Installation, Texture, virtual texture, VT, BC1, DXT1, B8G8R8A8, ordinary texture, plugin, read_region, usmap, mapping, zen package, PackageInfo, TextureInfo, Region, ScriptObjects, Oodle
 
 <!-- dt:section id="quick-start-0" hash="a823faa39ad4" -->
 ## 快速开始
@@ -58,7 +58,7 @@ print(repr(key))
 - `assets.texture(name) -> Texture` 解析 `Texture2D` 导出并将其头部解析为 `Texture.info`（一个 `TextureInfo`）：`width`、`height`、`pixel_format`、`mips`（每个级别一个 `MipInfo`）、`alpha`（`'none'` 或 `'straight'`）、`virtual`（一个 `VirtualTextureInfo`，或对于普通纹理为 `None`）、`readable` 和 `unsupported`（理由，匹配 `read_region` 会引发的错误）。在一个安装上的第一个 `texture()` 调用较慢；请参阅注释。
 - `assets.stats() -> ReadStats` 返回自打开以来的运行总计（`reads`、`bytes_read`、`blocks_decompressed`、`tiles_decoded`、`seconds` 等）。两个快照之间的差异测量一个跨度；`str(stats)` 是一行摘要。
 
-<!-- dt:section id="reading-regions-0" hash="b720baf4354e" -->
+<!-- dt:section id="reading-regions-0" hash="8a2b91064b5b" -->
 ## 读取区域
 
 `tex.read_region(mip, x, y, width, height, *, clip=False, missing='raise', out=None, cancel=None) -> Region` 将像素数据解码为 RGBA8：虚拟纹理 BC1 瓦片，或普通 `PF_B8G8R8A8` 纹理的 mip 行。先检查 `info.readable`；当其为 False 时，`info.unsupported` 说明原因。
@@ -71,7 +71,7 @@ print(repr(key))
 - 无论如何，每个压缩块在每次调用中最多被获取和解压一次，结果与缓存状态、线程数或（对于虚拟纹理）填充区域外的 `missing` 策略无关。
 - `out=` 写入调用者提供的可写缓冲区而不是分配新的 `bytes`；`cancel=` 是一个零参数可调用对象，在瓦片（虚拟纹理）或压缩块（普通纹理）之间轮询，当其返回真时抛出 `ReadCancelledError`。
 
-兼容性：在早期版本中，每个普通（非虚拟）纹理都从 `read_region` 无条件地抛出 `UnsupportedAssetError(feature='non-virtual texture')`。现在可读的普通纹理进行解码，没有解码器的像素格式的普通纹理改为抛出 `UnsupportedPixelFormatError` -- 就像不支持的虚拟纹理层格式已经做的那样。两个错误类都派生自 `UnsupportedError`；只在 `read_region` 周围捕获 `UnsupportedAssetError` 的调用者会错过新的异常。
+兼容性：在早期版本中，每个普通（非虚拟）纹理都从 `read_region` 无条件地抛出 `UnsupportedAssetError(feature='non-virtual texture')`。现在可读的普通纹理进行解码，没有解码器的像素格式的普通纹理改为抛出 `UnsupportedPixelFormatError` -- 就像不支持的虚拟纹理层格式已经做的那样。两个错误类都派生自 `UnsupportedError`；只在 `read_region` 周围捕获 `UnsupportedAssetError` 的调用者会错过新的异常。普通纹理上的 `texture()` 现在也可能抛出 `CorruptAssetError`，原因是某个 mip 的大小、`.ubulk` 范围或序列化大小（serial size）不一致。另外，学习读取失败的插件内容目录只列出已与其文件夹名称匹配的条目；其余条目被丢弃，仅在 DEBUG 日志中可见。
 
 <!-- dt:section id="threads-and-cancellation-0" hash="2855875eb1b4" -->
 ## 线程与取消
@@ -118,7 +118,7 @@ UeError
 | 虚拟纹理区域读取 | `RawGPU` 编解码器、一个图层、`PF_DXT1`、非遗留瓦片布局 | `UnsupportedAssetError` / `UnsupportedPixelFormatError`；`info.readable` 为 False 且说明原因 |
 | 普通纹理区域读取 | `PF_B8G8R8A8` mips 内联在导出中，或在包的默认 `.ubulk` 中（cooked index 0） | `UnsupportedPixelFormatError` 用于其他像素格式；`UnsupportedAssetError` 用于没有序列化的 mips、mip 数据未与纹理一同序列化、压缩的 bulk data、可选的 bulk data (`.uptnl`)、内存映射的 bulk data (`.m.ubulk`)、其他 cooked index 下的 bulk data 或任何其他放置；`info.readable` 为 False 且说明原因 |
 
-<!-- dt:section id="notes-0" hash="7e30faa7db8b" -->
+<!-- dt:section id="notes-0" hash="50f5d9a70bab" -->
 ## 说明
 
 - 无重采样：一个mip的像素返回该mip自己的大小；缩放是调用者的工作。
@@ -126,5 +126,5 @@ UeError
 - 在安装上的第一个`texture()`调用也会加载全局ScriptObjects表一次（在测量的游戏中约4.66 MB），在一台测量的机器上总共成本约0.42秒，几乎全部是那个加载；后来的`texture()`调用重用该表。
 - BC1三色块的索引-3纹素在这里解码为`(0, 0, 0, 255)`（CUE4Parse自己的填充是alpha 0）。测量的两个地图的块都未使用该索引（在1,560,299个采样的三色块中的0个），所以这在那里从未显示差异。
 - 近似，一台机器：`open_installation`花费约0.22秒（其中约0.15秒用于解析`.usmap`）；无论`cache_bytes`为0、4 MiB默认值还是16 MiB，区域读取约为30 ms p50 -- 解码限制，所以更大的缓存主要帮助对相同瓦片的重复读取。
-- 近似，一台机器，一个普通纹理地形瓦片（`PF_B8G8R8A8`、`.ubulk` mips）：一个2x2样本在1个压缩块上花费约0.1 ms；一个mip 0读取约为2.5 ms p50；`cancel=`在块之间增加了约0.3 ms的延迟。`list_packages()`的第一个调用（它也学习插件挂载根）花费了4.25-5.0秒。
+- 近似，一台机器，一个普通纹理地形瓦片（`PF_B8G8R8A8`、`.ubulk` mips）：一个2x2样本在1个压缩块上花费约0.1 ms；一个mip 0读取约为2.5 ms p50，`cancel=`每个压缩块轮询一次，在测量的瓦片上约每0.3 ms一次 -- 它本身并不会增加那么多延迟。`list_packages()`的第一个调用（它也学习插件挂载根）花费了4.25-5.0秒。
 - 仅限Windows x64（AES使用BCrypt；exe的PE和`.ucas`/`.utoc`布局）。将AES密钥文件及其内容视为秘密：永远不要记录、打印或提交它；通过路径传递。
