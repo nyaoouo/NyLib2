@@ -35,7 +35,7 @@ _ENGINES = ('5.7',)
 _DEFAULT_CACHE_BYTES = 4 << 20
 _IDENTITY_TAG = b'nylib.ue.assets identity'
 _DECODE_RULES_VERSION = 1  # raise whenever any decoded output can change
-_EXPORT_BUNDLE_DATA, _BULK_DATA, _SCRIPT_OBJECTS = 1, 2, 5
+_EXPORT_BUNDLE_DATA, _BULK_DATA, _SCRIPT_OBJECTS = _texture.EXPORT_BUNDLE_DATA, _texture.BULK_DATA, 5
 _NAMES_START = _SUMMARY_SIZE + 8  # the summary, then the two VERSE_CELLS offsets
 _MISSING_POLICIES = ('raise', 'transparent', 'fallback')
 _LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
@@ -528,7 +528,8 @@ class Installation:
             return name[:dot], export
         if (pkg := _asset_package(name, self._project)) is not None:
             return pkg, None
-        raise ValueError(f'name must be {_NAME_FORMS}; plugin roots and other roots are not read by this nylib version')
+        raise ValueError(f'name must be {_NAME_FORMS}; an asset-file path under a plugin root is not accepted, use the '
+                         'package name list_packages() returns')
 
     def _locate(self, pkg: str) -> tuple:
         """(toc, container) and the TOC index of `pkg`'s ExportBundleData chunk in its one mounted container."""
@@ -682,7 +683,9 @@ class Installation:
                     try:
                         size = toc.chunk_range(idx)[1]
                         recorded = self._recorded_name(toc, container, idx, cid, size, counters)
-                    except (CorruptAssetError, UnsupportedAssetError):
+                    except (CorruptAssetError, UnsupportedAssetError) as err:
+                        if isinstance(err, CorruptAssetError) and (err.errno is not None or err.winerror is not None):
+                            raise  # a container-file I/O error: never cache a transient failure into the listing
                         failed_learning += 1
                         learned[key] = None
                     else:
