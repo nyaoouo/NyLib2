@@ -557,6 +557,7 @@ class PagedSource(MemorySource):
     """Forwards to `inner` through a page cache: 64 KiB pages, then 4 KiB pages, then `inner`'s own read.
 
     Reads that do not fit the pages go to `inner` unchanged; `fresh` is `inner.fresh`; `refresh()` drops every page.
+    A cache hit skips `read`/`_read` and the typed readers' base path, so wrap a source rather than subclass this one.
     """
 
     def __init__(self, inner: MemorySource, *, page_size: int = 0x10000, max_cache_bytes: int | None = 1 << 30):
@@ -623,8 +624,12 @@ class PagedSource(MemorySource):
         data, mask = None, 0
         if pbase not in self._bad_pages:
             try:
-                data, mask = self.inner.read(pbase, self.page_size), self._full
+                data = self.inner.read(pbase, self.page_size)
+                if len(data) != self.page_size:
+                    raise MemoryReadError(pbase, self.page_size, f'source returned {len(data)} of {self.page_size} bytes')
+                mask = self._full
             except MemoryReadError:
+                data, mask = None, 0
                 self._bad_pages.add(pbase)
         if (cap := self.max_cache_bytes) is not None:
             while self._pages and (len(self._pages) + 1) * self.page_size > cap:
@@ -643,7 +648,10 @@ class PagedSource(MemorySource):
                 held = False
                 continue
             try:
-                rec.data[k * _SUB_PAGE:(k + 1) * _SUB_PAGE] = self.inner.read(sub, _SUB_PAGE)
+                data = self.inner.read(sub, _SUB_PAGE)
+                if len(data) != _SUB_PAGE:
+                    raise MemoryReadError(sub, _SUB_PAGE, f'source returned {len(data)} of {_SUB_PAGE} bytes')
+                rec.data[k * _SUB_PAGE:(k + 1) * _SUB_PAGE] = data
                 rec.mask |= 1 << k
             except MemoryReadError:
                 self._bad_subs.add(sub)

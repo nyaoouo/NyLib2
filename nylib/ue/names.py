@@ -6,7 +6,7 @@ import re
 
 _DIGIT_WORDS = ('Zero', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine')
 _INVALID_FILE_CHARS = '<>:"/\\|?*'
-_ASCII_INVALID = re.compile('[^0-9A-Za-z_]')  # the ASCII XID_Continue set equals [0-9A-Za-z_] (verified in tests)
+_ASCII_INVALID = re.compile('[^0-9A-Za-z_]')  # the ASCII XID_Continue set equals [0-9A-Za-z_]
 
 # Unicode 15.1 XID_Start / XID_Continue ranges, transcribed verbatim from Dumper-7's
 # UnicodeNames.h @ dd8fe34 (LLVM project data). XID_Continue for MakeNameValid is their union;
