@@ -109,10 +109,13 @@ class NameArray:
         return s
 
     def _comp_idx_wstring(self, comp_idx: int) -> str:
-        """A11: the entry string of comp_idx; a name-pool miss gets one fresh recheck of the cursor, kept only once resolved."""
+        """A11: the entry string of comp_idx; a name-pool miss gets one fresh recheck of the cursor, kept only once resolved.
+
+        A hooked `_ByIndex` or `_GetStr` turns the fresh recheck off.
+        """
         self._check_memo_state()
         if (s := self._comp_memo.get(comp_idx)) is None:
-            if self._ByIndex == self._by_index_name_pool:
+            if self._ByIndex == self._by_index_name_pool and self._GetStr == self._get_str_name_pool:
                 if address := self._written_name_pool_entry(comp_idx):
                     s = FNameEntry(self.e, address).get_wstring()
                 else:
