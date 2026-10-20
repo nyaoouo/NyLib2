@@ -540,10 +540,24 @@ class _PagedRecord:
         self.mask = mask  # bit k: sub-page k is held
 
 
+def _paged_int(size: int, signed: bool):
+    """A PagedSource typed reader: a hit on one fully held page under the lock, else MemorySource's read."""
+    def read_int(self, address: int) -> int:
+        if type(address) is int and address >= 0 and (off := address & (self.page_size - 1)) + size <= self.page_size:
+            with self._lock:
+                if (rec := self._pages.get(pbase := address - off)) is not None and rec.mask == self._full:
+                    if self.max_cache_bytes is not None:
+                        self._pages.move_to_end(pbase)
+                    return int.from_bytes(rec.data[off:off + size], 'little', signed=signed)
+        return int.from_bytes(MemorySource.read(self, address, size), 'little', signed=signed)
+    return read_int
+
+
 class PagedSource(MemorySource):
     """Forwards to `inner` through a page cache: 64 KiB pages, then 4 KiB pages, then `inner`'s own read.
 
     Reads that do not fit the pages go to `inner` unchanged; `fresh` is `inner.fresh`; `refresh()` drops every page.
+    A cache hit skips `read`/`_read` and the typed readers' base path, so wrap a source rather than subclass this one.
     """
 
     def __init__(self, inner: MemorySource, *, page_size: int = 0x10000, max_cache_bytes: int | None = 1 << 30):
@@ -574,6 +588,19 @@ class PagedSource(MemorySource):
     def fresh(self) -> MemorySource:
         return self.inner.fresh
 
+    def read(self, address: int, size: int) -> bytes:
+        if type(address) is int and type(size) is int and size > 0 and address >= 0 and (off := address & (self.page_size - 1)) + size <= self.page_size:
+            with self._lock:
+                if (rec := self._pages.get(pbase := address - off)) is not None and rec.mask == self._full:
+                    if self.max_cache_bytes is not None:
+                        self._pages.move_to_end(pbase)
+                    return bytes(rec.data[off:off + size])
+        return MemorySource.read(self, address, size)
+
+    u8, u16, u32, u64 = _paged_int(1, False), _paged_int(2, False), _paged_int(4, False), _paged_int(8, False)
+    i8, i16, i32, i64 = _paged_int(1, True), _paged_int(2, True), _paged_int(4, True), _paged_int(8, True)
+    ptr = u64
+
     def _read(self, address: int, size: int) -> bytes:
         ps = self.page_size
         if size > ps:
@@ -597,8 +624,12 @@ class PagedSource(MemorySource):
         data, mask = None, 0
         if pbase not in self._bad_pages:
             try:
-                data, mask = self.inner.read(pbase, self.page_size), self._full
+                data = self.inner.read(pbase, self.page_size)
+                if len(data) != self.page_size:
+                    raise MemoryReadError(pbase, self.page_size, f'source returned {len(data)} of {self.page_size} bytes')
+                mask = self._full
             except MemoryReadError:
+                data, mask = None, 0
                 self._bad_pages.add(pbase)
         if (cap := self.max_cache_bytes) is not None:
             while self._pages and (len(self._pages) + 1) * self.page_size > cap:
@@ -617,7 +648,10 @@ class PagedSource(MemorySource):
                 held = False
                 continue
             try:
-                rec.data[k * _SUB_PAGE:(k + 1) * _SUB_PAGE] = self.inner.read(sub, _SUB_PAGE)
+                data = self.inner.read(sub, _SUB_PAGE)
+                if len(data) != _SUB_PAGE:
+                    raise MemoryReadError(sub, _SUB_PAGE, f'source returned {len(data)} of {_SUB_PAGE} bytes')
+                rec.data[k * _SUB_PAGE:(k + 1) * _SUB_PAGE] = data
                 rec.mask |= 1 << k
             except MemoryReadError:
                 self._bad_subs.add(sub)

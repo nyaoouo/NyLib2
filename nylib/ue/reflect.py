@@ -61,6 +61,10 @@ _COUNT_KEYS = ('objects', 'packages', 'classes', 'structs', 'enums', 'functions'
 # per-slot kind bits of the walk
 _ROW, _CDO, _PACKAGE, _STRUCT, _CLASS, _FUNCTION, _ENUM = 1, 2, 4, 8, 16, 32, 64
 _TYPE_CAST_FLAGS = int(CF.Package | CF.Struct | CF.Class | CF.Function | CF.Enum)  # a row is type-relevant for the quality verdict
+_CF_PACKAGE, _CF_STRUCT, _CF_CLASS, _CF_FUNCTION, _CF_ENUM = int(CF.Package), int(CF.Struct), int(CF.Class), int(CF.Function), int(CF.Enum)
+_CF_ENUM_PROPERTY, _CF_BYTE_PROPERTY = int(CF.EnumProperty), int(CF.ByteProperty)
+_RF_CDO = int(EObjectFlags.ClassDefaultObject)
+_KIND_BITS = ((_PACKAGE, _CF_PACKAGE), (_STRUCT, _CF_STRUCT), (_CLASS, _CF_CLASS), (_FUNCTION, _CF_FUNCTION), (_ENUM, _CF_ENUM))
 QUALITY_THRESHOLDS = {'unreadable_type': 0, 'unreadable_fields': 0, 'unreadable_name': 0, 'unreadable_interfaces': 0,
                       'index_mismatch_type_ratio': 0.001}
 
@@ -150,7 +154,7 @@ class LiveResolver:
     def _is_package(self, address: int) -> bool:
         cls = UEObject(self.e, address).get_class().address
         if (result := self._package_class.get(cls)) is None:
-            result = self._package_class[cls] = bool(cls and UEClass(self.e, cls).get_cast_flags() & CF.Package)
+            result = self._package_class[cls] = bool(cls and UEClass(self.e, cls).get_cast_flags() & _CF_PACKAGE)
         return result
 
     def _name(self, address: int) -> str:
@@ -314,16 +318,16 @@ class Reflection:
 
     def type_record(self, obj: UEObject) -> TypeRecord | None:
         _check_wrapper(obj)
-        if obj.get_flags() & EObjectFlags.ClassDefaultObject:  # as the walk: no type record for a CDO
+        if obj.get_flags() & _RF_CDO:  # as the walk: no type record for a CDO
             return None
         cast_flags = obj.get_class().get_cast_flags()
-        if cast_flags & CF.Class:
+        if cast_flags & _CF_CLASS:
             return self.class_record(obj.cast(UEClass))
-        if cast_flags & CF.Function:
+        if cast_flags & _CF_FUNCTION:
             return self.function_record(obj.cast(UEFunction))
-        if cast_flags & CF.Struct:
+        if cast_flags & _CF_STRUCT:
             return self.struct_record(obj.cast(UEStruct))
-        if cast_flags & CF.Enum:
+        if cast_flags & _CF_ENUM:
             return self.enum_record(obj.cast(UEEnum))
         return None
 
@@ -410,17 +414,33 @@ class _Walk:
         e.names.unresolved.clear()
         n = e.objects.num()
         slots, first_slot = [], {}
-        for i in range(n):
-            try:
-                address = e.objects.get_by_index(i).address
-            except MemoryReadError as err:
-                self.walked += 1
-                self._unreadable_object(i, '?', err)
-                continue
-            self._ok()
-            if address:
-                slots.append((i, address))
-                first_slot.setdefault(address, i)
+        if e.objects._windowed():
+            for i, ptr, werr in e.objects._item_slots(n):  # A10 windows; an unreadable window falls back per slot, as __iter__ does
+                if werr is None:
+                    address = ptr
+                else:
+                    try:
+                        address = e.objects.get_by_index(i).address
+                    except MemoryReadError as err:
+                        self.walked += 1
+                        self._unreadable_object(i, '?', err)
+                        continue
+                self._ok()
+                if address:
+                    slots.append((i, address))
+                    first_slot.setdefault(address, i)
+        else:
+            for i in range(n):
+                try:
+                    address = e.objects.get_by_index(i).address
+                except MemoryReadError as err:
+                    self.walked += 1
+                    self._unreadable_object(i, '?', err)
+                    continue
+                self._ok()
+                if address:
+                    slots.append((i, address))
+                    first_slot.setdefault(address, i)
         self.walked += len(slots)
         self.total = 3 * self.walked
         self.bits = bytearray(max(n, 0))
@@ -437,7 +457,7 @@ class _Walk:
                 cls, outer = obj.get_class().address, obj.get_outer().address
                 if (cast_flags := class_cast_flags.get(cls)) is None:
                     cast_flags = class_cast_flags[cls] = UEClass(e, cls).get_cast_flags() if cls else 0
-                vtable_rva = obj.get_vft() - base if flags & EObjectFlags.ClassDefaultObject else None
+                vtable_rva = obj.get_vft() - base if flags & _RF_CDO else None
             except MemoryReadError as err:
                 self._unreadable_object(i, name, err)
                 self._tick()
@@ -446,7 +466,7 @@ class _Walk:
                 self._report_names(i, name)
             self._ok()
             # a Package CDO is still counted (as `counts.packages` already does); any other CDO is not a type row
-            type_relevant = bool(cast_flags & _TYPE_CAST_FLAGS) and (cast_flags & CF.Package or not flags & EObjectFlags.ClassDefaultObject)
+            type_relevant = bool(cast_flags & _TYPE_CAST_FLAGS) and (cast_flags & _CF_PACKAGE or not flags & _RF_CDO)
             if type_relevant:
                 self.type_objects += 1
             if stored_index != i:
@@ -458,8 +478,8 @@ class _Walk:
                 self.issues.add('unresolved_class', i, name, f'class {cls:#x} is not in GObjects')
             if outer and outer_index < 0:
                 self.issues.add('unresolved_outer', i, name, f'outer {outer:#x} is not in GObjects')
-            bits = _ROW | (_CDO if flags & EObjectFlags.ClassDefaultObject else 0)
-            for bit, flag in ((_PACKAGE, CF.Package), (_STRUCT, CF.Struct), (_CLASS, CF.Class), (_FUNCTION, CF.Function), (_ENUM, CF.Enum)):
+            bits = _ROW | (_CDO if flags & _RF_CDO else 0)
+            for bit, flag in _KIND_BITS:
                 if cast_flags & flag:
                     bits |= bit
             self.bits[i] = bits
@@ -493,11 +513,11 @@ class _Walk:
                 if not bits & _CDO:  # EnumManager::InitInternal @ ea0dab3
                     for prop in props:
                         cast_flags = prop.get_cast_flags()
-                        if cast_flags & CF.EnumProperty:
+                        if cast_flags & _CF_ENUM_PROPERTY:
                             enum = prop.cast(UEEnumProperty).get_enum()
                             if not prop.cast(UEEnumProperty).get_underlaying_property():
                                 continue
-                        elif cast_flags & CF.ByteProperty:
+                        elif cast_flags & _CF_BYTE_PROPERTY:
                             enum = prop.cast(UEByteProperty).get_enum()
                         else:
                             continue
