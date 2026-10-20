@@ -1,6 +1,7 @@
-"""Texture2D native data (FTexturePlatformData, FVirtualTextureBuiltData), tile location and bounded VT region assembly.
+"""Texture2D native data (FTexturePlatformData, FVirtualTextureBuiltData), tile location and bounded region assembly.
 
-Only the UE 5.0+ non-legacy VT tile layout is read; only a single PF_DXT1 layer is decoded.
+Only the UE 5.0+ non-legacy VT tile layout is read; only a single PF_DXT1 layer is decoded. Ordinary textures are
+decoded in PF_B8G8R8A8 only, from inline or default-.ubulk mips.
 """
 import bisect
 import io
@@ -17,6 +18,9 @@ from ._records import MipInfo, TextureInfo, VirtualTextureInfo
 from ._zen import PropertySkipper, Reader
 
 _VT_CODEC_NAMES = ('Black', 'OpaqueBlack', 'White', 'Flat', 'RawGPU', 'ZippedGPU_DEPRECATED', 'Crunch_DEPRECATED')
+EXPORT_BUNDLE_DATA, BULK_DATA = 1, 2  # the IoStore chunk types an ordinary mip's payload lives in
+_ORDINARY_BYTES_PER_PIXEL = {'PF_B8G8R8A8': 4}  # the ordinary pixel formats this version decodes
+_BULK_COMPRESSED = (1 << 1) | (1 << 4) | (1 << 9)  # SerializeCompressedZLIB, CompressedLZO, SerializeCompressedBitWindow
 _BULK_UNUSED = 1 << 5
 _BULK_FORCE_INLINE_PAYLOAD = 1 << 6
 _BULK_PAYLOAD_IN_SEPARATE_FILE = 1 << 8
@@ -233,9 +237,12 @@ def _read_platform_data(reader: Reader, bulk_data_map: tuple, serialize_mips: bo
         _skip(reader, 8)  # FOptTexturePlatformData
     _skip(reader, 4)  # FirstMipToSerialize
     mips = []
+    sources = []  # per serialized mip: (bulk-data entry or None, export offset right after its index)
     for _ in range(_count(reader, _MAX_MIPS, 16 if serialize_mips else 12)):
         if serialize_mips:
-            _skip_inline_payload(reader, _bulk_entry(bulk_data_map, _unpack(reader, _I32)[0]))
+            entry = _bulk_entry(bulk_data_map, _unpack(reader, _I32)[0])
+            sources.append((entry, reader.pos))
+            _skip_inline_payload(reader, entry)
         mx, my, _mz = _unpack(reader, _3I32)
         mips.append(MipInfo(mx, my))
     pos = reader.pos
@@ -243,7 +250,7 @@ def _read_platform_data(reader: Reader, bulk_data_map: tuple, serialize_mips: bo
     if is_virtual not in (0, 1):
         raise _Misfit(pos)
     vt = _read_vt(reader, bulk_data_map) if is_virtual else None
-    return dict(size_x=size_x, size_y=size_y, pixel_format=pixel_format, mips=tuple(mips), vt=vt)
+    return dict(size_x=size_x, size_y=size_y, pixel_format=pixel_format, mips=tuple(mips), sources=tuple(sources), vt=vt)
 
 
 def _native_start(reader: Reader, names: tuple) -> tuple:
@@ -479,6 +486,73 @@ def _unreadable_vt(vt: dict, codecs: tuple):
     return None
 
 
+def _mip_placement(entry) -> tuple:
+    """The ordinary mip table: (chunk type, None) for a readable bulk-data entry, else (None, the placement not read)."""
+    if entry is None:
+        return None, 'no bulk-data entry'
+    flags = entry.flags
+    if flags & _BULK_UNUSED or not entry.serial_size:
+        return None, 'an unused bulk-data entry'
+    if flags & _BULK_COMPRESSED:
+        return None, 'compressed bulk data'
+    if flags & _BULK_OPTIONAL_PAYLOAD:
+        return None, 'optional bulk data (.uptnl)'
+    if flags & _BULK_MEMORY_MAPPED_PAYLOAD:
+        return None, 'memory-mapped bulk data (.m.ubulk)'
+    if flags & _BULK_FORCE_INLINE_PAYLOAD or flags in (0, _BULK_LAZY_LOADABLE):
+        return EXPORT_BUNDLE_DATA, None
+    if flags & _BULK_PAYLOAD_IN_SEPARATE_FILE:
+        if entry.cooked_index:
+            return None, f'bulk data with cooked index {entry.cooked_index}'
+        return BULK_DATA, None
+    return None, f'bulk data with flags {flags:#x}'
+
+
+def _unreadable_ordinary(pd: dict, serialize_mips: bool):
+    """(reason, error class, details) of the first rule that makes an ordinary texture unreadable, or None."""
+    fmt = pd['pixel_format']
+    if fmt not in _ORDINARY_BYTES_PER_PIXEL:
+        return (f'pixel format {fmt} has no decoder in this nylib version', UnsupportedPixelFormatError,
+                {'feature': f'pixel format {fmt}', 'pixel_format': fmt})
+    if not pd['mips']:
+        return ('an ordinary Texture2D without serialized mips is not readable by this nylib version', UnsupportedAssetError,
+                {'feature': 'ordinary texture without mips'})
+    if not serialize_mips:
+        return ('mip data that is not serialized with the texture is not supported by this nylib version', UnsupportedAssetError,
+                {'feature': 'mip data not serialized'})
+    for m, (entry, _pos) in enumerate(pd['sources']):
+        if (placement := _mip_placement(entry)[1]) is not None:
+            return (f'mip {m} is stored as {placement}, which this nylib version does not read', UnsupportedAssetError,
+                    {'feature': f'bulk data: {placement}'})
+    return None
+
+
+def _ordinary_sources(pd: dict, pkg: str, export_start: int, bulk_chunk_length: int) -> tuple:
+    """(chunk type, payload offset in that chunk, length) per mip of a readable ordinary texture; raises CorruptAssetError."""
+    fmt = pd['pixel_format']
+    sources = []
+    for m, ((w, h), (entry, pos)) in enumerate(zip(pd['mips'], pd['sources'])):
+        if w < 1 or h < 1:
+            raise _corrupt(pkg, f'mip {m} has size {w}x{h}')
+        kind = _mip_placement(entry)[0]
+        if kind == BULK_DATA and entry.serial_offset + entry.serial_size > bulk_chunk_length:
+            raise _corrupt(pkg, f"mip {m}'s bulk range falls outside the .ubulk chunk")
+        need = w * h * _ORDINARY_BYTES_PER_PIXEL[fmt]
+        if entry.serial_size != need:
+            raise _corrupt(pkg, f'mip {m} holds {entry.serial_size} bytes, but {w}x{h} {fmt} needs {need}')
+        sources.append((kind, entry.serial_offset if kind == BULK_DATA else export_start + pos, need))
+    return tuple(sources)
+
+
+class OrdinaryLayout:
+    """A readable ordinary texture's mips: each one's size and the (chunk type, offset, length) of its payload."""
+
+    def __init__(self, *, package: str, mips: tuple, sources: tuple):
+        self.package = package
+        self.mips = mips
+        self.sources = sources
+
+
 class VtLayout:
     """A readable virtual texture's resolved tile layout: per-mip tile grids and chunk-relative bulk ranges."""
 
@@ -526,7 +600,7 @@ def _morton2(x: int, y: int) -> int:
 
 
 def parse_texture2d(header, export: int, mappings, bulk_chunk_length: int) -> tuple:
-    """Parse export `export` of zen `header` as a Texture2D: (TextureInfo, VtLayout | None, unreadable).
+    """Parse export `export` of zen `header` as a Texture2D: (TextureInfo, VtLayout | OrdinaryLayout | None, unreadable).
 
     `bulk_chunk_length` is the length of the package's (id, 0, BulkData) chunk, or 0. `unreadable` is None for a
     readable texture, else (error class, details) of the reason it is not.
@@ -564,10 +638,16 @@ def parse_texture2d(header, export: int, mappings, bulk_chunk_length: int) -> tu
             width, height = pd0['mips'][0]
         else:
             width, height = pd0['size_x'], pd0['size_y']
+        rule = _unreadable_ordinary(pd0, serialize_mips)
+        layout = unreadable = None
+        if rule is None:
+            layout = OrdinaryLayout(package=pkg, mips=pd0['mips'], sources=_ordinary_sources(pd0, pkg, start, bulk_chunk_length))
+        else:
+            unreadable = rule[1:]
         info = TextureInfo(package=pkg, name=e.name, class_name='Texture2D', width=width, height=height,
-                           pixel_format=pixel_format, mips=pd0['mips'], alpha=alpha, virtual=None, readable=False,
-                           unsupported='non-virtual Texture2D is not readable in this nylib version')
-        return info, None, (UnsupportedAssetError, {'feature': 'non-virtual texture'})
+                           pixel_format=pixel_format, mips=pd0['mips'], alpha=alpha, virtual=None,
+                           readable=rule is None, unsupported=None if rule is None else rule[0])
+        return info, layout, unreadable
 
     _check_vt_structure(vt, pkg, bulk_chunk_length)
     width, height = vt['width'], vt['height']
@@ -718,3 +798,68 @@ def _fill_tile(buf, color, tx, ty, ts, x0, y0, width, height):
         do = 4 * ((y - y0) * width + (ix0 - x0))
         buf[do:do + len(row)] = row
     return ix0, iy0, ix1 - ix0, iy1 - iy0
+
+
+def assemble_rows(layout: OrdinaryLayout, mip: int, rect: tuple, *, out, chunk_start: int, block_size: int, fetch,
+                  checkpoint, counters) -> tuple:
+    """Assemble the RGBA8 pixels of `rect` at `mip` from only the rows it covers; returns (pixels, ()).
+
+    `chunk_start` is the logical offset of the mip's chunk. Calls checkpoint(k, n) before each of the n compression
+    blocks the rows' bytes touch, then fetch(offset, length) for that block's part of those bytes.
+    """
+    x0, y0, width, height = rect
+    n = width * height * 4
+    view = None
+    if out is not None:
+        view = memoryview(out).cast('B')
+        if (have := len(view)) < n:
+            view.release()
+            raise ValueError(f'out holds {have} bytes, the region needs {n}')
+    _kind, base, _length = layout.sources[mip]
+    row = 4 * layout.mips[mip][0]
+    start, stop = base + row * y0, base + row * (y0 + height)
+    first = (chunk_start + start) // block_size
+    total = (chunk_start + stop - 1) // block_size - first + 1
+    buf = bio = None
+    try:
+        for k in range(total):
+            checkpoint(k, total)
+            if buf is None:
+                buf, bio = _output(view, n)
+            b = first + k
+            lo, hi = max(start, b * block_size - chunk_start), min(stop, (b + 1) * block_size - chunk_start)
+            raw = fetch(lo, hi - lo)
+            t0 = time.perf_counter()
+            _copy_rows(buf, raw, lo - start, row, 4 * x0, 4 * width)
+            raw = None
+            if counters is not None:
+                counters.seconds_decode += time.perf_counter() - t0
+    except BaseException:
+        for v in (buf, view):
+            if v is not None:
+                v.release()
+        raise
+    if counters is not None:
+        counters.pixels_decoded += width * height
+    if bio is None:
+        return buf[:n], ()
+    buf.release()
+    return bio.getvalue(), ()
+
+
+def _copy_rows(buf, raw, at: int, row: int, col: int, span: int) -> None:
+    """Copy the rectangle's bytes of `raw`, which starts `at` bytes into the rows, to `buf`; swizzle BGRA to RGBA per finished row."""
+    with memoryview(raw) as src:
+        end = at + len(src)
+        for r in range(at // row, (end - 1) // row + 1):
+            cs = r * row + col
+            a, e = max(cs, at), min(cs + span, end)
+            if a >= e:
+                continue
+            do = r * span + a - cs
+            buf[do:do + e - a] = src[a - at:e - at]
+            if e == cs + span:
+                with buf[r * span:(r + 1) * span] as line:
+                    blue = bytes(line[0::4])
+                    line[0::4] = line[2::4]
+                    line[2::4] = blue

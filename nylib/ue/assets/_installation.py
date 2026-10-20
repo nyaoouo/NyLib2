@@ -35,7 +35,7 @@ _ENGINES = ('5.7',)
 _DEFAULT_CACHE_BYTES = 4 << 20
 _IDENTITY_TAG = b'nylib.ue.assets identity'
 _DECODE_RULES_VERSION = 1  # raise whenever any decoded output can change
-_EXPORT_BUNDLE_DATA, _BULK_DATA, _SCRIPT_OBJECTS = 1, 2, 5
+_EXPORT_BUNDLE_DATA, _BULK_DATA, _SCRIPT_OBJECTS = _texture.EXPORT_BUNDLE_DATA, _texture.BULK_DATA, 5
 _NAMES_START = _SUMMARY_SIZE + 8  # the summary, then the two VERSE_CELLS offsets
 _MISSING_POLICIES = ('raise', 'transparent', 'fallback')
 _LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
@@ -113,6 +113,30 @@ def _asset_package(path: str, project: str | None) -> str | None:
         return '/Engine/' + rest
     if project is not None and root == _lower(project):
         return '/Game/' + rest
+    return None
+
+
+def _plugin_dir(path: str, project: str | None) -> tuple | None:
+    """(directory key, dk, rest without extension) for a path under '<root>/Plugins/<d1>/.../<dk>/Content/...', else None.
+
+    `root` must be 'Engine' or `project` (ASCII-case-insensitive); the directory key is the directory's
+    path up to and including Content, ASCII-lower-cased.
+    """
+    if not _lower(path).endswith(('.uasset', '.umap')):
+        return None
+    segs = path.split('/')
+    if len(segs) < 4 or _lower(segs[1]) != 'plugins':
+        return None
+    root = _lower(segs[0])
+    if root != 'engine' and (project is None or root != _lower(project)):
+        return None
+    for i in range(3, len(segs)):
+        if _lower(segs[i]) == 'content':
+            rest = '/'.join(segs[i + 1:])
+            rest = rest[:rest.rindex('.')]
+            if not rest:
+                return None
+            return _lower('/'.join(segs[:i + 1])), segs[i - 1], rest
     return None
 
 
@@ -504,7 +528,8 @@ class Installation:
             return name[:dot], export
         if (pkg := _asset_package(name, self._project)) is not None:
             return pkg, None
-        raise ValueError(f'name must be {_NAME_FORMS}; plugin roots and other roots are not read by this nylib version')
+        raise ValueError(f'name must be {_NAME_FORMS}; an asset-file path under a plugin root is not accepted, use the '
+                         'package name list_packages() returns')
 
     def _locate(self, pkg: str) -> tuple:
         """(toc, container) and the TOC index of `pkg`'s ExportBundleData chunk in its one mounted container."""
@@ -606,8 +631,9 @@ class Installation:
 
     def _build_listing(self, counters) -> list:
         entries = []
-        dropped = skipped = 0
-        for mi, (toc, _container, aes) in enumerate(self._mounted):
+        dropped = skipped = learning_reads = failed_learning = 0
+        learned = {}  # plugin directory key -> learned mount, once a learning read (success or not) has run
+        for mi, (toc, container, aes) in enumerate(self._mounted):
             self._check_open()
             if not toc.indexed or not toc.dir_index_size:
                 continue
@@ -629,20 +655,52 @@ class Installation:
                     continue
                 if path.startswith('../../../'):
                     path = path[9:]
-                if _lower(path).endswith(('.o.uasset', '.o.umap')) or (pkg := _asset_package(path, self._project)) is None:
+                if _lower(path).endswith(('.o.uasset', '.o.umap')):
                     continue
-                if seen[idx]:  # the first entry to reach the hash claims its TOC entry; later ones are not hashed
+                if (pkg := _asset_package(path, self._project)) is not None:
+                    if seen[idx]:  # the first entry to reach the hash claims its TOC entry; later ones are not hashed
+                        skipped += 1
+                        continue
+                    seen[idx] = 1
+                    if package_id(pkg) != cid:
+                        dropped += 1
+                        continue
+                    entries.append((pkg, mi, idx))
+                    continue
+                if (plugin := _plugin_dir(path, self._project)) is None:
+                    continue
+                key, dk, rest = plugin
+                if seen[idx]:
                     skipped += 1
                     continue
                 seen[idx] = 1
-                if package_id(pkg) != cid:
-                    dropped += 1
+                dk_name = f'/{dk}/{rest}'
+                if package_id(dk_name) == cid:  # the entry matches its folder name
+                    entries.append((dk_name, mi, idx))
                     continue
-                entries.append((pkg, mi, idx))
+                if key not in learned:  # this directory's one learning read, from its first miss
+                    learning_reads += 1
+                    try:
+                        size = toc.chunk_range(idx)[1]
+                        recorded = self._recorded_name(toc, container, idx, cid, size, counters)
+                    except (CorruptAssetError, UnsupportedAssetError) as err:
+                        if isinstance(err, CorruptAssetError) and (err.errno is not None or err.winerror is not None):
+                            raise  # a container-file I/O error: never cache a transient failure into the listing
+                        failed_learning += 1
+                        learned[key] = None
+                    else:
+                        mount, _sep, remainder = recorded.lstrip('/').partition('/')
+                        learned[key] = mount if (_lower(remainder) == _lower(rest)
+                                                 and package_id(f'/{mount}/{rest}') == cid) else None
+                mount = learned.get(key)
+                if mount is not None and package_id(mount_name := f'/{mount}/{rest}') == cid:  # the learned mount matches
+                    entries.append((mount_name, mi, idx))
+                    continue
+                dropped += 1
         entries.sort(key=lambda e: (_lower(e[0]), e[0], self._mounted[e[1]][0].basename))
         _log.debug('list_packages: %d packages listed, %d entries dropped (name hash differs from chunk id), %d entries skipped '
-                   '(path over %d characters, a control character or undecodable byte, or a repeat TOC entry)', len(entries),
-                   dropped, skipped, _MAX_PATH)
+                   '(path over %d characters, a control character or undecodable byte, or a repeat TOC entry), %d plugin-root '
+                   'learning reads (%d failed)', len(entries), dropped, skipped, _MAX_PATH, learning_reads, failed_learning)
         return entries
 
     def _read_header(self, toc: Toc, container: Container, idx: int, counters) -> ZenHeader:
@@ -748,7 +806,7 @@ class Installation:
                 _annotate(e, pkg, c)
                 raise
             mi = next(i for i, m in enumerate(self._mounted) if m[1] is container)  # inside the operation: not yet released
-        return Texture._new(self, info, layout, unreadable, mi, c, bulk)
+        return Texture._new(self, info, layout, unreadable, mi, c, idx, bulk)
 
     def stats(self) -> ReadStats:
         """The totals since open: open itself and every operation that has ended."""
@@ -785,7 +843,8 @@ class Texture:
         raise TypeError('Texture cannot be constructed directly: call Installation.texture()')
 
     @classmethod
-    def _new(cls, inst: Installation, info, layout, unreadable, mi: int, container: str, bulk: int | None) -> 'Texture':
+    def _new(cls, inst: Installation, info, layout, unreadable, mi: int, container: str, header: int,
+             bulk: int | None) -> 'Texture':
         self = object.__new__(cls)
         self._inst = inst
         self._info = info
@@ -793,6 +852,7 @@ class Texture:
         self._unreadable = unreadable
         self._mi = mi  # an index into inst._mounted, so that after close() no Container or Toc stays reachable
         self._container = container
+        self._header = header
         self._bulk = bulk
         return self
 
@@ -846,9 +906,18 @@ class Texture:
                 if out_bytes is not None and out_bytes < n:
                     raise ValueError(f'out holds {out_bytes} bytes, the region needs {n}')
                 container = inst._mounted[self._mi][1]
-                pixels, filled = _texture.assemble(self._layout, mip, rect, missing=missing, out=out,
-                                                   fetch=self._fetcher(container, counters),
-                                                   checkpoint=self._checkpoint(mip, cancel), counters=counters)
+                layout = self._layout
+                if isinstance(layout, _texture.OrdinaryLayout):
+                    idx = self._bulk if layout.sources[mip][0] == _texture.BULK_DATA else self._header
+                    pixels, filled = _texture.assemble_rows(layout, mip, rect, out=out,
+                                                            chunk_start=container.toc.chunk_range(idx)[0],
+                                                            block_size=container.toc.block_size,
+                                                            fetch=self._fetcher(container, counters, idx),
+                                                            checkpoint=self._checkpoint(mip, cancel, 'blocks'), counters=counters)
+                else:
+                    pixels, filled = _texture.assemble(layout, mip, rect, missing=missing, out=out,
+                                                       fetch=self._fetcher(container, counters, self._bulk),
+                                                       checkpoint=self._checkpoint(mip, cancel, 'tiles'), counters=counters)
             except AssetError as e:
                 _annotate(e, pkg, self._container)
                 raise
@@ -856,23 +925,22 @@ class Texture:
             stats = counters.snapshot()
         return Region(pixels=pixels, mip=mip, x=rect[0], y=rect[1], width=rect[2], height=rect[3], missing=filled, stats=stats)
 
-    def _fetcher(self, container: Container, counters):
-        """fetch(offset, length) for assemble: drops the memo's blocks below the tile's first, then reads the range."""
+    def _fetcher(self, container: Container, counters, idx: int):
+        """fetch(offset, length) in chunk `idx`: drops the memo's blocks below the range's first, then reads the range."""
         inst = self._inst
-        bulk = self._bulk
         block_size = container.toc.block_size
         memo = {}
 
         def fetch(offset: int, length: int) -> bytes:
-            first = (container.toc.chunk_range(bulk)[0] + offset) // block_size
+            first = (container.toc.chunk_range(idx)[0] + offset) // block_size
             for key in [k for k in memo if k[1] < first]:
                 del memo[key]
-            return container.read_range(bulk, offset, length, memo=memo, cache=inst._cache, counters=counters,
+            return container.read_range(idx, offset, length, memo=memo, cache=inst._cache, counters=counters,
                                         checkpoint=inst._check_open)
         return fetch
 
-    def _checkpoint(self, mip: int, cancel):
-        """checkpoint(k, n) for assemble: the closed check, then `cancel`."""
+    def _checkpoint(self, mip: int, cancel, unit: str):
+        """checkpoint(k, n) for assemble and assemble_rows: the closed check, then `cancel`; `unit` names what n counts."""
         inst = self._inst
         pkg = self._info.package
 
@@ -880,5 +948,5 @@ class Texture:
             if inst._closed:
                 raise InstallationClosedError(_CLOSED)
             if cancel is not None and cancel():
-                raise ReadCancelledError(f'read of {pkg} mip {mip} cancelled after {k} of {n} tiles')
+                raise ReadCancelledError(f'read of {pkg} mip {mip} cancelled after {k} of {n} {unit}')
         return checkpoint
