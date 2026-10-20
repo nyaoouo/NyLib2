@@ -238,7 +238,9 @@ def _pre_gate(keys, *, write, calls, allow_unverified, source, target) -> bool:
 def _warn_degraded_quality(quality, where: str) -> None:
     """Warn when a dumped or picked snapshot's `meta.json` quality verdict is `degraded`; never raises."""
     if isinstance(quality, dict) and quality.get('verdict') == 'degraded':
-        logger.warning('%s has a degraded export quality verdict: %s', where, '; '.join(quality.get('reasons', ())))
+        reasons = quality.get('reasons')
+        logger.warning('%s has a degraded export quality verdict: %s', where,
+                       '; '.join(map(str, reasons)) if isinstance(reasons, (list, tuple)) else '')
 
 
 def _policy_warning(calls: str) -> None:
