@@ -104,6 +104,7 @@ canonical entry points.
 | `nylib.logging` | Color console logging with file rotation and custom verbosity levels | install, std2file, color console, log to file, file rotation, custom log levels | [docs/nylib/logging.md](docs/nylib/logging.md) |
 | `nylib.vmware_wp` | Control VMware Workstation Pro (power, snapshots, guest, REST) | Vmrun, Vmcli, WorkstationRest, VmwareConfig, snapshot, guest command | [docs/nylib/vmware_wp.md](docs/nylib/vmware_wp.md) |
 | `nylib.ue` | Unreal Engine reflection dumper + runtime object access | Unreal Engine, UE4, UE5, reflection, dump, Unreal.attach, GObjects | [docs/nylib/ue/index.md](docs/nylib/ue/index.md) |
+| `nylib.ue.assets` | Read-only UE 5.7 IoStore asset reader: packages, texture metadata, virtual-texture BC1 region reads | IoStore, utoc, AesKey, Installation, Texture, read_region, virtual texture, BC1 | [docs/nylib/ue/assets.md](docs/nylib/ue/assets.md) |
 | `nylib.structs` | PDB / ad-hoc remote-process data structures | ExStruct, ExField, ExPtr, ExArr, remote struct | [docs/nylib/misc.md](docs/nylib/misc.md) |
 | `nylib.tkinter_` | Styled tkinter widgets (CSS-like styling, borderless windows) | Div, Button, Label, BorderlessWindow, tkinter widgets, CSS styling | [docs/nylib/misc.md](docs/nylib/misc.md) |
 | `nylib.__pyinstaller` | PyInstaller hooks for freezing nylib into bundles | PyInstaller, freeze, hidden imports, hook discovery | [docs/nylib/misc.md](docs/nylib/misc.md) |
