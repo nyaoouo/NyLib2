@@ -305,7 +305,7 @@ _NATIVE_FIXED_STRUCTS = {
     'PerPlatformFloat': 8, 'PerPlatformInt': 8,
 }
 # CUE4Parse's native FScriptStruct switch ($REFS/CUE4Parse/UE4/Assets/Objects/FScriptStruct.cs), minus the
-# natives this nylib version implements (_NATIVE_FIXED_STRUCTS plus PerQualityLevelInt): a reflected struct
+# natives this nylib version implements (_NATIVE_FIXED_STRUCTS, PerQualityLevelInt, GameplayTagContainer): a reflected struct
 # reads through its mapping record; one of these names instead raises UnsupportedAssetError.
 _UNIMPLEMENTED_NATIVE_STRUCTS = frozenset({
     'AIBehaviorTreeReference', 'AIGroupBehaviorClassSelector', 'AISensingStatusTransition', 'AISensingStatusTransitionStruct', 'AbstractEnum', 'ActorReference',
@@ -318,7 +318,7 @@ _UNIMPLEMENTED_NATIVE_STRUCTS = frozenset({
     'EveryPlatformBool', 'EveryPlatformFloat', 'EveryPlatformInt', 'ExpressionInput', 'FWAbilityResourceFloatMapping', 'FWPerkContextFloatMapping',
     'FixedPoint', 'FoWAgentHandle', 'FontCharacter', 'FontData', 'ForceQuantity', 'FortActorRecord',
     'FrameNumber', 'GG_CrowdGeneratorLocations', 'GPRowName', 'GameplayEffectApplicationDataHandle', 'GameplayEffectFloatMapping', 'GameplayEffectVersion',
-    'GameplayEventDescriptor', 'GameplayEventFunction', 'GameplayTagContainer', 'HavokAIAnyArray', 'HavokNavAnyArray', 'HexCell',
+    'GameplayEventDescriptor', 'GameplayEventFunction', 'HavokAIAnyArray', 'HavokNavAnyArray', 'HexCell',
     'HexOffsetCoord', 'InstancedOverridablePropertyBag', 'InstancedPropertyBag', 'InstancedStruct', 'InstancedStructArray', 'InstancedStructContainer',
     'Int32Vector2', 'Int64Point', 'Int64Vector', 'Int64Vector2', 'Int64Vector4', 'IntVector',
     'IntVector2', 'IntVector4', 'ItemDataContainer', 'ItemStack', 'ItemsBitArray', 'JsonObjectWrapper',
@@ -548,6 +548,10 @@ class PropertySkipper:
             self._fail(reader, class_name, 'read past the export end')
         if count < 0 or count > reader.remaining():
             self._fail(reader, class_name, f'array count {count}')
+        if inner.code == 26:  # Enum: an array element is an FName, unlike the top-level underlying-integer case
+            for _ in range(count):
+                self._skip_name(reader, class_name)
+            return
         for _ in range(count):
             self._skip_value(reader, inner, depth + 1, class_name, index)
 
@@ -570,6 +574,16 @@ class PropertySkipper:
             if n < 0 or n * 8 > reader.remaining():
                 self._fail(reader, class_name, 'read past the export end')
             reader.take(n * 8)
+            return
+        if struct_name == 'GameplayTagContainer':  # an i32 tag count, then that many FNames (one per tag)
+            try:
+                n = reader.i32()
+            except ValueError:
+                self._fail(reader, class_name, 'read past the export end')
+            if n < 0 or 8 * n > reader.remaining():
+                self._fail(reader, class_name, f'array count {n}')
+            for _ in range(n):
+                self._skip_name(reader, class_name)
             return
         if struct_name in _UNIMPLEMENTED_NATIVE_STRUCTS:
             raise UnsupportedAssetError(f"{self._pkg}: {class_name} uses struct {struct_name!r}, which this nylib version does not read",
