@@ -17,6 +17,15 @@ _PARENT_LINKS = 256  # DV18
 _ENUM_NAMES_CAP = 0x10000  # live TArray cap for UEnum.Names
 
 
+def _cast_flags(e: 'Engine', kind: str, address: int, offset: int) -> int:
+    """A12: the u64 CastFlags at address + offset, cached under (kind, address, offset) while e.cast_cache is a dict."""
+    if (cache := e.cast_cache) is None:
+        return e.mem.u64(address + offset)
+    if (flags := cache.get(key := (kind, address, offset))) is None:
+        flags = cache[key] = e.mem.u64(address + offset)
+    return flags
+
+
 class _Chain:
     """DV18: counts the non-null links of one pointer-chain walk; past `bound` raises MemoryReadError."""
     __slots__ = ('start', 'what', 'bound', 'links')
@@ -51,7 +60,7 @@ class UEFFieldClass:
 
     def get_id(self) -> int: return self.e.mem.u64(self.address + self.e.off.FFieldClass.Id)
 
-    def get_cast_flags(self) -> int: return self.e.mem.u64(self.address + self.e.off.FFieldClass.CastFlags)
+    def get_cast_flags(self) -> int: return _cast_flags(self.e, 'FFieldClass', self.address, self.e.off.FFieldClass.CastFlags)
 
     def get_class_flags(self) -> int: return self.e.mem.u32(self.address + self.e.off.FFieldClass.ClassFlags)
 
@@ -305,6 +314,9 @@ class UEEnum(UEField):
             raise DetectionError('UEEnum::GetNameValuePairs', text, explanations=tuple(self.e.messages))
         values = mem.u64(self.address + enum_names_offset + 0x8) & (~0x1 & _U64)
         num_values = mem.i32(self.address + enum_names_offset + 0x10)
+        if not (0 <= num_values <= _ENUM_NAMES_CAP and (num_values == 0 or names_ptr and values)):
+            raise MemoryReadError(self.address + enum_names_offset, 0x14,
+                                  f'corrupt UEnum names (Names {names_ptr:#x}, Values {values:#x}, Num {num_values})')
         i = 0
         while i < (num_values & _U32):
             ret.append((FName(self.e, names_ptr + ((i * fname_size) & _U32)), mem.i64(values + i * 8)))
@@ -461,7 +473,7 @@ class UEClass(UEStruct):
     """UEClass @ ea0dab3."""
     __slots__ = ()
 
-    def get_cast_flags(self) -> int: return self.e.mem.u64(self.address + self.e.off.UClass.CastFlags)
+    def get_cast_flags(self) -> int: return _cast_flags(self.e, 'UClass', self.address, self.e.off.UClass.CastFlags)
 
     def is_type(self, type_flag: int) -> bool: return bool(self.get_cast_flags() & type_flag) if type_flag != 0 else True
 

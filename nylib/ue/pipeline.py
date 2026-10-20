@@ -120,6 +120,7 @@ class DumpResult:
     warnings: tuple
     seconds: float
     remote_calls: tuple = ()  # one FeatureResult per requested feature, in RUN_ORDER
+    quality: dict | None = None  # the walk's export quality verdict (reflect.walk's WalkResult.quality)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -576,7 +577,7 @@ def _report_after_calls(report: ProbeReport) -> ProbeReport:
 
 
 def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, allow_calls=None, log_file=None,
-         cache_bytes=None, progress=None, _open_target=None) -> DumpResult:
+         cache_bytes=None, progress=None, strict: bool = False, _open_target=None) -> DumpResult:
     if not isinstance(exports, (list, tuple)):
         raise TypeError(f'exports must be a list or tuple, got {type(exports).__name__}')
     fmts = []
@@ -592,6 +593,8 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, a
         raise TypeError(f'log_file must be str, os.PathLike or None, got {type(log_file).__name__}')
     if progress is not None and not callable(progress):
         raise TypeError(f'progress must be callable or None, got {type(progress).__name__}')
+    if not isinstance(strict, bool):
+        raise TypeError(f'strict must be a bool, got {type(strict).__name__}')
 
     target = _check_target(target)
     cache_bytes = _check_cache_bytes(cache_bytes)
@@ -655,6 +658,7 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, a
                 'engine': m['engine'], 'globals': m['globals'],
             }
 
+            opened.source.refresh()  # the walk starts a new cache epoch
             img = None
             if IMAGE_EXPORT in fmts:  # (7-c) before the walk, so its facts reach meta.json through meta
                 img = image.write_image(opened.source, base=info.module_base, size_of_image=info.size_of_image,
@@ -683,7 +687,7 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, a
             if progress is not None:
                 progress('snapshot', wr.counts)
 
-            warning_list = list(report.warnings)  # order: the report's, the calls', the image's (7-c), the unreadable share's
+            warning_list = list(report.warnings)  # order: the report's, the calls', the image's (7-c), the unreadable share's, the quality verdict's
             warning_list.extend(f'--allow-calls {r.feature}: {r.detail}' for r in results if not r.ok)
             if img is not None:
                 warning_list.extend(img.warnings)
@@ -695,6 +699,15 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, a
                 msg = f'{wr.unreadable:,} of {wr.walked:,} objects ({share:.1%}) could not be read'
                 warning_list.append(msg)
                 logger.warning(msg)
+            if wr.quality['verdict'] == 'degraded':
+                msg = f"export quality degraded: {'; '.join(wr.quality['reasons'])}"
+                warning_list.append(msg)
+                logger.warning(msg)
+            if strict and wr.quality['verdict'] == 'degraded':
+                err = errors.UeError(f"export quality degraded ({'; '.join(wr.quality['reasons'])}); "
+                                     f'the snapshot was left in {folder}.partial')
+                err.quality = wr.quality
+                raise err
 
             image_written = img is not None and img.skipped is None
             written_fmts = tuple(f for f in fmts if f != IMAGE_EXPORT or image_written)
@@ -707,7 +720,8 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, a
 
             return DumpResult(path=folder, target=opened.info, report=report, counts=dict(wr.counts),
                               unverified=report.unverified, exports=written_fmts, export_paths=export_paths,
-                              warnings=tuple(warning_list), seconds=time.perf_counter() - t0, remote_calls=results)
+                              warnings=tuple(warning_list), seconds=time.perf_counter() - t0, remote_calls=results,
+                              quality=wr.quality)
         finally:
             opened.close()
     finally:

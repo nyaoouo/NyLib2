@@ -22,6 +22,7 @@ print(result.counts, result.unverified, result.warnings, result.export_paths)
 - `nylib.ue.pipeline.list_targets()` lists the running processes that look like UE games.
 - Output: `<out>/<GameName>/<YYYYmmdd-HHMMSS>/`. The root is `out=`, else the environment variable `NYLIB_UE_OUT`, else `.\ue_dumps` under the current directory. Inside the game there is no default: pass `out=` or set `NYLIB_UE_OUT`.
 - Profiles: a TOML file in `<out>/profiles/` whose `[match] exe` is the target is used automatically (or pass `profile=`); `nylib.ue.pipeline.write_profile(report)` writes one that pins GObjects and GNames for this build. A profile can never enable calls.
+- Quality: `result.quality` (and `meta.json`'s `quality`) reports a `verdict` of `complete` or `degraded` with the `reasons`, the per-kind issue `counts`, and the `thresholds` applied. It degrades on any `unreadable_type`, `unreadable_fields`, `unreadable_name` or `unreadable_interfaces`, or when `index_mismatch` over type-relevant rows (classes, structs, functions, enums, packages) exceeds 0.1% of them; other issue kinds are reported but never gate it. `strict=True` (CLI: `--strict`) turns a degraded verdict into a raised error before anything is published, leaving only the `.partial` folder on disk; the default (`strict=False`) only reports it.
 
 ## Exports
 
@@ -73,7 +74,7 @@ The folder holds `meta.json`, `offsets.json`, `objects.jsonl`, `fields.jsonl`, `
 ```text
 python -m nylib.ue list
 python -m nylib.ue probe TRIANGLE_STRATEGY-Win64-Shipping.exe [--write-profile] [--explain]
-python -m nylib.ue dump TRIANGLE_STRATEGY-Win64-Shipping.exe [--out DIR] [--exports idmap,gobjects] [--allow-calls [text,game-info,append-string]]
+python -m nylib.ue dump TRIANGLE_STRATEGY-Win64-Shipping.exe [--out DIR] [--exports idmap,gobjects] [--allow-calls [text,game-info,append-string]] [--strict]
 python -m nylib.ue export <snapshot> --format idmap
 python -m nylib.ue info <snapshot>
 ```
@@ -102,3 +103,5 @@ report = probe(proc.process_id, _open_target=factory)
 No `closer=`, so you keep your handle; `OpenedTarget.close()` closes it only if you pass one. A `nylib.ctype` accessor becomes a `memory.MemorySource` subclass instead (`_read`, `_readable_ranges`, `regions`, `modules`); the keyword is private and may change.
 
 `_readable_ranges` must report only memory your backend can actually read; when unsure, leave it out. The dumper trusts it to choose which pointers to dereference and which ranges to read, so an over-report fails a probe or silently drops a scanned section. `_read` raises `nylib.ue.errors.MemoryReadError` for bytes it cannot read.
+
+When each read of your source is a slow call, such as a driver, wrap it in the factory: `source = memory.PagedSource(my_source)`. The wrapper reads your source in 64 KiB pages. Where a page read fails, it reads that page in 4 KiB pieces, and where a piece fails too, it calls your `_read` with the original address and size. A read therefore returns the bytes or raises the error your source would, provided your source can read any part of a span it can read whole. Pages keep the bytes of their first read until `refresh()`, which `dump` calls once before the walk. `fresh` reads your source uncached, and a write drops the pages it touches. `page_size=` takes a power of two from 0x1000 to 0x100000, and `max_cache_bytes=` is the LRU cap: 1 GiB by default, `None` for none. `ProcessSource` already caches its reads and a capture reads a local file, so wrapping either gains nothing.

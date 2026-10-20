@@ -7,7 +7,7 @@
 
 [Index](index.md) · 代码：`nylib/ue/pipeline.py`、`nylib/ue/snapshot.py`、`nylib/ue/cli.py`
 
-<!-- dt:section id="probe-and-dump-0" hash="2cb4f37d595f" -->
+<!-- dt:section id="probe-and-dump-0" hash="089ac43bea61" -->
 ## 探测与导出
 
 ```python
@@ -28,6 +28,7 @@ print(result.counts, result.unverified, result.warnings, result.export_paths)
 - `nylib.ue.pipeline.list_targets()` 会列出看起来像 UE 游戏的运行中进程。
 - 输出：`<out>/<GameName>/<YYYYmmdd-HHMMSS>/`。根目录为 `out=`，否则为环境变量 `NYLIB_UE_OUT`，否则为当前目录下的 `.\ue_dumps`。在游戏内部没有默认值：必须传入 `out=` 或设置 `NYLIB_UE_OUT`。
 - Profile：`<out>/profiles/` 下 `[match] exe` 匹配目标的 TOML 文件会被自动使用（或传入 `profile=`）；`nylib.ue.pipeline.write_profile(report)` 会为该构建写出一个固定 GObjects 和 GNames 的 profile。Profile 永远不能启用调用。
+- 质量：`result.quality`（以及 `meta.json` 中的 `quality`）会报告一个 `verdict`（`complete` 或 `degraded`），并附带 `reasons`、按类别统计的问题 `counts`，以及所应用的 `thresholds`。只要出现任何 `unreadable_type`、`unreadable_fields`、`unreadable_name` 或 `unreadable_interfaces`，或者 `index_mismatch` 在类型相关行（classes、structs、functions、enums、packages）中的占比超过 0.1%，就会判定为 degraded；其他问题类别只统计上报，不参与判定。`strict=True`（命令行：`--strict`）会把 degraded 的结果变为在发布任何内容之前抛出的错误，磁盘上只留下 `.partial` 文件夹；默认（`strict=False`）只报告，不抛出。
 
 <!-- dt:section id="exports-0" hash="41472624ebf8" -->
 ## 导出项（Exports）
@@ -77,20 +78,20 @@ with load_snapshot(r'ue_dumps\TRIANGLE_STRATEGY\20261002-024137') as snap:
 
 该文件夹包含 `meta.json`、`offsets.json`、`objects.jsonl`、`fields.jsonl`、`types.jsonl` 和 `types.idx.json`，以及导出文件。类型在首次使用时才会加载。
 
-<!-- dt:section id="command-line-0" hash="69ea06d72da3" -->
+<!-- dt:section id="command-line-0" hash="8f06de2bd6a4" -->
 ## 命令行（Command line）
 
 ```text
 python -m nylib.ue list
 python -m nylib.ue probe TRIANGLE_STRATEGY-Win64-Shipping.exe [--write-profile] [--explain]
-python -m nylib.ue dump TRIANGLE_STRATEGY-Win64-Shipping.exe [--out DIR] [--exports idmap,gobjects] [--allow-calls [text,game-info,append-string]]
+python -m nylib.ue dump TRIANGLE_STRATEGY-Win64-Shipping.exe [--out DIR] [--exports idmap,gobjects] [--allow-calls [text,game-info,append-string]] [--strict]
 python -m nylib.ue export <snapshot> --format idmap
 python -m nylib.ue info <snapshot>
 ```
 
 `list`、`probe` 和 `dump` 都需要一个正在运行的游戏。`--allow-calls` 不带值表示启用全部三项。`--json`（除 `export` 外的所有命令）会输出机器可读的结果。日志会写入 `<out>/_logs/<command>.log`，除非指定了 `--log-file`。退出码：0 表示成功，1 表示错误，2 表示用法错误，3 表示检测失败，4 表示无法打开目标或目标已退出，130 表示被中断。
 
-<!-- dt:section id="own-memory-backend-0" hash="60eb0fa5b2a5" -->
+<!-- dt:section id="own-memory-backend-0" hash="25e39435de31" -->
 ## 自定义内存后端
 
 私有的 `_open_target=` 工厂让 `probe`、`dump` 和 `Unreal.attach` 使用你自己的类似 `nylib.process.Process` 的对象(`read`、`write`、`iter_memory_region`、`virtual_query`、`enum_ldr_data`、`process_id`、`still_alive`),而不是让它们自己去打开目标:
@@ -113,3 +114,5 @@ report = probe(proc.process_id, _open_target=factory)
 没有传入 `closer=`,所以你的句柄仍由你自己持有;只有在你传入了 closer 时,`OpenedTarget.close()` 才会去关闭它。`nylib.ctype` 的访问器会改成 `memory.MemorySource` 的子类(`_read`、`_readable_ranges`、`regions`、`modules`);这个关键字是私有的,可能会变动。
 
 `_readable_ranges` 必须只报告你的后端真正能读取的内存;拿不准的内存就不要报告。dumper 会信任它来决定该解引用哪些指针、读取哪些范围,因此过度报告会导致 probe 失败,或者悄悄丢失被扫描的某一段。`_read` 对无法读取的字节会抛出 `nylib.ue.errors.MemoryReadError`。
+
+如果你的源每次读取都是一次较慢的调用(例如驱动),就在工厂里包装它:`source = memory.PagedSource(my_source)`。包装器以 64 KiB 的页读取你的源。某页读取失败时,它改以 4 KiB 为单位读取该页;某一块也失败时,它用原始地址和大小调用你的 `_read`。因此,一次读取返回的字节或抛出的错误与你的源相同,前提是你的源能读取一整段时,也能读取其中任意一部分。页保留首次读取时的字节,直到 `refresh()`;`dump` 会在遍历(walk)之前调用它一次。`fresh` 不经缓存直接读取你的源,写入会丢弃它触及的页。`page_size=` 取 0x1000 到 0x100000 之间的 2 的幂,`max_cache_bytes=` 是 LRU 上限:默认 1 GiB,`None` 表示不设上限。`ProcessSource` 本身已缓存读取,捕获文件读取的是本地文件,所以包装二者都没有收益。

@@ -1,4 +1,6 @@
 """Fixed-layout UC containers of Dumper-7 @ ea0dab3 as nylib.ctype views (built only through accessor.view)."""
+import struct
+
 from ...ctype import SField, Struct, c_int32, c_uint8, c_uint64, check_finalize
 from ..errors import MemoryReadError
 from .utfn import utf_16_string_to_utf_8_string
@@ -37,12 +39,12 @@ class TArray(ViewStruct):
         return self.Data + index * element_size
 
     def checked(self, cap: int) -> tuple[int, int]:
-        """Data/NumElements/MaxElements read once; (data, num) with a consistent header and num <= cap.
+        """The 16-byte header in one read; (data, num) with a consistent header and num <= cap.
 
         Raises MemoryReadError, never IndexError, for a corrupt or oversized header; index from the
         returned (data, num) afterwards without touching NumElements/MaxElements again.
         """
-        data, num, mx = self.Data, self.NumElements, self.MaxElements
+        data, num, mx = struct.unpack('<Qii', self._accessor_.read(self._address_, 0x10))
         if not (0 <= num <= mx and (num == 0 or data != 0)):
             raise MemoryReadError(self._address_, self._size_, f'corrupt TArray header (Data {data:#x}, Num {num}, Max {mx})')
         if num > cap:

@@ -128,6 +128,8 @@ def _build_parser() -> argparse.ArgumentParser:
     pd.add_argument('--allow-calls', dest='allow_calls', nargs='?', const=_ALLOW_CALLS_DEFAULT, default=None,
                      help='append-string, game-info, text; no value means all three. Each makes a call in the game '
                           'that can crash it; a profile can never enable calls')
+    pd.add_argument('--strict', action='store_true',
+                     help='raise instead of publishing when the export quality verdict is degraded')
     pd.add_argument('--json', action='store_true')
     common(pd)
     pd.set_defaults(func=_cmd_dump)
@@ -344,7 +346,10 @@ def _finish_error(e: Exception, json_mode: bool, *, target, log_file: str, logge
     message = str(e)
     known = isinstance(e, (errors.UeError, NotImplementedError))
     if json_mode:
-        _print_json({'ok': False, 'error': {'type': type(e).__name__, 'message': message, 'exit': exit_code}})
+        error_doc = {'type': type(e).__name__, 'message': message, 'exit': exit_code}
+        if (quality := getattr(e, 'quality', None)) is not None:
+            error_doc['quality'] = quality
+        _print_json({'ok': False, 'error': error_doc})
         return exit_code
     if known:
         print(f'error: {message}', file=sys.stderr)
@@ -664,7 +669,7 @@ def _cmd_dump(args, _open_target=None) -> int:
             allow_calls_kwargs = {'allow_calls': features} if args.allow_calls is not None else {}
             result = pipeline.dump(_target_arg(args.target), profile=args.profile, out=args.out, exports=dump_exports,
                                     progress=_make_dump_progress(_package_version(), remote_calls.parse_features(features)),
-                                    _open_target=_open_target, **allow_calls_kwargs)
+                                    strict=args.strict, _open_target=_open_target, **allow_calls_kwargs)
         except Exception as e:
             return _finish_error(e, args.json, target=args.target, log_file=log_file, logger=logger)
         for w in result.warnings:
@@ -672,7 +677,7 @@ def _cmd_dump(args, _open_target=None) -> int:
         cli_logger.info('done in %.1fs', result.seconds)
         if args.json:
             _print_json({'ok': True, 'snapshot': result.path, 'mode': result.target.mode,
-                         'seconds': round(result.seconds, 1), 'counts': result.counts,
+                         'seconds': round(result.seconds, 1), 'counts': result.counts, 'quality': result.quality,
                          'exports': list(result.exports), 'unverified': list(result.unverified),
                          'warnings': list(result.warnings),
                          'remote_calls': [{'feature': r.feature, 'ran': r.ran, 'ok': r.ok, 'detail': r.detail,

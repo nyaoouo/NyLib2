@@ -527,3 +527,126 @@ class ProcessSource(MemorySource):
         with st.lock:
             st.bases = st.regions = st.stamps = st.modules = None
             st.pages.clear()
+
+
+_SUB_PAGE = 0x1000
+
+
+class _PagedRecord:
+    __slots__ = ('data', 'mask')
+
+    def __init__(self, data: bytearray, mask: int):
+        self.data = data
+        self.mask = mask  # bit k: sub-page k is held
+
+
+class PagedSource(MemorySource):
+    """Forwards to `inner` through a page cache: 64 KiB pages, then 4 KiB pages, then `inner`'s own read.
+
+    Reads that do not fit the pages go to `inner` unchanged; `fresh` is `inner.fresh`; `refresh()` drops every page.
+    """
+
+    def __init__(self, inner: MemorySource, *, page_size: int = 0x10000, max_cache_bytes: int | None = 1 << 30):
+        if not isinstance(inner, MemorySource):
+            raise TypeError(f'inner must be a MemorySource, got {type(inner).__name__}')
+        if not isinstance(page_size, int):
+            raise TypeError(f'page_size must be int, got {type(page_size).__name__}')
+        if not 0x1000 <= page_size <= 0x100000 or page_size & (page_size - 1):
+            raise ValueError(f'page_size must be a power of two from 0x1000 to 0x100000, got {page_size:#x}')
+        if max_cache_bytes is not None:
+            if not isinstance(max_cache_bytes, int):
+                raise TypeError(f'max_cache_bytes must be int or None, got {type(max_cache_bytes).__name__}')
+            if max_cache_bytes < page_size:
+                raise ValueError(f'max_cache_bytes {max_cache_bytes:#x} is below page_size {page_size:#x}')
+        self.inner = inner
+        self.page_size = page_size
+        self.max_cache_bytes = max_cache_bytes
+        self._lock = threading.RLock()
+        self._pages = collections.OrderedDict()
+        self._bad_pages, self._bad_subs = set(), set()  # the negative map: failed page and sub-page bases
+        self._full = (1 << (page_size // _SUB_PAGE)) - 1
+
+    @property
+    def pointer_size(self) -> int:
+        return self.inner.pointer_size
+
+    @property
+    def fresh(self) -> MemorySource:
+        return self.inner.fresh
+
+    def _read(self, address: int, size: int) -> bytes:
+        ps = self.page_size
+        if size > ps:
+            return self.inner.read(address, size)
+        end = address + size
+        with self._lock:
+            out = []
+            for pbase in range(address & -ps, end, ps):
+                lo, hi = max(address, pbase) - pbase, min(end, pbase + ps) - pbase
+                rec = self._record(pbase)
+                if not self._hold(pbase, rec, lo, hi):
+                    return self.inner.read(address, size)
+                out.append(rec.data[lo:hi])
+            return b''.join(out)
+
+    def _record(self, pbase: int) -> _PagedRecord:
+        if (rec := self._pages.get(pbase)) is not None:
+            if self.max_cache_bytes is not None:
+                self._pages.move_to_end(pbase)
+            return rec
+        data, mask = None, 0
+        if pbase not in self._bad_pages:
+            try:
+                data, mask = self.inner.read(pbase, self.page_size), self._full
+            except MemoryReadError:
+                self._bad_pages.add(pbase)
+        if (cap := self.max_cache_bytes) is not None:
+            while self._pages and (len(self._pages) + 1) * self.page_size > cap:
+                self._pages.popitem(last=False)
+        rec = self._pages[pbase] = _PagedRecord(bytearray(data) if data is not None else bytearray(self.page_size), mask)
+        return rec
+
+    def _hold(self, pbase: int, rec: _PagedRecord, lo: int, hi: int) -> bool:
+        """Fetch the missing sub-pages of [lo, hi) that are not marked failed; True when the record holds every byte."""
+        held = True
+        for k in range(lo // _SUB_PAGE, (hi - 1) // _SUB_PAGE + 1):
+            if rec.mask >> k & 1:
+                continue
+            sub = pbase + k * _SUB_PAGE
+            if self.page_size == _SUB_PAGE or sub in self._bad_subs:
+                held = False
+                continue
+            try:
+                rec.data[k * _SUB_PAGE:(k + 1) * _SUB_PAGE] = self.inner.read(sub, _SUB_PAGE)
+                rec.mask |= 1 << k
+            except MemoryReadError:
+                self._bad_subs.add(sub)
+                held = False
+        return held
+
+    def _readable_ranges(self, address: int, size: int) -> list[tuple[int, int]]:
+        return self.inner.readable_ranges(address, size)
+
+    def _write(self, address: int, data: bytes) -> None:
+        ps, end = self.page_size, address + len(data)
+        with self._lock:
+            try:
+                self.inner.write(address, data)
+            finally:
+                first = address & -ps
+                stale = range(first, end, ps) if (end - first + ps - 1) // ps <= len(self._pages) else [p for p in self._pages if first <= p < end]
+                for pbase in stale:
+                    self._pages.pop(pbase, None)
+
+    def regions(self) -> list[Region]:
+        return self.inner.regions()
+
+    def modules(self) -> list[Module]:
+        return self.inner.modules()
+
+    def refresh(self) -> None:
+        with self._lock:
+            self._pages.clear()
+            self._bad_pages.clear()
+            self._bad_subs.clear()
+            self.inner.refresh()

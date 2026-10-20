@@ -15,6 +15,8 @@ if typing.TYPE_CHECKING:
 
 _M32 = 0xFFFFFFFF
 _I32 = struct.Struct('<i')
+_U64 = struct.Struct('<Q')
+_ITEM_WINDOW = 0x10000  # A10: bytes of FUObjectItems per read
 # A1 anchors: NumObjects in [0x1000, 0x400000] (fixed rows), NumChunks in [1, 0x14] (chunked rows)
 _RE_FIXED_NUM = re.compile(rb'(?=(?:[\x00-\xff][\x10-\xff]\x00|[\x00-\xff][\x00-\xff][\x01-\x3f]|\x00\x00\x40)\x00)')
 _RE_CHUNKED_NUM_CHUNKS = re.compile(rb'(?=[\x01-\x14]\x00\x00\x00)')
@@ -360,12 +362,60 @@ class ObjectArray:
         return UEObject(self.e, address)
 
     def __iter__(self) -> Iterator[UEObject]:
-        """Range-for over ObjectArray::begin() / end() @ ea0dab3."""
-        it = _ObjectsIterator(self)
-        end = _ObjectsIterator(self, self.num())
-        while it != end:
-            yield it.CurrentObject
-            it.increment()
+        """Range-for over ObjectArray::begin() / end() @ ea0dab3; A10: num() read once, items read in windows."""
+        if not self._windowed():
+            end = _ObjectsIterator(self, self.num())
+            it = _ObjectsIterator(self, 0, end.CurrentIndex)
+            while it.CurrentIndex < end.CurrentIndex:  # DV27
+                yield it.CurrentObject
+                it.increment()
+            return
+        for index, ptr, err in self._item_slots(self.num()):
+            obj = self.get_by_index(index) if err else UEObject(self.e, ptr)
+            if obj or index == 0:
+                yield obj
+
+    def _windowed(self) -> bool:
+        """A10: a pass can read its items in windows (a built-in ByIndex and a plausible item size)."""
+        if not 8 <= self.SizeOfFUObjectItem <= 0x1000:
+            return False
+        if self._ByIndex in (self._by_index_chunked, self._by_index_chunked_override):
+            return self.NumElementsPerChunk > 0
+        return self._ByIndex in (self._by_index_fixed, self._by_index_fixed_override)
+
+    def _item_slots(self, num: int) -> Iterator[tuple[int, int, MemoryReadError | None]]:
+        """A10: (index, object pointer, None) for slots 0..num-1 of a built-in layout; (index, 0, error) where a read failed."""
+        mem, size, offset = self.e.mem, self.SizeOfFUObjectItem, self.FUObjectItemInitialOffset
+        chunked = self._ByIndex in (self._by_index_chunked, self._by_index_chunked_override)
+        per_chunk = self.NumElementsPerChunk if chunked else max(num, 1)
+        table, err = 0, None
+        try:
+            table = mem.ptr(self.GObjects + self.e.off.FUObjectArray.get_objects_offset())
+            if self._ByIndex in (self._by_index_fixed, self._by_index_chunked):
+                table = self.DecryptPtr(table)
+        except MemoryReadError as ex:
+            err = ex
+        for first in range(0, num, per_chunk):
+            base, chunk_err = table, err
+            if chunked and not err:
+                try:
+                    base = mem.ptr(table + (first // per_chunk) * 8)
+                except MemoryReadError as ex:
+                    chunk_err = ex
+            last = min(first + per_chunk, num)
+            for lo in range(first, last, _ITEM_WINDOW // size):
+                hi = min(lo + _ITEM_WINDOW // size, last)
+                start, span = base + (((lo - first) * size) & _M32) + offset, (hi - 1 - lo) * size + 8
+                data, window_err = b'', chunk_err
+                if not window_err and (hi - 1 - first) * size > _M32:
+                    window_err = MemoryReadError(start, span, 'FUObjectItem offsets wrap 32 bits')
+                if not window_err:
+                    try:
+                        data = mem.read(start, span)
+                    except MemoryReadError as ex:
+                        window_err = ex
+                for i in range(lo, hi):
+                    yield (i, 0, window_err) if window_err else (i, _U64.unpack_from(data, (i - lo) * size)[0], None)
 
     def _lookup(self, kind: str, key) -> list[UEObject]:
         """A6: objects whose name of `kind` equals `key`, in iteration order."""
@@ -381,12 +431,7 @@ class ObjectArray:
             unreadable = 0
             for obj in self:
                 try:
-                    if kind == 'name':
-                        name = obj.get_name()
-                    elif kind == 'outer':
-                        name = (obj.get_name(), obj.get_outer().get_name())
-                    else:
-                        name = obj.get_full_name()
+                    name = obj.get_name() if kind == 'name' else obj.get_full_name()
                 except MemoryReadError:
                     unreadable += 1
                     continue
@@ -396,9 +441,23 @@ class ObjectArray:
             self._indices[kind] = index
         return index.get(key, [])
 
+    def _full_name_is(self, obj: UEObject, full_name: str) -> bool:
+        try:
+            return obj.get_full_name() == full_name
+        except MemoryReadError:
+            return False
+
     def find_object(self, full_name: str, required_type: int = 0) -> UEObject:
-        """ObjectArray::FindObject<UEObject> @ ea0dab3 (A6)."""
-        for obj in self._lookup('full', full_name):
+        """ObjectArray::FindObject<UEObject> @ ea0dab3 (A6: candidates by the name after each ' ' or '.'; the full index if ambiguous)."""
+        found = []
+        for i in (i for i, c in enumerate(full_name) if c in ' .'):
+            if matches := [obj for obj in self._lookup('name', full_name[i + 1:]) if self._full_name_is(obj, full_name)]:
+                found.append(matches)
+        if len(found) > 1 or not any(c in ' .' for c in full_name):
+            candidates = self._lookup('full', full_name)
+        else:
+            candidates = found[0] if found else []
+        for obj in candidates:
             if obj.is_a(required_type):
                 return obj
         return UEObject(self.e, 0)
@@ -411,9 +470,14 @@ class ObjectArray:
         return UEObject(self.e, 0)
 
     def find_object_fast_in_outer(self, name: str, outer: str) -> UEObject:
-        """ObjectArray::FindObjectFastInOuter<UEObject> @ ea0dab3 (A6)."""
-        matches = self._lookup('outer', (name, outer))
-        return matches[0] if matches else UEObject(self.e, 0)
+        """ObjectArray::FindObjectFastInOuter<UEObject> @ ea0dab3 (A6: the first in the name index whose outer has that name)."""
+        for obj in self._lookup('name', name):
+            try:
+                if obj.get_outer().get_name() == outer:
+                    return obj
+            except MemoryReadError:
+                continue
+        return UEObject(self.e, 0)
 
     def find_struct(self, name: str) -> UEStruct:
         """ObjectArray::FindStruct @ ea0dab3."""
@@ -433,23 +497,28 @@ class ObjectArray:
 
 
 class _ObjectsIterator:
-    """ObjectArray::ObjectsIterator @ ea0dab3."""
-    __slots__ = ('objects', 'CurrentObject', 'CurrentIndex')
+    """ObjectArray::ObjectsIterator @ ea0dab3; DV27: with end_index, its steps never pass end_index."""
+    __slots__ = ('objects', 'CurrentObject', 'CurrentIndex', 'EndIndex')
 
-    def __init__(self, objects: ObjectArray, start_index: int = 0):
+    def __init__(self, objects: ObjectArray, start_index: int = 0, end_index: int | None = None):
         self.objects = objects
         self.CurrentObject = objects.get_by_index(start_index)
         self.CurrentIndex = start_index
+        self.EndIndex = end_index
+
+    def _num(self) -> int:
+        num = self.objects.num()
+        return num if self.EndIndex is None else min(num, self.EndIndex)
 
     def increment(self) -> None:
         """ObjectsIterator::operator++ @ ea0dab3."""
         objects = self.objects
         self.CurrentIndex += 1
         self.CurrentObject = objects.get_by_index(self.CurrentIndex)
-        while not self.CurrentObject and self.CurrentIndex < (objects.num() - 1):
+        while not self.CurrentObject and self.CurrentIndex < (self._num() - 1):
             self.CurrentIndex += 1
             self.CurrentObject = objects.get_by_index(self.CurrentIndex)
-        if not self.CurrentObject and self.CurrentIndex == (objects.num() - 1):
+        if not self.CurrentObject and self.CurrentIndex == (self._num() - 1):
             self.CurrentIndex += 1
 
     def __eq__(self, other) -> bool:
@@ -466,7 +535,7 @@ class _AllFieldCursor:
     def __init__(self, e: 'Engine', start_pos: _ObjectsIterator | None = None):
         objects = e.objects
         self.ObjectEndIterator = _ObjectsIterator(objects, objects.num())  # members initialise in declaration order
-        self.CurrentObject = _ObjectsIterator(objects) if start_pos is None else start_pos
+        self.CurrentObject = _ObjectsIterator(objects, 0, self.ObjectEndIterator.CurrentIndex) if start_pos is None else start_pos
         self.Fields: list[UEProperty] = []
         self.PropertyIndex = 0
         if start_pos is None and not self._is_current_object_struct():
@@ -523,7 +592,7 @@ class AllFieldIterator:
     def __iter__(self) -> Iterator[UEProperty]:
         """Range-for over AllFieldIterator::begin() / end() @ ea0dab3."""
         it = _AllFieldCursor(self.e)
-        end = _AllFieldCursor(self.e, _ObjectsIterator(self.e.objects, self.e.objects.num()))
+        end = _AllFieldCursor(self.e, _ObjectsIterator(self.e.objects, it.ObjectEndIterator.CurrentIndex))  # DV27
         while it != end:
             yield it.deref()
             it.increment()

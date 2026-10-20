@@ -1,4 +1,5 @@
 """NameArray, FNameEntry and FName of Dumper-7 @ ea0dab3 (NameArray.cpp, UnrealTypes.cpp), reading names from the pool."""
+import struct
 import typing
 
 from ..errors import DetectionError, MemoryReadError
@@ -10,6 +11,7 @@ if typing.TYPE_CHECKING:
 
 _NAME_WIDE_MASK = 0x1
 _NUMBERED_NAME_LINKS = 16  # DV18
+_INLINE_FNAME = struct.Struct('<iI')  # CompIdx at 0, Number at 4
 
 
 def _i32(value: int) -> int:
@@ -37,6 +39,10 @@ def _ansi_to_wstring(name_entry: int, data: bytes) -> str:
         return string_to_wstring(data)
     except ValueError as err:  # DV19: DV12's invalid lead byte
         raise MemoryReadError(name_entry, len(data), f'name entry bytes are not valid UTF-8: {err}') from err
+
+
+class _UnresolvedBase(Exception):
+    """A numbered entry's base that the fresh cursor does not cover either."""
 
 
 class FNameEntry:
@@ -74,6 +80,8 @@ class NameArray:
         self._ByIndex = None
         self._GetStr = None
         self._memo: dict[int, str] = {}
+        self._comp_memo: dict[int, str] = {}
+        self.unresolved: dict[int, None] = {}  # CompIdx values that did not resolve, in first-seen order; never memoized
         self._memo_state = None
         self._name_pool_sig_occurrence = 0
 
@@ -89,13 +97,70 @@ class NameArray:
                 o.FNameEntry.NameArray.IndexOffset, o.NameArray.ChunksStart, o.NameArray.MaxChunkIndex, o.NameArray.NumElements,
                 o.NameArray.ByteCursor, self.e.settings.Internal.bUseNamePool)
 
-    def _get_str_memo(self, address: int) -> str:
+    def _check_memo_state(self) -> None:
         if (state := self._memo_key()) != self._memo_state:
             self._memo.clear()
+            self._comp_memo.clear()
             self._memo_state = state
+
+    def _get_str_memo(self, address: int) -> str:
+        self._check_memo_state()
         if (s := self._memo.get(address)) is None:
             s = self._memo[address] = self._GetStr(address)
         return s
+
+    def _comp_idx_wstring(self, comp_idx: int) -> str:
+        """A11: the entry string of comp_idx; a name-pool miss gets one fresh recheck of the cursor.
+
+        Memoized once resolved, else added to `unresolved`. A hooked `_ByIndex` or `_GetStr` turns the fresh recheck off.
+        """
+        self._check_memo_state()
+        if (s := self._comp_memo.get(comp_idx)) is None:
+            if self._ByIndex == self._by_index_name_pool and self._GetStr == self._get_str_name_pool:
+                if address := self._written_name_pool_entry(comp_idx):
+                    s = FNameEntry(self.e, address).get_wstring()
+                else:
+                    address, s = self._fresh_name_pool_lookup(comp_idx)
+            elif self._ByIndex == self._by_index_name_pool:
+                address = self._written_name_pool_entry(comp_idx)
+                s = FNameEntry(self.e, address).get_wstring()
+            else:
+                address = self._ByIndex(self.GNames, comp_idx, self.FNameBlockOffsetBits)
+                s = FNameEntry(self.e, address).get_wstring()
+            if address and s:  # an empty string is NAME_None's CompIdx 0, so '' here is a failed decode
+                self._comp_memo[comp_idx] = s
+            else:
+                self.unresolved.setdefault(comp_idx)
+        return s
+
+    def _written_name_pool_entry(self, comp_idx: int) -> int:
+        """`_by_index_name_pool` with the same reads, but an entry at the cursor is not yet written and gives 0."""
+        chunk_idx = comp_idx >> self.FNameBlockOffsetBits
+        in_chunk_offset = (comp_idx & ((1 << self.FNameBlockOffsetBits) - 1)) * self.NameEntryStride
+        is_unwritten = chunk_idx == self.get_num_chunks() and in_chunk_offset >= self.get_byte_cursor()
+        if chunk_idx < 0 or chunk_idx > self.get_num_chunks() or is_unwritten:
+            return 0
+        return self.e.mem.ptr(self.GNames + self.e.off.NameArray.ChunksStart + chunk_idx * 8) + in_chunk_offset
+
+    def _fresh_name_pool_lookup(self, comp_idx: int) -> tuple[int, str]:
+        """Decodes comp_idx through `e.mem.fresh` once written; (0, '') when it, or a numbered entry's base, is not."""
+        if not (address := self._fresh_name_pool_address(comp_idx)):
+            return 0, ''
+        try:
+            return address, self._get_str_name_pool(address, fresh=self.e.mem.fresh)
+        except _UnresolvedBase:
+            return 0, ''
+
+    def _fresh_name_pool_address(self, comp_idx: int) -> int:
+        """The entry address of comp_idx under CurrentBlock and CurrentByteCursor re-read through `e.mem.fresh`; 0 while not written."""
+        mem, off = self.e.mem.fresh, self.e.off.NameArray
+        chunk_idx = comp_idx >> self.FNameBlockOffsetBits
+        in_chunk_offset = (comp_idx & ((1 << self.FNameBlockOffsetBits) - 1)) * self.NameEntryStride
+        num_chunks = mem.i32(self.GNames + off.MaxChunkIndex)
+        byte_cursor = mem.i32(self.GNames + off.ByteCursor)
+        if chunk_idx < 0 or chunk_idx > num_chunks or (chunk_idx == num_chunks and in_chunk_offset >= byte_cursor):
+            return 0
+        return mem.ptr(self.GNames + off.ChunksStart + chunk_idx * 8) + in_chunk_offset
 
     def _fname_entry_init(self, first_chunk_ptr: int = 0, name_entry_string_offset: int = 0) -> None:
         """FNameEntry::Init @ ea0dab3."""
@@ -152,8 +217,8 @@ class NameArray:
     def _get_str_invalid_shift_count(name_entry: int) -> str:
         return 'Invalid FNameEntryLengthShiftCount!'
 
-    def _get_str_name_pool(self, name_entry: int, start: int = 0, hops: int = 0) -> str:
-        mem, pool = self.e.mem, self.e.off.FNameEntry.NamePool
+    def _get_str_name_pool(self, name_entry: int, start: int = 0, hops: int = 0, fresh=None) -> str:
+        mem, pool = fresh or self.e.mem, self.e.off.FNameEntry.NamePool
         header_without_number = mem.u16(name_entry + pool.HeaderOffset)
         name_len = header_without_number >> self.FNameEntryLengthShiftCount
 
@@ -165,7 +230,9 @@ class NameArray:
             next_entry_index = mem.i32(name_entry + entry_id_offset)
             number = mem.i32(name_entry + entry_id_offset + 4)
             next_entry = self.get_name_entry(next_entry_index).get_address()
-            next_wstring = self._get_str_name_pool(next_entry, start, hops + 1) if next_entry else ''
+            if not next_entry and fresh is not None and not (next_entry := self._fresh_name_pool_address(next_entry_index)):
+                raise _UnresolvedBase(next_entry_index)
+            next_wstring = self._get_str_name_pool(next_entry, start, hops + 1, fresh) if next_entry else ''
             if number > 0:
                 return next_wstring + '_' + str(number - 1)
             return next_wstring
@@ -630,11 +697,14 @@ class _LocalBuffer:
         self.base = base
         self.data = data
 
-    def _get(self, address: int, size: int, signed: bool) -> int:
+    def read(self, address: int, size: int) -> bytes:
         offset = address - self.base
         if offset < 0 or offset + size > len(self.data):
             raise MemoryReadError(address, size, 'outside the local FakeFName')
-        return int.from_bytes(self.data[offset:offset + size], 'little', signed=signed)
+        return self.data[offset:offset + size]
+
+    def _get(self, address: int, size: int, signed: bool) -> int:
+        return int.from_bytes(self.read(address, size), 'little', signed=signed)
 
     def i32(self, address: int) -> int:
         return self._get(address, 4, True)
@@ -665,12 +735,19 @@ class FNameStatics:
         self.e.provenance[key] = label
 
     def _to_str_gnames(self, name: FName) -> str:
-        names = self.e.names
-        if not self.e.settings.Internal.bUseOutlineNumberName:
-            number = name.get_number()
+        """A11: CompIdx and an inline Number at 0 and 4 come from one read; entry strings are memoized by CompIdx."""
+        e = self.e
+        names = e.names
+        if not e.settings.Internal.bUseOutlineNumberName:
+            if e.off.FName.CompIdx == 0 and e.off.FName.Number == 4:
+                comp_idx, number = _INLINE_FNAME.unpack(name._src.read(name.address, 8))
+            else:
+                number = name.get_number()
+                comp_idx = name.get_comp_idx()
             if number > 0:
-                return names._get_name_entry_of(name).get_wstring() + '_' + str(number - 1)
-        return names._get_name_entry_of(name).get_wstring()
+                return names._comp_idx_wstring(comp_idx) + '_' + str(number - 1)
+            return names._comp_idx_wstring(comp_idx)
+        return names._comp_idx_wstring(name.get_comp_idx())
 
     def _cerr_found(self) -> None:
         name = self.e.off.InSDK.Name
