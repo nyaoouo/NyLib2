@@ -108,25 +108,35 @@ class NameArray:
         """A11: the entry string of comp_idx; a name-pool miss gets one fresh recheck of the cursor, kept only once resolved."""
         self._check_memo_state()
         if (s := self._comp_memo.get(comp_idx)) is None:
-            address = self._ByIndex(self.GNames, comp_idx, self.FNameBlockOffsetBits)
-            if address:
-                s = FNameEntry(self.e, address).get_wstring()
-            elif self._ByIndex == self._by_index_name_pool:
-                address, s = self._fresh_name_pool_lookup(comp_idx)
+            if self._ByIndex == self._by_index_name_pool:
+                if address := self._written_name_pool_entry(comp_idx):
+                    s = FNameEntry(self.e, address).get_wstring()
+                else:
+                    address, s = self._fresh_name_pool_lookup(comp_idx)
             else:
-                s = ''
+                address = self._ByIndex(self.GNames, comp_idx, self.FNameBlockOffsetBits)
+                s = FNameEntry(self.e, address).get_wstring()
             if address:
                 self._comp_memo[comp_idx] = s
         return s
 
+    def _written_name_pool_entry(self, comp_idx: int) -> int:
+        """`_by_index_name_pool` with the same reads, but an entry at the cursor is not yet written and gives 0."""
+        chunk_idx = comp_idx >> self.FNameBlockOffsetBits
+        in_chunk_offset = (comp_idx & ((1 << self.FNameBlockOffsetBits) - 1)) * self.NameEntryStride
+        is_unwritten = chunk_idx == self.get_num_chunks() and in_chunk_offset >= self.get_byte_cursor()
+        if chunk_idx < 0 or chunk_idx > self.get_num_chunks() or is_unwritten:
+            return 0
+        return self.e.mem.ptr(self.GNames + self.e.off.NameArray.ChunksStart + chunk_idx * 8) + in_chunk_offset
+
     def _fresh_name_pool_lookup(self, comp_idx: int) -> tuple[int, str]:
-        """Re-reads CurrentBlock and CurrentByteCursor through `e.mem.fresh`; decodes through `fresh` when now covered."""
+        """Re-reads CurrentBlock and CurrentByteCursor through `e.mem.fresh`; decodes through `fresh` when now written."""
         mem, off = self.e.mem.fresh, self.e.off.NameArray
         chunk_idx = comp_idx >> self.FNameBlockOffsetBits
         in_chunk_offset = (comp_idx & ((1 << self.FNameBlockOffsetBits) - 1)) * self.NameEntryStride
         num_chunks = mem.i32(self.GNames + off.MaxChunkIndex)
         byte_cursor = mem.i32(self.GNames + off.ByteCursor)
-        if chunk_idx < 0 or chunk_idx > num_chunks or (chunk_idx == num_chunks and in_chunk_offset > byte_cursor):
+        if chunk_idx < 0 or chunk_idx > num_chunks or (chunk_idx == num_chunks and in_chunk_offset >= byte_cursor):
             return 0, ''
         address = mem.ptr(self.GNames + off.ChunksStart + chunk_idx * 8) + in_chunk_offset
         return address, self._get_str_name_pool(address, mem=mem)
