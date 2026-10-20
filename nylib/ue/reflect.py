@@ -192,12 +192,6 @@ class Reflection:
     def _path(self, obj) -> str | None:
         return self.resolver.path(obj.address)
 
-    def _checked_name(self, fname, value: str) -> str:
-        """An already-decoded name, reporting `unreadable_name` for a non-zero CompIdx that decoded to ''."""
-        if not value and fname.get_comp_idx():
-            self._report('unreadable_name', f'CompIdx {fname.get_comp_idx()}')
-        return value
-
     def _nested(self, prop: UEProperty, depth: int) -> PropType | None:
         return self._prop_type(prop, depth + 1) if prop.address else None
 
@@ -243,14 +237,11 @@ class Reflection:
 
     def property_record(self, prop: UEProperty) -> PropertyRecord:
         _check_wrapper(prop)
-        fname = prop.get_fname()
-        return PropertyRecord(name=self._checked_name(fname, prop.get_name()), offset=prop.get_offset(), size=prop.get_size(),
-                              array_dim=prop.get_array_dim(), flags=prop.get_property_flags() & _U64, type=self._prop_type(prop, 0),
-                              address=prop.address)
+        return PropertyRecord(name=prop.get_name(), offset=prop.get_offset(), size=prop.get_size(), array_dim=prop.get_array_dim(),
+                              flags=prop.get_property_flags() & _U64, type=self._prop_type(prop, 0), address=prop.address)
 
     def _struct_fields(self, obj: UEStruct) -> dict:
-        fname = obj.get_fname()
-        return dict(path=self.resolver.path(obj.address), name=self._checked_name(fname, fname.to_raw_string()), cpp_name=obj.get_cpp_name(),
+        return dict(path=self.resolver.path(obj.address), name=obj.get_fname().to_raw_string(), cpp_name=obj.get_cpp_name(),
                     package=self.resolver.package(obj.address), super=self._path(obj.get_super()), size=obj.get_struct_size(),
                     min_alignment=obj.get_min_alignment(), properties=[self.property_record(p) for p in obj.get_properties()])
 
@@ -264,8 +255,7 @@ class Reflection:
         exec_rva = None
         if self.e.off.UFunction.ExecFunction > 0 and (exec_function := fn.get_exec_function()):
             exec_rva = exec_function - self.e.platform.get_module_base()
-        fname = fn.get_fname()
-        return FunctionRecord(path=self.resolver.path(fn.address), name=self._checked_name(fname, fname.to_raw_string()),
+        return FunctionRecord(path=self.resolver.path(fn.address), name=fn.get_fname().to_raw_string(),
                               package=self.resolver.package(fn.address), flags=fn.get_function_flags() & _U32,
                               params_size=fn.get_struct_size(), params=[self.property_record(p) for p in fn.get_properties()],
                               exec_rva=exec_rva)
@@ -316,8 +306,7 @@ class Reflection:
             underlying = (enum_size_for_values([(name.to_wstring(), value) for name, value in pairs]), 'max_value')
         else:
             underlying = (size, 'property')
-        fname = enum.get_fname()
-        return EnumRecord(path=self.resolver.path(enum.address), name=self._checked_name(fname, fname.to_raw_string()),
+        return EnumRecord(path=self.resolver.path(enum.address), name=enum.get_fname().to_raw_string(),
                           cpp_name=valid_name if valid_name[:1] == 'E' else 'E' + valid_name,  # UEEnum::GetEnumPrefixedName @ ea0dab3
                           package=self.resolver.package(enum.address), underlying_size=underlying[0], underlying_size_from=underlying[1],
                           underlying_signed=None, values=[(name.to_string(), value) for name, value in pairs])
@@ -385,6 +374,7 @@ class _Walk:
         self.done = self.total = 0
         self.run = 0
         self.current = (-1, '?')
+        self.reported_names = 0
 
     def _ok(self) -> None:
         self.run = 0
@@ -402,6 +392,13 @@ class _Walk:
         if self.progress is not None and self.done // PROGRESS_EVERY != before and self.done != self.total:
             self.progress(self.done, self.total)
 
+    def _report_names(self, index: int, name: str) -> None:
+        """One `unreadable_name` for each CompIdx the NameArray could not resolve since the last call."""
+        if len(unresolved := self.e.names.unresolved) > self.reported_names:
+            for comp_idx in list(unresolved)[self.reported_names:]:
+                self.issues.add('unreadable_name', index, name, f'CompIdx {comp_idx}')
+            self.reported_names = len(unresolved)
+
     def _unreadable_object(self, index: int, name: str, err) -> None:
         self.unreadable += 1
         self.issues.add('unreadable_object', index, name, err)
@@ -409,6 +406,7 @@ class _Walk:
 
     def objects(self):
         e = self.e
+        e.names.unresolved.clear()
         n = e.objects.num()
         slots, first_slot = [], {}
         for i in range(n):
@@ -432,8 +430,7 @@ class _Walk:
         for i, address in slots:
             obj, name = UEObject(e, address), '?'
             try:
-                fname = obj.get_fname()
-                name = fname.to_raw_string()
+                name = obj.get_fname().to_raw_string()
                 flags = obj.get_flags() & _U32
                 stored_index = obj.get_index()
                 cls, outer = obj.get_class().address, obj.get_outer().address
@@ -444,9 +441,9 @@ class _Walk:
                 self._unreadable_object(i, name, err)
                 self._tick()
                 continue
+            finally:
+                self._report_names(i, name)
             self._ok()
-            if not name and fname.get_comp_idx():
-                self.issues.add('unreadable_name', i, name, f'CompIdx {fname.get_comp_idx()}')
             # a Package CDO is still counted (as `counts.packages` already does); any other CDO is not a type row
             type_relevant = bool(cast_flags & _TYPE_CAST_FLAGS) and (cast_flags & CF.Package or not flags & EObjectFlags.ClassDefaultObject)
             if type_relevant:
@@ -548,6 +545,8 @@ class _Walk:
             self.issues.add('unreadable_type', rec.index, rec.name, err)
             self._fail()
             return None
+        finally:
+            self._report_names(rec.index, rec.name)
         self._ok()
         return path, record, functions
 

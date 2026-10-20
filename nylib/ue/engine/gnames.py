@@ -81,6 +81,7 @@ class NameArray:
         self._GetStr = None
         self._memo: dict[int, str] = {}
         self._comp_memo: dict[int, str] = {}
+        self.unresolved: dict[int, None] = {}  # CompIdx values that did not resolve, in first-seen order; never memoized
         self._memo_state = None
         self._name_pool_sig_occurrence = 0
 
@@ -109,9 +110,9 @@ class NameArray:
         return s
 
     def _comp_idx_wstring(self, comp_idx: int) -> str:
-        """A11: the entry string of comp_idx; a name-pool miss gets one fresh recheck of the cursor, kept only once resolved.
+        """A11: the entry string of comp_idx; a name-pool miss gets one fresh recheck of the cursor.
 
-        A hooked `_ByIndex` or `_GetStr` turns the fresh recheck off.
+        Memoized once resolved, else added to `unresolved`. A hooked `_ByIndex` or `_GetStr` turns the fresh recheck off.
         """
         self._check_memo_state()
         if (s := self._comp_memo.get(comp_idx)) is None:
@@ -125,6 +126,8 @@ class NameArray:
                 s = FNameEntry(self.e, address).get_wstring()
             if address:
                 self._comp_memo[comp_idx] = s
+            else:
+                self.unresolved.setdefault(comp_idx)
         return s
 
     def _written_name_pool_entry(self, comp_idx: int) -> int:
