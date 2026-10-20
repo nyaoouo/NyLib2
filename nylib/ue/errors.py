@@ -152,3 +152,80 @@ class MarshalError(UeError, TypeError):
     def __init__(self, message: str, **details):
         super().__init__(message)
         _set_details(self, details)
+
+
+class AssetError(UeError):
+    """Base for every nylib.ue.assets failure except argument-type errors; .package, .container."""
+    _fields = ('package', 'container')
+
+    def __init__(self, message: str, **details):
+        for cls in type(self).__mro__:
+            for name in cls.__dict__.get('_fields', ()):
+                if not hasattr(self, name):
+                    setattr(self, name, None)
+        self.errno = None
+        self.winerror = None
+        super().__init__(message)
+        _set_details(self, details)
+
+
+class InvalidKeyError(AssetError):
+    """Raised when the AES key is missing, wrong, or its GUID does not match the container."""
+    _fields = ('key_guid', 'reason', 'path')
+
+
+class InvalidMappingError(AssetError):
+    """Raised when the .usmap mapping is missing, invalid, or does not fit the asset data."""
+    _fields = ('usmap', 'class_name', 'property_index', 'property_name', 'reason', 'path')
+
+
+class BuildMismatchError(InvalidMappingError):
+    """Raised when a pinned build= stamp differs from the exe's own PE TimeDateStamp."""
+    _fields = ('expected', 'found', 'exe', 'path')
+
+
+class MissingAssetError(AssetError, LookupError):
+    """Raised when a package or export is not in any mounted container."""
+    _fields = ('export',)
+
+
+class MissingTileError(MissingAssetError):
+    """Raised when missing='raise' and the region touches a VT tile that is not stored."""
+    _fields = ('mip', 'tiles')
+
+
+class UnsupportedError(AssetError):
+    """Raised when the data is outside this nylib version's supported profile."""
+    _fields = ('feature',)
+
+
+class UnsupportedContainerError(UnsupportedError):
+    """Raised for a TOC version, AES mode, compression method or missing Oodle this nylib version cannot read."""
+
+
+class UnsupportedAssetError(UnsupportedError):
+    """Raised for an unsupported asset class or native layout."""
+    _fields = ('exports',)
+
+
+class UnsupportedPixelFormatError(UnsupportedError):
+    """Raised when this nylib version has no decoder for a pixel format."""
+    _fields = ('pixel_format',)
+
+
+class CorruptAssetError(AssetError):
+    """Raised when structure or codec validation fails."""
+    _fields = ('detail',)
+
+
+class RegionOutOfBoundsError(AssetError, ValueError):
+    """Raised when a read_region rectangle or mip index is out of bounds."""
+    _fields = ('mip', 'rect', 'size')
+
+
+class ReadCancelledError(AssetError):
+    """Raised when cancel() returns true during a region read."""
+
+
+class InstallationClosedError(AssetError, ValueError):
+    """Raised when a method other than close() is called on a closed Installation."""
