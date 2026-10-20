@@ -540,6 +540,19 @@ class _PagedRecord:
         self.mask = mask  # bit k: sub-page k is held
 
 
+def _paged_int(size: int, signed: bool):
+    """A PagedSource typed reader: a hit on one fully held page under the lock, else MemorySource's read."""
+    def read_int(self, address: int) -> int:
+        if type(address) is int and address >= 0 and (off := address & (self.page_size - 1)) + size <= self.page_size:
+            with self._lock:
+                if (rec := self._pages.get(pbase := address - off)) is not None and rec.mask == self._full:
+                    if self.max_cache_bytes is not None:
+                        self._pages.move_to_end(pbase)
+                    return int.from_bytes(rec.data[off:off + size], 'little', signed=signed)
+        return int.from_bytes(MemorySource.read(self, address, size), 'little', signed=signed)
+    return read_int
+
+
 class PagedSource(MemorySource):
     """Forwards to `inner` through a page cache: 64 KiB pages, then 4 KiB pages, then `inner`'s own read.
 
@@ -573,6 +586,19 @@ class PagedSource(MemorySource):
     @property
     def fresh(self) -> MemorySource:
         return self.inner.fresh
+
+    def read(self, address: int, size: int) -> bytes:
+        if type(address) is int and type(size) is int and size > 0 and address >= 0 and (off := address & (self.page_size - 1)) + size <= self.page_size:
+            with self._lock:
+                if (rec := self._pages.get(pbase := address - off)) is not None and rec.mask == self._full:
+                    if self.max_cache_bytes is not None:
+                        self._pages.move_to_end(pbase)
+                    return bytes(rec.data[off:off + size])
+        return MemorySource.read(self, address, size)
+
+    u8, u16, u32, u64 = _paged_int(1, False), _paged_int(2, False), _paged_int(4, False), _paged_int(8, False)
+    i8, i16, i32, i64 = _paged_int(1, True), _paged_int(2, True), _paged_int(4, True), _paged_int(8, True)
+    ptr = u64
 
     def _read(self, address: int, size: int) -> bytes:
         ps = self.page_size
