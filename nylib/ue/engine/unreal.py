@@ -526,9 +526,8 @@ class UEProperty:
     def __hash__(self): return hash(self.address)
 
     def is_a(self, type_flags: int) -> bool:
-        if self.get_class()[0]:
-            return self.get_class()[0].is_type(type_flags)
-        return self.get_class()[1].is_type(type_flags)
+        cls, field_class = self.get_class()
+        return cls.is_type(type_flags) if cls else field_class.is_type(type_flags)
 
     def get_fname(self) -> FName:
         if self.e.settings.Internal.bUseFProperty:
@@ -555,7 +554,8 @@ class UEProperty:
     def get_valid_name(self) -> str: return self.get_fname().to_valid_string() if self.address else 'None'
 
     def get_prop_class_name(self) -> str:
-        return self.get_class()[0].get_name() if self.get_class()[0] else self.get_class()[1].get_name()
+        cls, field_class = self.get_class()
+        return cls.get_name() if cls else field_class.get_name()
 
     def cast(self, cls: type):
         return cls(self.e, self.address)
