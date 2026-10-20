@@ -16,6 +16,7 @@ logger = logging.getLogger('nylib.ue.exports.usmap')
 
 _MAGIC = 0x30C4
 _VERSION = 4  # ExplicitEnumValues
+_EDITOR_ONLY = int(EPropertyFlags.EditorOnly)
 _ILLEGAL_MEMBER_NAMES = frozenset({
     'IN', 'OUT', 'TRUE', 'FALSE', 'DELETE', 'PF_MAX', 'SW_MAX', 'MM_MAX', 'SIZE_MAX', 'RELATIVE',
     'TRANSPARENT', 'NO_ERROR', 'EVENT_MAX', 'IGNORE', 'short', 'long', 'int', 'signed', 'unsigned',
@@ -143,7 +144,7 @@ def _encode_enum(rec, w: _Writer) -> bytes:
 def _encode_struct(rec, w: _Writer) -> bytes:
     name_idx = w.name_index(strip_path(rec.name), rec.path)
     super_idx = -1 if rec.super is None else w.name_index(_referenced_name(rec.super), rec.path)
-    kept = sorted((p for p in rec.properties if not (p.flags & EPropertyFlags.EditorOnly)),
+    kept = sorted((p for p in rec.properties if not (p.flags & _EDITOR_ONLY)),
                   key=lambda p: (p.offset, _property_bit(p)))
     if len(kept) > 0xFFFF:
         raise ValueError(f'struct {rec.path!r} has more than 0xFFFF serializable properties')

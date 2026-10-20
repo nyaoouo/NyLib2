@@ -1,5 +1,6 @@
 """UnrealObjects.h/.cpp of Dumper-7 @ ea0dab3: the UObject / FField wrappers over a MemorySource."""
 import typing
+from operator import index as _index
 
 from ..errors import DetectionError, MemoryReadError
 from ..flags import EClassCastFlags, EPropertyFlags
@@ -68,7 +69,7 @@ class UEFFieldClass:
 
     def get_fname(self) -> FName: return FName(self.e, self.address + self.e.off.FFieldClass.Name)
 
-    def is_type(self, flags: int) -> bool: return bool(self.get_cast_flags() & flags) if flags != 0 else True
+    def is_type(self, flags: int) -> bool: return bool(self.get_cast_flags() & _index(flags)) if flags != 0 else True
 
     def get_name(self) -> str: return self.get_fname().to_string() if self.address else 'None'
 
@@ -179,7 +180,7 @@ class UEObject:
 
     def get_package_index(self) -> int: return self.get_outermost().get_index()
 
-    def has_any_flags(self, flags: int) -> bool: return bool(self.get_flags() & flags)
+    def has_any_flags(self, flags: int) -> bool: return bool(self.get_flags() & _index(flags))
 
     def is_a(self, type_flags: int) -> bool: return self.get_class().is_type(type_flags) if type_flags != 0 else True
 
@@ -458,7 +459,7 @@ class UEFunction(UEStruct):
 
     def get_function_flags(self) -> int: return self.e.mem.u32(self.address + self.e.off.UFunction.FunctionFlags)
 
-    def has_flags(self, func_flags: int) -> bool: return bool(self.get_function_flags() & func_flags)
+    def has_flags(self, func_flags: int) -> bool: return bool(self.get_function_flags() & _index(func_flags))
 
     def get_exec_function(self) -> int: return self.e.mem.ptr(self.address + self.e.off.UFunction.ExecFunction)
 
@@ -475,7 +476,7 @@ class UEClass(UEStruct):
 
     def get_cast_flags(self) -> int: return _cast_flags(self.e, 'UClass', self.address, self.e.off.UClass.CastFlags)
 
-    def is_type(self, type_flag: int) -> bool: return bool(self.get_cast_flags() & type_flag) if type_flag != 0 else True
+    def is_type(self, type_flag: int) -> bool: return bool(self.get_cast_flags() & _index(type_flag)) if type_flag != 0 else True
 
     def get_default_object(self) -> UEObject: return UEObject(self.e, self.e.mem.ptr(self.address + self.e.off.UClass.ClassDefaultObject))
 
@@ -545,9 +546,9 @@ class UEProperty:
 
     def get_property_flags(self) -> int: return self.e.mem.u64(self.address + self.e.off.Property.PropertyFlags)
 
-    def has_property_flags(self, property_flag: int) -> bool: return bool(self.get_property_flags() & property_flag)
+    def has_property_flags(self, property_flag: int) -> bool: return bool(self.get_property_flags() & _index(property_flag))
 
-    def is_type(self, possible_types: int) -> bool: return (self.get_cast_flags() & possible_types) != 0
+    def is_type(self, possible_types: int) -> bool: return (self.get_cast_flags() & _index(possible_types)) != 0
 
     def get_name(self) -> str: return self.get_fname().to_string() if self.address else 'None'
 
