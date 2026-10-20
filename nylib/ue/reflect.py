@@ -414,17 +414,33 @@ class _Walk:
         e.names.unresolved.clear()
         n = e.objects.num()
         slots, first_slot = [], {}
-        for i in range(n):
-            try:
-                address = e.objects.get_by_index(i).address
-            except MemoryReadError as err:
-                self.walked += 1
-                self._unreadable_object(i, '?', err)
-                continue
-            self._ok()
-            if address:
-                slots.append((i, address))
-                first_slot.setdefault(address, i)
+        if e.objects._windowed():
+            for i, ptr, werr in e.objects._item_slots(n):  # A10 windows; an unreadable window falls back per slot, as __iter__ does
+                if werr is None:
+                    address = ptr
+                else:
+                    try:
+                        address = e.objects.get_by_index(i).address
+                    except MemoryReadError as err:
+                        self.walked += 1
+                        self._unreadable_object(i, '?', err)
+                        continue
+                self._ok()
+                if address:
+                    slots.append((i, address))
+                    first_slot.setdefault(address, i)
+        else:
+            for i in range(n):
+                try:
+                    address = e.objects.get_by_index(i).address
+                except MemoryReadError as err:
+                    self.walked += 1
+                    self._unreadable_object(i, '?', err)
+                    continue
+                self._ok()
+                if address:
+                    slots.append((i, address))
+                    first_slot.setdefault(address, i)
         self.walked += len(slots)
         self.total = 3 * self.walked
         self.bits = bytearray(max(n, 0))
