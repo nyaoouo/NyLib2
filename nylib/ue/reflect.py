@@ -1,5 +1,6 @@
 """The reflection core: stage-4 wrappers to F8 records, and the streaming three-pass snapshot walk (stage 6, R2)."""
 import dataclasses
+import itertools
 import time
 import typing
 from typing import Callable, Iterable
@@ -394,8 +395,8 @@ class _Walk:
 
     def _report_names(self, index: int, name: str) -> None:
         """One `unreadable_name` for each CompIdx the NameArray could not resolve since the last call."""
-        if len(unresolved := self.e.names.unresolved) > self.reported_names:
-            for comp_idx in list(unresolved)[self.reported_names:]:
+        if (new := len(unresolved := self.e.names.unresolved) - self.reported_names) > 0:
+            for comp_idx in reversed(list(itertools.islice(reversed(unresolved), new))):  # only the new tail, in first-seen order
                 self.issues.add('unreadable_name', index, name, f'CompIdx {comp_idx}')
             self.reported_names = len(unresolved)
 
