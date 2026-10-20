@@ -121,10 +121,13 @@ class NameArray:
                     s = FNameEntry(self.e, address).get_wstring()
                 else:
                     address, s = self._fresh_name_pool_lookup(comp_idx)
+            elif self._ByIndex == self._by_index_name_pool:
+                address = self._written_name_pool_entry(comp_idx)
+                s = FNameEntry(self.e, address).get_wstring()
             else:
                 address = self._ByIndex(self.GNames, comp_idx, self.FNameBlockOffsetBits)
                 s = FNameEntry(self.e, address).get_wstring()
-            if address:
+            if address and s:  # an empty string is NAME_None's CompIdx 0, so '' here is a failed decode
                 self._comp_memo[comp_idx] = s
             else:
                 self.unresolved.setdefault(comp_idx)
