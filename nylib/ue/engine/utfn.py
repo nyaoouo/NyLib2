@@ -1,5 +1,8 @@
 """UtfN.hpp @ ea0dab3 conversions; UTF-16 text is a str of code units (UTF-16LE decoded with surrogatepass)."""
 import array
+import re
+
+_CHANGED_BY_ROUND_TRIP = re.compile('[\ud800-\udfff\U0010ffff]')  # the only code points Utf16StringToUtf8String does not keep
 
 
 def _units(text: str) -> array.array:
@@ -127,9 +130,13 @@ def utf_8_string_to_utf_16_string(data: bytes) -> str:
 
 def wstring_to_string(units: str) -> str:
     """UtfN::WStringToString @ ea0dab3 (its UTF-16 branch)."""
+    if type(units) is str and _CHANGED_BY_ROUND_TRIP.search(units) is None:
+        return units
     return utf_16_string_to_utf_8_string(units)
 
 
 def string_to_wstring(data: bytes) -> str:
     """UtfN::StringToWString @ ea0dab3 (its UTF-16 branch)."""
+    if type(data) is bytes and data.isascii():
+        return data.decode('ascii')
     return utf_8_string_to_utf_16_string(data)
