@@ -748,7 +748,7 @@ class Installation:
                 _annotate(e, pkg, c)
                 raise
             mi = next(i for i, m in enumerate(self._mounted) if m[1] is container)  # inside the operation: not yet released
-        return Texture._new(self, info, layout, unreadable, mi, c, bulk)
+        return Texture._new(self, info, layout, unreadable, mi, c, idx, bulk)
 
     def stats(self) -> ReadStats:
         """The totals since open: open itself and every operation that has ended."""
@@ -785,7 +785,8 @@ class Texture:
         raise TypeError('Texture cannot be constructed directly: call Installation.texture()')
 
     @classmethod
-    def _new(cls, inst: Installation, info, layout, unreadable, mi: int, container: str, bulk: int | None) -> 'Texture':
+    def _new(cls, inst: Installation, info, layout, unreadable, mi: int, container: str, header: int,
+             bulk: int | None) -> 'Texture':
         self = object.__new__(cls)
         self._inst = inst
         self._info = info
@@ -793,6 +794,7 @@ class Texture:
         self._unreadable = unreadable
         self._mi = mi  # an index into inst._mounted, so that after close() no Container or Toc stays reachable
         self._container = container
+        self._header = header
         self._bulk = bulk
         return self
 
@@ -846,9 +848,18 @@ class Texture:
                 if out_bytes is not None and out_bytes < n:
                     raise ValueError(f'out holds {out_bytes} bytes, the region needs {n}')
                 container = inst._mounted[self._mi][1]
-                pixels, filled = _texture.assemble(self._layout, mip, rect, missing=missing, out=out,
-                                                   fetch=self._fetcher(container, counters),
-                                                   checkpoint=self._checkpoint(mip, cancel), counters=counters)
+                layout = self._layout
+                if isinstance(layout, _texture.OrdinaryLayout):
+                    idx = self._bulk if layout.sources[mip][0] == _texture.BULK_DATA else self._header
+                    pixels, filled = _texture.assemble_rows(layout, mip, rect, out=out,
+                                                            chunk_start=container.toc.chunk_range(idx)[0],
+                                                            block_size=container.toc.block_size,
+                                                            fetch=self._fetcher(container, counters, idx),
+                                                            checkpoint=self._checkpoint(mip, cancel, 'blocks'), counters=counters)
+                else:
+                    pixels, filled = _texture.assemble(layout, mip, rect, missing=missing, out=out,
+                                                       fetch=self._fetcher(container, counters, self._bulk),
+                                                       checkpoint=self._checkpoint(mip, cancel, 'tiles'), counters=counters)
             except AssetError as e:
                 _annotate(e, pkg, self._container)
                 raise
@@ -856,23 +867,22 @@ class Texture:
             stats = counters.snapshot()
         return Region(pixels=pixels, mip=mip, x=rect[0], y=rect[1], width=rect[2], height=rect[3], missing=filled, stats=stats)
 
-    def _fetcher(self, container: Container, counters):
-        """fetch(offset, length) for assemble: drops the memo's blocks below the tile's first, then reads the range."""
+    def _fetcher(self, container: Container, counters, idx: int):
+        """fetch(offset, length) in chunk `idx`: drops the memo's blocks below the range's first, then reads the range."""
         inst = self._inst
-        bulk = self._bulk
         block_size = container.toc.block_size
         memo = {}
 
         def fetch(offset: int, length: int) -> bytes:
-            first = (container.toc.chunk_range(bulk)[0] + offset) // block_size
+            first = (container.toc.chunk_range(idx)[0] + offset) // block_size
             for key in [k for k in memo if k[1] < first]:
                 del memo[key]
-            return container.read_range(bulk, offset, length, memo=memo, cache=inst._cache, counters=counters,
+            return container.read_range(idx, offset, length, memo=memo, cache=inst._cache, counters=counters,
                                         checkpoint=inst._check_open)
         return fetch
 
-    def _checkpoint(self, mip: int, cancel):
-        """checkpoint(k, n) for assemble: the closed check, then `cancel`."""
+    def _checkpoint(self, mip: int, cancel, unit: str):
+        """checkpoint(k, n) for assemble and assemble_rows: the closed check, then `cancel`; `unit` names what n counts."""
         inst = self._inst
         pkg = self._info.package
 
@@ -880,5 +890,5 @@ class Texture:
             if inst._closed:
                 raise InstallationClosedError(_CLOSED)
             if cancel is not None and cancel():
-                raise ReadCancelledError(f'read of {pkg} mip {mip} cancelled after {k} of {n} tiles')
+                raise ReadCancelledError(f'read of {pkg} mip {mip} cancelled after {k} of {n} {unit}')
         return checkpoint
