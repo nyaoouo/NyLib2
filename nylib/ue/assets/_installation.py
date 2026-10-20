@@ -116,6 +116,30 @@ def _asset_package(path: str, project: str | None) -> str | None:
     return None
 
 
+def _plugin_dir(path: str, project: str | None) -> tuple | None:
+    """(directory key, dk, rest without extension) for a path under '<root>/Plugins/<d1>/.../<dk>/Content/...', else None.
+
+    `root` must be 'Engine' or `project` (ASCII-case-insensitive); the directory key is the directory's
+    path up to and including Content, ASCII-lower-cased.
+    """
+    if not _lower(path).endswith(('.uasset', '.umap')):
+        return None
+    segs = path.split('/')
+    if len(segs) < 4 or _lower(segs[1]) != 'plugins':
+        return None
+    root = _lower(segs[0])
+    if root != 'engine' and (project is None or root != _lower(project)):
+        return None
+    for i in range(3, len(segs)):
+        if _lower(segs[i]) == 'content':
+            rest = '/'.join(segs[i + 1:])
+            rest = rest[:rest.rindex('.')]
+            if not rest:
+                return None
+            return _lower('/'.join(segs[:i + 1])), segs[i - 1], rest
+    return None
+
+
 def _find_exe(paks: str) -> str | None:
     """The unique *-Win64-Shipping.exe in paks/../../Binaries/Win64, else None."""
     bindir = os.path.join(os.path.dirname(os.path.dirname(paks)), 'Binaries', 'Win64')
@@ -606,8 +630,9 @@ class Installation:
 
     def _build_listing(self, counters) -> list:
         entries = []
-        dropped = skipped = 0
-        for mi, (toc, _container, aes) in enumerate(self._mounted):
+        dropped = skipped = learning_reads = failed_learning = 0
+        learned = {}  # plugin directory key -> learned mount, once a learning read (success or not) has run
+        for mi, (toc, container, aes) in enumerate(self._mounted):
             self._check_open()
             if not toc.indexed or not toc.dir_index_size:
                 continue
@@ -629,20 +654,50 @@ class Installation:
                     continue
                 if path.startswith('../../../'):
                     path = path[9:]
-                if _lower(path).endswith(('.o.uasset', '.o.umap')) or (pkg := _asset_package(path, self._project)) is None:
+                if _lower(path).endswith(('.o.uasset', '.o.umap')):
                     continue
-                if seen[idx]:  # the first entry to reach the hash claims its TOC entry; later ones are not hashed
+                if (pkg := _asset_package(path, self._project)) is not None:
+                    if seen[idx]:  # the first entry to reach the hash claims its TOC entry; later ones are not hashed
+                        skipped += 1
+                        continue
+                    seen[idx] = 1
+                    if package_id(pkg) != cid:
+                        dropped += 1
+                        continue
+                    entries.append((pkg, mi, idx))
+                    continue
+                if (plugin := _plugin_dir(path, self._project)) is None:
+                    continue
+                key, dk, rest = plugin
+                if seen[idx]:
                     skipped += 1
                     continue
                 seen[idx] = 1
-                if package_id(pkg) != cid:
-                    dropped += 1
+                dk_name = f'/{dk}/{rest}'
+                if package_id(dk_name) == cid:  # the entry matches its folder name
+                    entries.append((dk_name, mi, idx))
                     continue
-                entries.append((pkg, mi, idx))
+                if key not in learned:  # this directory's one learning read, from its first miss
+                    learning_reads += 1
+                    try:
+                        size = toc.chunk_range(idx)[1]
+                        recorded = self._recorded_name(toc, container, idx, cid, size, counters)
+                    except (CorruptAssetError, UnsupportedAssetError):
+                        failed_learning += 1
+                        learned[key] = None
+                    else:
+                        mount, _sep, remainder = recorded.lstrip('/').partition('/')
+                        learned[key] = mount if (_lower(remainder) == _lower(rest)
+                                                 and package_id(f'/{mount}/{rest}') == cid) else None
+                mount = learned.get(key)
+                if mount is not None and package_id(mount_name := f'/{mount}/{rest}') == cid:  # the learned mount matches
+                    entries.append((mount_name, mi, idx))
+                    continue
+                dropped += 1
         entries.sort(key=lambda e: (_lower(e[0]), e[0], self._mounted[e[1]][0].basename))
         _log.debug('list_packages: %d packages listed, %d entries dropped (name hash differs from chunk id), %d entries skipped '
-                   '(path over %d characters, a control character or undecodable byte, or a repeat TOC entry)', len(entries),
-                   dropped, skipped, _MAX_PATH)
+                   '(path over %d characters, a control character or undecodable byte, or a repeat TOC entry), %d plugin-root '
+                   'learning reads (%d failed)', len(entries), dropped, skipped, _MAX_PATH, learning_reads, failed_learning)
         return entries
 
     def _read_header(self, toc: Toc, container: Container, idx: int, counters) -> ZenHeader:
