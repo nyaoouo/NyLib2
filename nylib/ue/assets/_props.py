@@ -6,7 +6,7 @@ import threading
 
 from ..errors import InvalidMappingError, UnsupportedAssetError
 from . import _natives
-from ._values import EnumValue, MapValue, ObjectRef, Slot, SoftObjectRef, StructValue, TextValue, _layout
+from ._values import CurveTable, DataTable, EnumValue, MapValue, ObjectRef, Slot, SoftObjectRef, StructValue, TextValue, _layout
 
 _LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
 _MAX_LEVEL = 16  # struct nesting, nested FTexts included
@@ -39,6 +39,9 @@ _HISTORIES = {-1: 'None', 0: 'Base', 1: 'NamedFormat', 2: 'OrderedFormat', 3: 'A
 _ARGUMENTS = {1: 'Map<Str,Struct<FormatArgumentValue>>', 2: 'Array<Struct<FormatArgumentValue>>', 3: 'Array<Struct<FormatArgumentData>>'}
 _ARG_TYPES = {0: ('Int', 'Int64', _I64), 1: ('UInt', 'UInt64', _U64), 2: ('Float', 'Float', _F32), 3: ('Double', 'Double', _F64)}
 _STYLES = {7: ('DateStyle',), 8: ('TimeStyle',), 9: ('DateStyle', 'TimeStyle')}
+_ROW_UNIT = 10  # minimum bytes a DataTable or CurveTable row can take, for the row-count bound
+_CURVE_STRUCTS = {1: 'SimpleCurve', 2: 'RichCurve'}
+_CURVE_MODE_NAMES = {0: 'Empty', 1: 'SimpleCurves', 2: 'RichCurves'}
 
 
 def _lower(s: str) -> str:
@@ -86,13 +89,24 @@ def _zero_size(t) -> bool:
 
 class Schema:
     """The slots of one struct's whole super chain, own properties first; templates[pos] is
-    (index, element, owner, name, label, type)."""
-    __slots__ = ('templates', 'where', 'absent', 'zero', 'nones', 'layout', '_unread', '_lock')
+    (index, element, owner, name, label, type). `kind` is 'DataTable' or 'CurveTable' when the chain holds that
+    record (3.10), else None; `row_struct_index` is DataTable's own RowStruct slot, chain-wide, or None."""
+    __slots__ = ('templates', 'where', 'absent', 'zero', 'nones', 'layout', 'kind', 'row_struct_index', '_unread', '_lock')
 
     def __init__(self, chain: tuple, lock):
         templates = []
         base = 0
+        kind = None
+        row_struct_index = None
         for rec in chain:
+            if kind is None:
+                key = _lower(rec.name)
+                if key == 'datatable':
+                    kind = 'DataTable'
+                    row_struct_index = next((base + p.index for p in sorted(rec.properties, key=lambda p: p.index)
+                                             if p.type.code == 4), None)
+                elif key == 'curvetable':
+                    kind = 'CurveTable'
             local = {}
             for p in rec.properties:
                 label = None
@@ -103,12 +117,16 @@ class Schema:
                         local[i] = (base + i, e, rec.name, p.name, label, p.type)
             templates.extend(local[i] for i in sorted(local))
             base += rec.property_count
+        self.kind = kind
+        self.row_struct_index = row_struct_index
         self._build(tuple(templates), lock)
 
     @classmethod
     def of(cls, templates: tuple) -> 'Schema':
         """The schema of slot `templates` in index order, such as a property bag's descriptors."""
         self = object.__new__(cls)
+        self.kind = None
+        self.row_struct_index = None
         self._build(templates, _NO_LOCK)
         return self
 
@@ -225,7 +243,7 @@ class PropertyReader:
         self.size = size
         self.cls = class_name
         self.check = check
-        self.ctx = (package, export, container)
+        self.ctx = (package, export, container, usmap)
         self.path = []  # (struct, index, name, label) slot steps, element indexes, ('key'|'value'|'row', n) steps
         self.native = None  # the native struct being read, for failures
         self.row = None
@@ -537,7 +555,7 @@ class PropertyReader:
         return Schema.of(templates)
 
     def read(self, data: bytes, schema: Schema, flags: int, partial: bool) -> tuple:
-        """(properties, native_size, guid, complete, problem) of the export's bytes `data`, whose class has `schema`."""
+        """(properties, native, native_size, guid, complete, problem) of the export's bytes `data`, whose class has `schema`."""
         self.data, self.pos, self.end = data, 0, len(data)
         name = self.cls
         try:
@@ -547,7 +565,8 @@ class PropertyReader:
             if not partial:
                 raise
             _kept(e)
-            return StructValue._new(name, False, schema.unread, schema.nones, self.ctx, e, schema.layout), 0, None, False, e
+            return (StructValue._new(name, False, schema.unread, schema.nones, self.ctx, e, schema.layout),
+                    None, 0, None, False, e)
         self.built(max(0, len(schema.templates) - total))
         slots, values = list(schema.absent), list(schema.nones)
         for k, (index, nonzero) in enumerate(self._header_entries(frags, mask)):
@@ -565,7 +584,8 @@ class PropertyReader:
                 del self.path[:]
                 self.native = None
                 _kept(e)
-                return StructValue._new(name, False, tuple(slots), tuple(values), self.ctx, e, schema.layout), 0, None, False, e
+                return (StructValue._new(name, False, tuple(slots), tuple(values), self.ctx, e, schema.layout),
+                        None, 0, None, False, e)
             slots[pos], values[pos] = slot, value
         properties = StructValue._new(name, False, tuple(slots), tuple(values), self.ctx, None, schema.layout)
         guid = None
@@ -578,12 +598,91 @@ class PropertyReader:
                                         'object trailer', end)
                 if not partial:
                     raise e
-                return properties, 0, None, False, _kept(e)
+                return properties, None, 0, None, False, _kept(e)
             self.pos = end + 4
             if has_guid:
                 guid = '{:08X}{:08X}{:08X}{:08X}'.format(*_GUID.unpack_from(data, self.pos))
                 self.pos += 16
-        return properties, self.end - self.pos, guid, True, None
+            if schema.kind is not None:
+                try:
+                    native = self._data_table(schema, properties) if schema.kind == 'DataTable' else self._curve_table()
+                except _PROBLEMS as e:
+                    if not partial or e is self._resolving:
+                        raise
+                    return properties, None, 0, guid, False, _kept(e)
+                if self.pos != self.end:
+                    e = self._mapping_error(f'{self.usmap} does not fit {self.package}.{self.export}: parsing ends at '
+                                            f'{self.pos:#x}, not at the export end (export is {self.size} bytes)',
+                                            'export end', self.pos)
+                    if not partial:
+                        raise e
+                    return properties, None, 0, guid, False, _kept(e)
+                return properties, native, 0, guid, True, None
+        return properties, None, self.end - self.pos, guid, True, None
+
+    # ---- DataTable and CurveTable ----------------------------------------------------------------------------------
+
+    def _no_row_struct(self):
+        raise self._mapping_error(f'{self.usmap} cannot read {self.package}.{self.export}: the DataTable record has no '
+                                  'Object property for RowStruct', 'no RowStruct property', self.pos, class_name='DataTable')
+
+    def _row_struct_unsupported(self):
+        attrs = self._attrs(self.pos, None)
+        attrs['class_name'] = 'DataTable'
+        raise UnsupportedAssetError(f'{self.package}.{self.export}: the rows of this DataTable cannot be read, because its '
+                                    'RowStruct is not serialized', feature='DataTable row struct', **attrs)
+
+    def _rows(self, schema: Schema, name: str, n: int) -> MapValue:
+        """`n` (row name, StructValue) pairs of struct `name`: a checkpoint and a ('row', k) path step per row."""
+        if not n:
+            return _EMPTY_MAP
+        pairs = []
+        seen = set()
+        self.path.append(None)
+        for k in range(n):
+            self.check()
+            self.path[-1] = ('row', k)
+            p = self.pos
+            row_name = self.fname()
+            if row_name in seen:
+                self.fail('row name repeated', p)
+            seen.add(row_name)
+            self.row = row_name
+            pairs.append((row_name, self.block(schema, name, 0, 0)))
+        self.path.pop()
+        self.row = None
+        return MapValue(pairs)
+
+    def _data_table(self, schema: Schema, properties: StructValue) -> DataTable:
+        """The DataTable value after the object trailer (3.10)."""
+        idx = schema.row_struct_index
+        if idx is None:
+            self._no_row_struct()
+        if properties.state(idx) == 'absent':
+            self._row_struct_unsupported()
+        ref = properties.at(idx)
+        _p, n = self.count(_ROW_UNIT, 'row count')
+        if ref.kind == 'null':
+            if n:
+                self._row_struct_unsupported()
+            return DataTable(None, ref, _EMPTY_MAP)
+        if ref.kind == 'import':
+            row_struct, effective = None, self.named(ref)
+        else:
+            row_struct = effective = ref.name
+        return DataTable(row_struct, ref, self._rows(self.schema(effective), effective, n))
+
+    def _curve_table(self) -> CurveTable:
+        """The CurveTable value after the object trailer (3.10)."""
+        _p, n = self.count(_ROW_UNIT, 'row count')
+        mp = self.need(1)
+        mode_byte = self.data[mp]
+        if mode_byte not in _CURVE_MODE_NAMES or (mode_byte == 0 and n):
+            self.fail(f'curve table mode {mode_byte}', mp)
+        if mode_byte == 0:
+            return CurveTable('Empty', _EMPTY_MAP)
+        struct_name = _CURVE_STRUCTS[mode_byte]
+        return CurveTable(_CURVE_MODE_NAMES[mode_byte], self._rows(self.schema(struct_name), struct_name, n))
 
     # ---- values ---------------------------------------------------------------------------------------------------
 

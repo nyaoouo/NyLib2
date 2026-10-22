@@ -4,11 +4,11 @@ import operator
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from ..errors import AbsentPropertyError, AmbiguousNameError, AssetError
+from ..errors import AbsentPropertyError, AmbiguousNameError, AssetError, InvalidMappingError
 from ._records import ReadStats
 
 _PRESENT = ('serialized', 'zero')
-_NO_CTX = (None, None, None)  # (package, export path after the package, container)
+_NO_CTX = (None, None, None, None)  # (package, export path after the package, container, usmap basename)
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,7 +138,7 @@ class StructValue(Mapping):
         return next((i for i, s in enumerate(slots) if s.index == index), None)
 
     def _absent(self, slot: Slot) -> AbsentPropertyError:
-        pkg, export, container = self._ctx
+        pkg, export, container = self._ctx[:3]
         return AbsentPropertyError(
             f'{self._struct} property {slot.index} is absent in {pkg}.{export}: it was not serialized, so its value is the '
             "archetype's, which this data does not hold", package=pkg, container=container, export=export,
@@ -151,7 +151,7 @@ class StructValue(Mapping):
             raise KeyError(f'{self._struct} has no property with that name')
         if len(found) > 1:
             indexes = tuple(self._slots[self._props[k][1]].index for k in found)
-            pkg, export, _container = self._ctx
+            pkg, export, _container = self._ctx[:3]
             raise AmbiguousNameError(f'{self._struct} has {len(indexes)} properties with that name (indexes {_first8(indexes)}); '
                                      'use the schema index', package=pkg, export=export, struct_name=self._struct,
                                      property_name=name, indexes=indexes)
@@ -356,3 +356,35 @@ class Export:
         else:
             tail = f'partial: {type(self.problem).__name__}'
         return f'Export({self.info.path}, {self.properties.struct}, {self.info.size} B, {tail})'
+
+
+@dataclass(frozen=True, slots=True)
+class DataTable:
+    row_struct: str | None
+    row_struct_ref: ObjectRef
+    rows: MapValue
+
+
+_KEY_ARRAY_TYPES = ('Array<Struct<SimpleCurveKey>>', 'Array<Struct<RichCurveKey>>')
+
+
+@dataclass(frozen=True, slots=True)
+class CurveTable:
+    mode: str
+    rows: MapValue
+
+    def keys(self, row: str) -> tuple:
+        """The row's key array: the tuple (serialized), () (zero); AbsentPropertyError (absent)."""
+        if not isinstance(row, str):
+            raise TypeError(f'row must be a str, got {type(row).__name__}')
+        try:
+            sv = self.rows[row]
+        except KeyError:
+            raise KeyError('no such row') from None
+        matches = [s for s in sv.slots if s.type in _KEY_ARRAY_TYPES]
+        if len(matches) != 1:
+            pkg, export, container, usmap = (sv._ctx + (None,))[:4]
+            raise InvalidMappingError(
+                f'{usmap} cannot read {pkg}.{export}: the {sv.struct} record has no curve key array', usmap=usmap,
+                reason='no curve key array', package=pkg, container=container, export=export, class_name=sv.struct)
+        return sv.at(matches[0].index)

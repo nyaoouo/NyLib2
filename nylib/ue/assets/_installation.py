@@ -1136,10 +1136,10 @@ class Installation:
         data = container.read_range(idx, start, size, cache=self._cache, counters=counters, checkpoint=check.blocks(toc, idx, start, size))
         t0 = time.perf_counter()
         try:
-            properties, native_size, guid, complete, problem = reader.read(data, schema, info.flags, partial)
+            properties, native, native_size, guid, complete, problem = reader.read(data, schema, info.flags, partial)
         finally:
             counters.seconds_decode += time.perf_counter() - t0 - resolving[0]
-        return info, properties, None, native_size, complete and native_size == 0, guid, complete, problem
+        return info, properties, native, native_size, complete and native_size == 0, guid, complete, problem
 
     def read(self, target: 'str | ExportInfo | ObjectRef | SoftObjectRef', *, partial: bool = False,
              cancel: Callable[[], bool] | None = None) -> Export:
