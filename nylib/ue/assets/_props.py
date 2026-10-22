@@ -90,8 +90,8 @@ def _zero_size(t) -> bool:
 class Schema:
     """The slots of one struct's whole super chain, own properties first; templates[pos] is
     (index, element, owner, name, label, type). `kind` is 'DataTable' or 'CurveTable' when the chain holds that
-    record (3.10), else None; `row_struct_index` is DataTable's own RowStruct slot, chain-wide, or None."""
-    __slots__ = ('templates', 'where', 'absent', 'zero', 'nones', 'layout', 'kind', 'row_struct_index', '_unread', '_lock')
+    record, else None; `row_struct_index` is DataTable's own RowStruct slot, chain-wide, or None."""
+    __slots__ = ('templates', 'where', 'absent', 'zero', 'nones', 'layout', 'kind', 'row_struct_index', '_unread', '_lock', '_counted')
 
     def __init__(self, chain: tuple, lock):
         templates = []
@@ -99,12 +99,11 @@ class Schema:
         kind = None
         row_struct_index = None
         for rec in chain:
+            is_datatable = False
             if kind is None:
                 key = _lower(rec.name)
                 if key == 'datatable':
-                    kind = 'DataTable'
-                    row_struct_index = next((base + p.index for p in sorted(rec.properties, key=lambda p: p.index)
-                                             if p.type.code == 4), None)
+                    kind = is_datatable = 'DataTable'
                 elif key == 'curvetable':
                     kind = 'CurveTable'
             local = {}
@@ -115,6 +114,10 @@ class Schema:
                     if i < rec.property_count and i not in local:
                         label = label or type_label(p.type)
                         local[i] = (base + i, e, rec.name, p.name, label, p.type)
+            if is_datatable:
+                # the RowStruct slot comes from the DataTable record's own built slots, not its raw property list:
+                # a malformed index, a duplicate, or array_dim 0 must not reach a slot this schema never builds.
+                row_struct_index = next((local[i][0] for i in sorted(local) if local[i][5].code == 4), None)
             templates.extend(local[i] for i in sorted(local))
             base += rec.property_count
         self.kind = kind
@@ -122,23 +125,38 @@ class Schema:
         self._build(tuple(templates), lock)
 
     @classmethod
-    def of(cls, templates: tuple) -> 'Schema':
-        """The schema of slot `templates` in index order, such as a property bag's descriptors."""
+    def of(cls, templates: tuple, r=None) -> 'Schema':
+        """The schema of slot `templates` in index order, such as a property bag's descriptors; built fresh every
+        time, so when `r` is given its slots are counted and checkpointed as they are built."""
         self = object.__new__(cls)
         self.kind = None
         self.row_struct_index = None
-        self._build(templates, _NO_LOCK)
+        self._build(templates, _NO_LOCK, r)
         return self
 
-    def _build(self, templates: tuple, lock) -> None:
+    def _build(self, templates: tuple, lock, r=None) -> None:
         self.templates = templates
         self.where = {t[0]: pos for pos, t in enumerate(templates)}
-        self.absent = tuple(Slot(i, owner, name, label, 'absent', None, e) for i, e, owner, name, label, _t in templates)
-        self.zero = tuple(Slot(i, owner, name, label, 'zero', None, e) for i, e, owner, name, label, _t in templates)
+        if r is None:
+            self.absent = tuple(Slot(i, owner, name, label, 'absent', None, e) for i, e, owner, name, label, _t in templates)
+            self.zero = tuple(Slot(i, owner, name, label, 'zero', None, e) for i, e, owner, name, label, _t in templates)
+        else:
+            absent, zero, pending = [], [], 0
+            for i, e, owner, name, label, _t in templates:
+                absent.append(Slot(i, owner, name, label, 'absent', None, e))
+                zero.append(Slot(i, owner, name, label, 'zero', None, e))
+                pending += 1
+                if pending == _CHECK_EVERY:
+                    r.built(pending)
+                    pending = 0
+            if pending:
+                r.built(pending)
+            self.absent, self.zero = tuple(absent), tuple(zero)
         self.nones = (None,) * len(templates)
-        self.layout = _layout(self.absent)
+        self.layout = _layout(self.absent, r.check if r is not None else None)
         self._unread = None
         self._lock = lock
+        self._counted = r is not None
 
     @property
     def unread(self) -> tuple:
@@ -531,7 +549,8 @@ class PropertyReader:
             self.native = native
             return StructValue._new(name, False, schema.absent, schema.nones, self.ctx, None, schema.layout)
         self.spend(len(schema.templates), start)
-        self.built(max(0, len(schema.templates) - total))
+        if not schema._counted:  # a bag schema already counted every slot as it was built
+            self.built(max(0, len(schema.templates) - total))
         slots, values = list(schema.absent), list(schema.nones)
         for index, nonzero in self._header_entries(frags, mask):
             self.slots += 1
@@ -550,9 +569,10 @@ class PropertyReader:
             self.fail('struct nesting', self.pos)
         return self.block(self.schema(name), name, level + 1, depth + 1)
 
-    @staticmethod
-    def bag_schema(templates: tuple) -> Schema:
-        return Schema.of(templates)
+    def bag_schema(self, templates: tuple) -> Schema:
+        """A property bag's schema, built fresh with this reader's checkpoint: never shared, unlike a reflected
+        struct's cached schema."""
+        return Schema.of(templates, self)
 
     def read(self, data: bytes, schema: Schema, flags: int, partial: bool) -> tuple:
         """(properties, native, native_size, guid, complete, problem) of the export's bytes `data`, whose class has `schema`."""
@@ -627,9 +647,10 @@ class PropertyReader:
                                   'Object property for RowStruct', 'no RowStruct property', self.pos, class_name='DataTable')
 
     def _row_struct_unsupported(self):
+        # {class} and class_name are the export's own class here: a DataTable subclass names itself. _attrs()
+        # already defaults class_name to self.cls with no path step.
         attrs = self._attrs(self.pos, None)
-        attrs['class_name'] = 'DataTable'
-        raise UnsupportedAssetError(f'{self.package}.{self.export}: the rows of this DataTable cannot be read, because its '
+        raise UnsupportedAssetError(f'{self.package}.{self.export}: the rows of this {self.cls} cannot be read, because its '
                                     'RowStruct is not serialized', feature='DataTable row struct', **attrs)
 
     def _rows(self, schema: Schema, name: str, n: int) -> MapValue:
@@ -642,19 +663,20 @@ class PropertyReader:
         for k in range(n):
             self.check()
             self.path[-1] = ('row', k)
+            self.row = None  # a failure reading the name itself names no row
             p = self.pos
             row_name = self.fname()
+            self.row = row_name  # a repeat failure names the row it repeats, not the row before it
             if row_name in seen:
                 self.fail('row name repeated', p)
             seen.add(row_name)
-            self.row = row_name
             pairs.append((row_name, self.block(schema, name, 0, 0)))
         self.path.pop()
         self.row = None
         return MapValue(pairs)
 
     def _data_table(self, schema: Schema, properties: StructValue) -> DataTable:
-        """The DataTable value after the object trailer (3.10)."""
+        """The DataTable value after the object trailer."""
         idx = schema.row_struct_index
         if idx is None:
             self._no_row_struct()
@@ -673,7 +695,7 @@ class PropertyReader:
         return DataTable(row_struct, ref, self._rows(self.schema(effective), effective, n))
 
     def _curve_table(self) -> CurveTable:
-        """The CurveTable value after the object trailer (3.10)."""
+        """The CurveTable value after the object trailer."""
         _p, n = self.count(_ROW_UNIT, 'row count')
         mp = self.need(1)
         mode_byte = self.data[mp]

@@ -1084,10 +1084,9 @@ class Installation:
         start, n = header.export_range(i)[0] + offset, min(limit, size - offset)
         return container.read_range(idx, start, n, cache=self._cache, counters=counters, checkpoint=check.blocks(toc, idx, start, n))
 
-    def _import_name(self, ref: ObjectRef, counters, check: '_Check', referrer: tuple) -> str:
-        """The name of the export that package import `ref` names, from its package's cooked header; `referrer` is
-        (package, export path after the package, container) of the export being read."""
-        pkg = ref.package
+    def _import_header(self, pkg: str, counters, check: '_Check', referrer: tuple) -> tuple:
+        """(ZenHeader, Toc) of imported package `pkg`'s cooked header; `referrer` is (package, export path after
+        the package, container) of the export being read."""
         try:
             toc, container, idx = self._locate(pkg)
         except MissingAssetError:
@@ -1096,10 +1095,25 @@ class Installation:
                                     'mounted IoStore containers', package=rpkg, container=rc, export=rexport) from None
         try:
             header, _script = self._read_cooked(toc, container, idx, pkg, counters, check, 'read')
-            return header.exports[_by_hash(header, ref._target, toc.basename)].name
+            return header, toc
         except AssetError as e:
             _annotate(e, pkg, toc.basename)
             raise
+
+    def _import_name(self, ref: ObjectRef, counters, check: '_Check', referrer: tuple) -> str:
+        """The name of the export that package import `ref` names, from its package's cooked header."""
+        header, toc = self._import_header(ref.package, counters, check, referrer)
+        return header.exports[_by_hash(header, ref._target, toc.basename)].name
+
+    def _import_table(self, pkg: str, counters, check: '_Check', referrer: tuple) -> tuple:
+        """(header name, container, {public export hash: name}) of every export of `pkg`, built in one pass over
+        its cooked header, read once per read: bounds the work per imported package, not per distinct import."""
+        header, toc = self._import_header(pkg, counters, check, referrer)
+        table = {}
+        for e in header.exports:
+            if e.public_export_hash and e.public_export_hash not in table:
+                table[e.public_export_hash] = e.name
+        return header.name, toc.basename, table
 
     def _read_export(self, toc: Toc, container: Container, idx: int, header: ZenHeader, infos: '_Infos', i: int, partial: bool,
                      counters, check: '_Check') -> tuple:
@@ -1119,15 +1133,20 @@ class Installation:
             if v >= 0:
                 return _NULL_REF if v == 0 else infos.ref(v - 1) if v <= n_exports else None
             return infos.ref(imports[-v - 1]) if -v <= len(imports) else None
-        named, resolving = {}, [0.0]  # this read's resolved import names; the seconds spent resolving them
+        named, resolving = {}, [0.0]  # this read's {imported package: (header name, container, {hash: name})} tables
 
         def resolve(r: ObjectRef) -> str:
-            if (name := named.get(key := (r.package, r._target))) is None:
+            target_pkg = r.package
+            if (cached := named.get(target_pkg)) is None:
                 t = time.perf_counter()
                 try:
-                    name = named[key] = self._import_name(r, counters, check, (pkg, export, c))
+                    cached = named[target_pkg] = self._import_table(target_pkg, counters, check, (pkg, export, c))
                 finally:
                     resolving[0] += time.perf_counter() - t
+            hname, hcontainer, table = cached
+            if (name := table.get(r._target)) is None:
+                raise MissingAssetError(f'package {hname!r} has no export with the imported public export hash',
+                                        package=hname, container=hcontainer, export=None)
             return name
         reader = PropertyReader(schemas=self._schemas, names=header.names, ref=ref, resolve=resolve, usmap=self._usmap_name,
                                 package=pkg, export=export, container=c, size=size, class_name=class_name, check=check)

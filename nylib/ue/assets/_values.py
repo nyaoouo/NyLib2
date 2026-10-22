@@ -78,11 +78,14 @@ class TextValue:
     data: 'StructValue | None'
 
 
-def _layout(slots: tuple) -> tuple:
-    """((name, first slot position, slot count) per property in slot order, {name: positions in that tuple})."""
+def _layout(slots: tuple, beat=None) -> tuple:
+    """((name, first slot position, slot count) per property in slot order, {name: positions in that tuple});
+    `beat`, when given, is called every 4,096 slots, for a schema large enough to need mid-build checkpoints."""
     props = []
     by_name = {}
     for pos, s in enumerate(slots):
+        if beat is not None and pos and not pos % 4096:
+            beat()
         if s.element and props and props[-1][0] == s.name and slots[props[-1][1]].index == s.index - s.element:
             name, first, n = props[-1]
             props[-1] = (name, first, n + 1)
@@ -365,7 +368,7 @@ class DataTable:
     rows: MapValue
 
 
-_KEY_ARRAY_TYPES = ('Array<Struct<SimpleCurveKey>>', 'Array<Struct<RichCurveKey>>')
+_KEY_ARRAY_BY_MODE = {'SimpleCurves': 'Array<Struct<SimpleCurveKey>>', 'RichCurves': 'Array<Struct<RichCurveKey>>'}
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,7 +384,8 @@ class CurveTable:
             sv = self.rows[row]
         except KeyError:
             raise KeyError('no such row') from None
-        matches = [s for s in sv.slots if s.type in _KEY_ARRAY_TYPES]
+        want = _KEY_ARRAY_BY_MODE.get(self.mode)  # the one key-array type this table's mode admits
+        matches = [s for s in sv.slots if s.type == want]
         if len(matches) != 1:
             pkg, export, container, usmap = (sv._ctx + (None,))[:4]
             raise InvalidMappingError(
