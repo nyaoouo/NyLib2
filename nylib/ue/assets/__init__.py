@@ -1,4 +1,4 @@
-"""Read-only access to a UE 5.7 game's IoStore assets: open_installation, texture metadata and bounded VT region reads.
+"""Read-only access to a UE 5.7 game's IoStore assets: open_installation, texture metadata, bounded region reads and export listings.
 
 The errors import eagerly; every other name loads on first use, so importing this package opens no file and no DLL.
 """
@@ -12,13 +12,15 @@ from ..errors import (
 )
 
 if TYPE_CHECKING:
-    from ._installation import open_installation, Installation, Texture
+    from ._installation import open_installation, Installation, Texture, Exports
     from ._keys import AesKey
     from ._records import ContainerInfo, BuildInfo, PackageInfo, MipInfo, VirtualTextureInfo, TextureInfo, Region, ReadStats
+    from ._values import ExportInfo, ObjectRef, SoftObjectRef
 
 __all__ = [
     'open_installation', 'AesKey', 'Installation', 'Texture', 'ContainerInfo', 'BuildInfo', 'PackageInfo', 'MipInfo',
     'VirtualTextureInfo', 'TextureInfo', 'Region', 'ReadStats',
+    'Exports', 'ExportInfo', 'ObjectRef', 'SoftObjectRef',
     'AssetError', 'InvalidKeyError', 'InvalidMappingError', 'BuildMismatchError', 'MissingAssetError', 'MissingTileError',
     'UnsupportedError', 'UnsupportedContainerError', 'UnsupportedAssetError', 'UnsupportedPixelFormatError',
     'CorruptAssetError', 'RegionOutOfBoundsError', 'ReadCancelledError', 'InstallationClosedError', 'AmbiguousNameError',
@@ -28,6 +30,7 @@ _LAZY = {
     'open_installation': '_installation', 'Installation': '_installation', 'Texture': '_installation', 'AesKey': '_keys',
     'ContainerInfo': '_records', 'BuildInfo': '_records', 'PackageInfo': '_records', 'MipInfo': '_records',
     'VirtualTextureInfo': '_records', 'TextureInfo': '_records', 'Region': '_records', 'ReadStats': '_records',
+    'Exports': '_installation', 'ExportInfo': '_values', 'ObjectRef': '_values', 'SoftObjectRef': '_values',
 }
 
 

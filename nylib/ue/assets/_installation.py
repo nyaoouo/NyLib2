@@ -11,7 +11,7 @@ import threading
 import time
 import warnings
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Literal
 
 from nylib.utils import oodle
@@ -26,8 +26,9 @@ from ._hashes import package_id
 from ._iostore import Container, Toc, check_key, iter_directory_index, read_directory_index
 from ._keys import AesKey, _check_path
 from ._records import BuildInfo, ContainerInfo, PackageInfo, ReadStats, Region, _Counters
-from ._zen import MAX_PACKAGE_CHUNK, Reader, ScriptObjects, ZenHeader, _SUMMARY_SIZE, _load_name_batch, _local_name, \
-    check_package_chunk_size
+from ._values import ExportInfo, ObjectRef, SoftObjectRef
+from ._zen import MAX_PACKAGE_CHUNK, NULL_INDEX, Reader, ScriptObjects, ZenHeader, _INDEX_MASK, _SUMMARY_SIZE, _load_name_batch, \
+    _local_name, check_package_chunk_size
 
 _log = logging.getLogger('nylib.ue.assets')
 
@@ -47,6 +48,12 @@ _NAME_FORMS = 'a package name, an object path, or an Engine/Content or <project>
 _MAX_PATH = 1024  # UE's name length limit; longer directory-index paths are not listed
 _BAD_PATH_CHAR = re.compile('[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]')  # a lone surrogate is an undecodable index byte
 _GLOBAL = 'global.utoc'
+_COLON = f'name must be {_NAME_FORMS}; a colon may appear only in the export part of an object path'
+_MAX_HEADER = 64 << 20  # a cooked header (HeaderSize) is read only up to this many bytes
+_MAX_RAW = 64 << 20  # the largest raw() limit
+_CHECK_EVERY = 4096  # export-map entries between two checkpoints while building an Exports
+_REF_KINDS = ('null', 'export', 'import', 'script')
+_NULL_REF = ObjectRef('null', None, None, None)
 
 
 def _lower(s: str) -> str:
@@ -97,6 +104,145 @@ def _annotate(e: AssetError, package, container) -> None:
 def _script_error(e: CorruptAssetError, container: str) -> CorruptAssetError:
     """`e` from the global ScriptObjects chunk, re-located at that chunk."""
     return CorruptAssetError(f'{container} chunk {0:016x} (ScriptObjects): {e.detail}', container=container, detail=e.detail)
+
+
+def _cancel_arg(cancel) -> None:
+    if cancel is not None and not callable(cancel):
+        raise TypeError(f'cancel must be callable or None, got {type(cancel).__name__}')
+
+
+def _raw_args(offset, limit) -> tuple:
+    offset, limit = _int_arg(offset, 'offset'), _int_arg(limit, 'limit')
+    if offset < 0:
+        raise ValueError('offset must be >= 0')
+    if not 0 <= limit <= _MAX_RAW:
+        raise ValueError(f'limit must be in 0..{_MAX_RAW}')
+    return offset, limit
+
+
+def _check_export_part(export: str) -> None:
+    """Raise ValueError unless `export` is an export name or a sub-object path 'Top:Child. ... .Child'."""
+    top, sep, rest = export.partition(':')
+    if not top or '.' in top or (sep and not all(p and ':' not in p for p in rest.split('.'))):
+        raise ValueError('the export part of an object path must be a name, or a sub-object path Top:Child.Child, '
+                         'with no empty part')
+
+
+def _first8(items) -> str:
+    return ', '.join(items[:8]) + (', ...' if len(items) > 8 else '')
+
+
+def _matches(header: ZenHeader, export: str) -> list:
+    """The indexes of the exports of `header` that `export`, a name or a sub-object path, matches."""
+    if ':' in export:
+        want = _lower(f'{header.name}.{export}')
+        return [i for i, p in enumerate(header.paths()) if _lower(p) == want]
+    want = _lower(export)
+    return [i for i, e in enumerate(header.exports) if _lower(e.name) == want]
+
+
+def _find(header: ZenHeader, export: str) -> int:
+    """The index of the one export of `header` that `export`, a name or a sub-object path, matches."""
+    return _one(header, _matches(header, export), export)
+
+
+def _one(header: ZenHeader, found: list, export: str) -> int:
+    pkg = header.name
+    if not found:
+        raise MissingAssetError(f'package {pkg!r} has no export {export!r}', package=pkg, export=export)
+    if len(found) > 1:
+        paths = tuple(header.paths()[i] for i in found)
+        raise AmbiguousNameError(f'package {pkg!r} has {len(paths)} exports named {export!r}: {_first8(paths)}',
+                                 package=pkg, export=export, exports=paths)
+    return found[0]
+
+
+def _main_asset(header: ZenHeader) -> int:
+    """The index of the package's top-level export named like the package's last segment."""
+    last = header.name.rsplit('/', 1)[-1]
+    want = _lower(last)
+    return _one(header, [i for i, e in enumerate(header.exports) if e.outer == NULL_INDEX and _lower(e.name) == want], last)
+
+
+def _by_path(header: ZenHeader, path: str) -> int:
+    want = _lower(path)
+    if (i := next((i for i, p in enumerate(header.paths()) if _lower(p) == want), None)) is None:
+        raise MissingAssetError(f'package {header.name!r} has no export {path!r}', package=header.name, export=path)
+    return i
+
+
+def _by_hash(header: ZenHeader, target: int, container: str) -> int:
+    if (i := next((i for i, e in enumerate(header.exports) if e.public_export_hash and e.public_export_hash == target),
+                  None)) is None:
+        raise MissingAssetError(f'package {header.name!r} has no export with the imported public export hash',
+                                package=header.name, container=container, export=None)
+    return i
+
+
+class _Check:
+    """One call's closed and cancel checkpoint; `k` of `n` counts the blocks of the range being read."""
+    __slots__ = ('_inst', '_cancel', '_what', 'k', 'n')
+
+    def __init__(self, inst: 'Installation', cancel, what: str):
+        self._inst = inst
+        self._cancel = cancel
+        self._what = what
+        self.k = self.n = 0
+
+    def __call__(self) -> None:
+        if self._inst._closed:
+            raise InstallationClosedError(_CLOSED)
+        if self._cancel is not None and self._cancel():
+            raise ReadCancelledError(f'{self._what} cancelled after {self.k} of {self.n} blocks')
+
+    def blocks(self, toc: Toc, idx: int, offset: int, length: int):
+        """The per-block checkpoint for reading [offset, offset + length) of chunk `idx`."""
+        start = toc.chunk_range(idx)[0] + offset
+        self.k = 0
+        self.n = (start + length - 1) // toc.block_size - start // toc.block_size + 1 if length else 0
+
+        def block() -> None:
+            self()
+            self.k += 1
+        return block
+
+
+class _Infos:
+    """The ExportInfo records of one cooked header; ObjectRefs are interned per instance."""
+
+    def __init__(self, header: ZenHeader, script: tuple, container: str):
+        self._header = header
+        self._table, _t2d, self._script_container = script
+        self._container = container
+        self._paths = header.paths()
+        self._refs = {NULL_INDEX: _NULL_REF}
+
+    def ref(self, v: int) -> ObjectRef:
+        """The ObjectRef of FPackageObjectIndex `v`, which the header parse has checked."""
+        if (r := self._refs.get(v)) is None:
+            h = self._header
+            kind = v >> 62
+            if kind == 0:
+                r = ObjectRef('export', h.name, h.exports[v].name, self._paths[v])
+            elif kind == 1:
+                try:
+                    r = ObjectRef('script', *self._table.ref_parts(v))
+                except CorruptAssetError as e:
+                    raise _script_error(e, self._script_container) from None
+            else:
+                r = ObjectRef('import', h.imported_packages[(v & _INDEX_MASK) >> 32], None, None, h.imported_hashes[v & 0xFFFFFFFF])
+            self._refs[v] = r
+        return r
+
+    def info(self, i: int) -> ExportInfo:
+        h = self._header
+        e = h.exports[i]
+        cls = self.ref(e.cls)
+        return ExportInfo(package=h.name, name=e.name, path=self._paths[i], index=i,
+                          class_name=cls.name if cls.kind in ('script', 'export') else None, class_ref=cls,
+                          super_ref=self.ref(e.super), template_ref=self.ref(e.template),
+                          outer=None if e.outer == NULL_INDEX else e.outer, flags=e.object_flags, size=e.size,
+                          container=self._container)
 
 
 def _asset_package(path: str, project: str | None) -> str | None:
@@ -510,22 +656,28 @@ class Installation:
     # ---- names and lookup --------------------------------------------------------------------------------------
 
     def _parse_name(self, name) -> tuple:
-        """(package name, export name or None) of a package name, object path or asset path."""
+        """(package name, export part or None) of a package name, object path or asset path; the export part is a name
+        or a sub-object path 'Top:Child.Child'."""
         if not isinstance(name, str):
             raise TypeError(f'name must be a str, got {type(name).__name__}')
-        if not name or '\\' in name or ':' in name or '//' in name or name.endswith('/'):
-            raise ValueError(f'name must be {_NAME_FORMS}, without a backslash, colon, empty segment or trailing /')
+        if not name or '\\' in name or '//' in name or name.endswith('/'):
+            raise ValueError(f'name must be {_NAME_FORMS}, without a backslash, empty segment or trailing /')
         if name.startswith('/'):
             if _lower(name).endswith(('.uasset', '.umap')):
+                if ':' in name:
+                    raise ValueError(_COLON)
                 return name[:name.rindex('.')], None
             last = name.rsplit('/', 1)[1]
-            if '.' not in last:
-                return name, None
-            dot = len(name) - len(last) + last.index('.')
-            export = name[dot + 1:]
-            if not export or '.' in export:
-                raise ValueError('the export part of an object path must be non-empty and contain no "."')
-            return name[:dot], export
+            if '.' in last:
+                dot = len(name) - len(last) + last.index('.')
+                if ':' in name[:dot]:
+                    raise ValueError(_COLON)
+                _check_export_part(export := name[dot + 1:])
+                return name[:dot], export
+        if ':' in name:
+            raise ValueError(_COLON)
+        if name.startswith('/'):
+            return name, None
         if (pkg := _asset_package(name, self._project)) is not None:
             return pkg, None
         raise ValueError(f'name must be {_NAME_FORMS}; an asset-file path under a plugin root is not accepted, use the '
@@ -717,18 +869,29 @@ class Installation:
             raise CorruptAssetError(f'{toc.basename} chunk {cid:016x} (ExportBundleData): {e.detail}',
                                     container=toc.basename, detail=e.detail) from None
 
-    def _script_objects(self, counters) -> tuple:
-        """(ScriptObjects, the Texture2D global index or None, its container), loaded once from global.utoc."""
-        with self._script_lock:
-            if self._script is None:
-                self._script = self._load_script_objects(counters)
-            return self._script
+    def _script_objects(self, counters, *how) -> tuple:
+        """(ScriptObjects, the Texture2D global index or None, its container), loaded once from global.utoc.
 
-    def _load_script_objects(self, counters) -> tuple:
+        `how` is (public method name, _Check) for a method other than texture(); while another call loads the table,
+        that _Check keeps being called.
+        """
+        if not how:
+            self._script_lock.acquire()
+        else:
+            while not self._script_lock.acquire(timeout=0.05):
+                how[1]()
+        try:
+            if self._script is None:
+                self._script = self._load_script_objects(counters, *how)
+            return self._script
+        finally:
+            self._script_lock.release()
+
+    def _load_script_objects(self, counters, method: str = 'texture', check: '_Check | None' = None) -> tuple:
         found = next(((toc, container) for toc, container, _aes in self._mounted if _lower(toc.basename) == _GLOBAL), None)
         idx = None if found is None else found[0].find(0, 0, _SCRIPT_OBJECTS)
         if idx is None:
-            raise UnsupportedContainerError('no mounted container holds the global ScriptObjects chunk, which texture() needs',
+            raise UnsupportedContainerError(f'no mounted container holds the global ScriptObjects chunk, which {method}() needs',
                                             feature='global ScriptObjects', container=_GLOBAL if found is None else found[0].basename)
         toc, container = found
         try:
@@ -736,7 +899,8 @@ class Installation:
             if length > MAX_PACKAGE_CHUNK:
                 detail = f'ScriptObjects chunk of {length} bytes exceeds the {MAX_PACKAGE_CHUNK}-byte limit'
                 raise CorruptAssetError(f'{toc.basename} chunk {0:016x} (ScriptObjects): {detail}', detail=detail)
-            data = container.read_range(idx, 0, length, counters=counters, checkpoint=self._check_open)
+            data = container.read_range(idx, 0, length, counters=counters,
+                                        checkpoint=self._check_open if check is None else check.blocks(toc, idx, 0, length))
             try:
                 script = ScriptObjects(data)
                 texture2d = script.index_of('/Script/Engine.Texture2D')
@@ -763,17 +927,20 @@ class Installation:
                 raise
         exports = header.exports
         if export is not None:
-            want = _lower(export)
-            i = next((i for i, e in enumerate(exports) if _lower(e.name) == want), None)
-            if i is None:
+            if not (matches := _matches(header, export)):
                 raise MissingAssetError(f'package {pkg!r} has no export {export!r}', package=pkg, export=export)
-            e = exports[i]
-            if e.cls != texture2d:
-                cls = class_name(e.cls)
-                what = f'a {cls}' if cls is not None else 'of a class from another package'
-                raise UnsupportedAssetError(f'export {export!r} of package {pkg!r} is {what}, not a Texture2D',
-                                            feature='class', exports=((e.name, cls),))
-            return i
+            textures = [i for i in matches if exports[i].cls == texture2d]
+            if len(textures) == 1:
+                return textures[0]
+            if textures:
+                paths = tuple(header.paths()[i] for i in textures)
+                raise AmbiguousNameError(f'package {pkg!r} has {len(paths)} Texture2D exports named {export!r}: {_first8(paths)}',
+                                         package=pkg, export=export, exports=paths)
+            e = exports[matches[0]]
+            cls = class_name(e.cls)
+            what = f'a {cls}' if cls is not None else 'of a class from another package'
+            raise UnsupportedAssetError(f'export {export!r} of package {pkg!r} is {what}, not a Texture2D',
+                                        feature='class', exports=((e.name, cls),))
         found = [i for i, e in enumerate(exports) if e.cls == texture2d]
         if len(found) == 1:
             return found[0]
@@ -808,12 +975,299 @@ class Installation:
             mi = next(i for i, m in enumerate(self._mounted) if m[1] is container)  # inside the operation: not yet released
         return Texture._new(self, info, layout, unreadable, mi, c, idx, bulk)
 
+    def _read_cooked(self, toc: Toc, container: Container, idx: int, pkg: str, counters, check: '_Check', method: str) -> tuple:
+        """(ZenHeader, ScriptObjects tuple) of the package in chunk `idx`, from its cooked header alone."""
+        script = self._script_objects(counters, method, check)
+        c = toc.basename
+        cid = toc.chunk_fields(idx)[0]
+        length = toc.chunk_range(idx)[1]
+
+        def corrupt(detail: str) -> CorruptAssetError:
+            return CorruptAssetError(f'{c} chunk {cid:016x} (ExportBundleData): {detail}', container=c, detail=detail)
+
+        n = min(_NAMES_START, length)
+        head = container.read_range(idx, 0, n, cache=self._cache, counters=counters, checkpoint=check.blocks(toc, idx, 0, n))
+        if len(head) < _NAMES_START:
+            raise corrupt(f'the package summary needs {_NAMES_START} bytes, the chunk has {len(head)}')
+        has_versioning, header_size = struct.unpack_from('<II', head)
+        if has_versioning:
+            raise UnsupportedAssetError('a versioned zen package is not supported by this nylib version',
+                                        feature='versioned zen package')
+        if not _NAMES_START <= header_size <= length:
+            raise corrupt(f'the header size {header_size} is outside the {length}-byte chunk')
+        if header_size > _MAX_HEADER:
+            detail = f'the cooked header of {header_size} bytes exceeds the {_MAX_HEADER}-byte limit'
+            raise CorruptAssetError(f'{pkg}: {detail}', package=pkg, container=c, detail=detail)
+        data = container.read_range(idx, 0, header_size, cache=self._cache, counters=counters,
+                                    checkpoint=check.blocks(toc, idx, 0, header_size))
+        try:
+            header = ZenHeader(data, length)
+        except CorruptAssetError as e:
+            if e.package is not None:
+                raise
+            raise corrupt(e.detail) from None
+        del data
+        table = script[0]
+        for what, v in (*((f'import {i}', v) for i, v in enumerate(header.imports)),
+                        *((f'export {i}', v) for i, e in enumerate(header.exports) for v in (e.cls, e.super, e.template))):
+            if v != NULL_INDEX and v >> 62 == 1 and not table.has(v):
+                detail = f'{what} names the script object {v:#x}, which the global ScriptObjects table does not hold'
+                raise CorruptAssetError(f'{header.name}: {detail}', package=header.name, detail=detail)
+        return header, script
+
+    def _plan(self, target) -> tuple:
+        """(lookup, package, key) of a read, raw or resolve target that `_shown()` accepted; no I/O."""
+        if isinstance(target, str):
+            pkg, export = self._parse_name(target)
+            return ('main', pkg, None) if export is None else ('name', pkg, export)
+        if isinstance(target, ExportInfo):
+            return 'path', self._record_package(target.package), _record_str(target.path)
+        if isinstance(target, ObjectRef):
+            kind = target.kind
+            if not isinstance(kind, str) or kind not in _REF_KINDS:
+                raise ValueError(f'an ObjectRef kind must be one of {_REF_KINDS}')
+            if kind == 'null':
+                raise ValueError('a null ObjectRef has no target')
+            if kind == 'script':
+                raise ValueError('a script object has no cooked export')
+            pkg = self._record_package(target.package)
+            if kind == 'export':
+                return 'path', pkg, _record_str(target.path)
+            if type(target._target) is not int:
+                raise ValueError('an import ObjectRef must hold an int target hash')
+            return 'hash', pkg, target._target
+        package, asset, subpath, path = (_record_str(v) for v in (target.package, target.asset, target.subpath, target.path))
+        if path == '':
+            raise ValueError('an empty SoftObjectRef has no target')
+        if _lower(package).startswith('/script/'):
+            raise ValueError('a script object has no cooked export')
+        if asset == '' and subpath:
+            raise ValueError('a SoftObjectRef with a sub-path must name an asset')
+        pkg = self._record_package(package)
+        return ('main', pkg, None) if asset == '' else ('path', pkg, path)
+
+    def _record_package(self, package) -> str:
+        pkg, export = self._parse_name(_record_str(package))
+        if export is not None:
+            raise ValueError("a record's package must be a package name, not an object path")
+        return pkg
+
+    def _select(self, plan: tuple, counters, check: '_Check', method: str) -> tuple:
+        """(toc, container, TOC index, ZenHeader, ScriptObjects tuple, export index) of a `_plan()` result."""
+        lookup, pkg, key = plan
+        c = None
+        try:
+            toc, container, idx = self._locate(pkg)
+            c = toc.basename
+            header, script = self._read_cooked(toc, container, idx, pkg, counters, check, method)
+            if lookup == 'name':
+                i = _find(header, key)
+            elif lookup == 'main':
+                i = _main_asset(header)
+            elif lookup == 'path':
+                i = _by_path(header, key)
+            else:
+                i = _by_hash(header, key, c)
+        except AssetError as e:
+            _annotate(e, pkg, c)
+            raise
+        return toc, container, idx, header, script, i
+
+    def _raw_range(self, toc: Toc, container: Container, idx: int, header: ZenHeader, i: int, offset: int, limit: int,
+                   counters, check: '_Check') -> bytes:
+        size = header.exports[i].size
+        if offset > size:
+            raise ValueError(f'offset {offset} is past the end of the {size}-byte export')
+        start, n = header.export_range(i)[0] + offset, min(limit, size - offset)
+        return container.read_range(idx, start, n, cache=self._cache, counters=counters, checkpoint=check.blocks(toc, idx, start, n))
+
+    def exports(self, name: str, *, cancel: Callable[[], bool] | None = None) -> 'Exports':
+        """The package's exports, from its cooked header alone; the name's export part is ignored."""
+        pkg, _export = self._parse_name(name)
+        _cancel_arg(cancel)
+        with self._op() as op:
+            c = None
+            try:
+                toc, container, idx = self._locate(pkg)
+                c = toc.basename
+                check = _Check(self, cancel, f'listing exports of {pkg}')
+                check()
+                header, script = self._read_cooked(toc, container, idx, pkg, op.counters, check, 'exports')
+                build = _Infos(header, script, c)
+                infos = []
+                for i in range(len(header.exports)):
+                    if i and not i % _CHECK_EVERY:
+                        check()
+                    infos.append(build.info(i))
+                cid = toc.chunk_fields(idx)[0]
+                package = PackageInfo(name=header.name, container=c, size=toc.chunk_range(idx)[1],
+                                      bulk_size=self._bulk_size(toc, cid), package_id=cid)
+            except AssetError as e:
+                _annotate(e, pkg, c)
+                raise
+            mi = next(i for i, m in enumerate(self._mounted) if m[1] is container)  # inside the operation: not yet released
+            op.finish()
+            stats = op.counters.snapshot()
+        return Exports._new(self, package, stats, tuple(infos), header, mi, idx)
+
+    def resolve(self, ref: 'ObjectRef | SoftObjectRef', *, cancel: Callable[[], bool] | None = None) -> ExportInfo:
+        """The ExportInfo that `ref` points at, from the target package's cooked header; reads no export data."""
+        if not isinstance(ref, (ObjectRef, SoftObjectRef)):
+            raise TypeError(f'ref must be an ObjectRef or SoftObjectRef, got {type(ref).__name__}')
+        _cancel_arg(cancel)
+        shown = _shown(ref)
+        with self._op() as op:
+            check = _Check(self, cancel, f'read of {shown!r}')
+            check()
+            toc, _container, _idx, header, script, i = self._select(self._plan(ref), op.counters, check, 'resolve')
+            try:
+                return _Infos(header, script, toc.basename).info(i)
+            except AssetError as e:
+                _annotate(e, header.name, toc.basename)
+                raise
+
+    def raw(self, target: 'str | ExportInfo | ObjectRef | SoftObjectRef', *, offset: int = 0, limit: int,
+            cancel: Callable[[], bool] | None = None) -> bytes:
+        """Bytes [offset, offset + limit) of an export's data, cut at its end; reads only the blocks they touch."""
+        offset, limit = _raw_args(offset, limit)
+        _cancel_arg(cancel)
+        shown = _shown(target)
+        with self._op(reads=1) as op:
+            check = _Check(self, cancel, f'read of {shown!r}')
+            check()
+            toc, container, idx, header, _script, i = self._select(self._plan(target), op.counters, check, 'raw')
+            try:
+                return self._raw_range(toc, container, idx, header, i, offset, limit, op.counters, check)
+            except AssetError as e:
+                _annotate(e, header.name, toc.basename)
+                raise
+
     def stats(self) -> ReadStats:
         """The totals since open: open itself and every operation that has ended."""
         with self._state:
             if self._closed:
                 raise InstallationClosedError(_CLOSED)
             return self._totals.snapshot()
+
+
+def _shown(target):
+    """The target as a cancel message shows it; TypeError for a type that is not a target. No other check."""
+    if isinstance(target, str):
+        return target
+    if isinstance(target, (ExportInfo, SoftObjectRef)):
+        return target.path
+    if isinstance(target, ObjectRef):
+        return target.package if target.kind == 'import' else target.path
+    raise TypeError(f'target must be a str, ExportInfo, ObjectRef or SoftObjectRef, got {type(target).__name__}')
+
+
+def _record_str(value) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f'a record field read as a target must be a str, got {type(value).__name__}')
+    return value
+
+
+class Exports(Sequence):
+    """The exports of one package, in export-map order, from its cooked header; it keeps its installation alive."""
+
+    def __new__(cls, *args, **kwargs):
+        raise TypeError('Exports cannot be constructed directly: call Installation.exports()')
+
+    @classmethod
+    def _new(cls, inst: Installation, package: PackageInfo, stats: ReadStats, infos: tuple, header: ZenHeader, mi: int,
+             idx: int) -> 'Exports':
+        self = object.__new__(cls)
+        self._inst = inst
+        self._package = package
+        self._stats = stats
+        self._infos = infos
+        self._header = header
+        self._mi = mi  # an index into inst._mounted, so that after close() no Container or Toc stays reachable
+        self._idx = idx
+        return self
+
+    package = property(lambda self: self._package)
+    stats = property(lambda self: self._stats)
+
+    def __len__(self) -> int:
+        return len(self._infos)
+
+    def __getitem__(self, i):
+        return self._infos[i]
+
+    def __iter__(self):
+        return iter(self._infos)
+
+    def __reversed__(self):
+        return reversed(self._infos)
+
+    def __contains__(self, value) -> bool:
+        return value in self._infos
+
+    def index(self, value, *args) -> int:
+        return self._infos.index(value, *args)
+
+    def count(self, value) -> int:
+        return self._infos.count(value)
+
+    def __repr__(self) -> str:
+        return f'<Exports {self._package.name} in {self._package.container}: {len(self._infos)} exports>'
+
+    def __reduce_ex__(self, protocol):
+        raise TypeError('Exports cannot be pickled: call open_installation in the other process')
+
+    def __getstate__(self):
+        raise TypeError('Exports cannot be pickled: call open_installation in the other process')
+
+    def find(self, name: str) -> ExportInfo:
+        """The one export that `name`, an export name or a sub-object path 'Top:Child.Child', matches; no I/O."""
+        return self._infos[self._find(name)]
+
+    def _find(self, name) -> int:
+        if not isinstance(name, str):
+            raise TypeError(f'name must be a str, got {type(name).__name__}')
+        _check_export_part(name)
+        try:
+            return _find(self._header, name)
+        except MissingAssetError as e:
+            _annotate(e, self._package.name, self._package.container)
+            raise
+
+    def _which(self, which) -> int:
+        """The export index that `which` (an index, an export part or one of this handle's ExportInfo) selects."""
+        if isinstance(which, ExportInfo):
+            i = which.index
+            if type(i) is not int or not 0 <= i < len(self._infos) or self._infos[i] != which:
+                raise ValueError('the ExportInfo is not an export of this handle')
+            return i
+        if isinstance(which, str):
+            return self._find(which)
+        try:
+            i = _int_arg(which, 'which')
+        except TypeError:
+            raise TypeError(f'which must be an int, str or ExportInfo, got {type(which).__name__}') from None
+        n = len(self._infos)
+        if not -n <= i < n:
+            raise IndexError('export index out of range')
+        return i % n
+
+    def raw(self, which: 'int | str | ExportInfo', *, offset: int = 0, limit: int,
+            cancel: Callable[[], bool] | None = None) -> bytes:
+        """Bytes [offset, offset + limit) of the selected export's data, cut at its end; reads only the blocks they touch."""
+        i = self._which(which)
+        offset, limit = _raw_args(offset, limit)
+        _cancel_arg(cancel)
+        inst = self._inst
+        info = self._infos[i]
+        with inst._op(reads=1) as op:
+            try:
+                check = _Check(inst, cancel, f'read of {info.path!r}')
+                check()
+                toc, container, _aes = inst._mounted[self._mi]
+                return inst._raw_range(toc, container, self._idx, self._header, i, offset, limit, op.counters, check)
+            except AssetError as e:
+                _annotate(e, self._package.name, self._package.container)
+                raise
 
 
 def _rect(info, mip: int, x: int, y: int, width: int, height: int, clip: bool) -> tuple:
