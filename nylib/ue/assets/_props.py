@@ -1,4 +1,5 @@
 """The typed reader of unversioned export properties: slots over a struct's super chain, values by kind, partial results."""
+import contextlib
 import string
 import struct
 import threading
@@ -13,12 +14,13 @@ _MAX_DEPTH = 64  # value depth: struct levels plus container steps
 _BUDGET = 65536  # decode units one read may spend beyond its export's size
 _MAX_SLOTS = 1 << 16  # schema slots one unversioned header may describe
 _MAX_ZERO_SIZE_COUNT = 65536  # elements of a container whose element type can take 0 bytes
-_CHECK_EVERY = 4096  # decoded values between two checkpoints
+_CHECK_EVERY = 4096  # decoded values, built slots or payloads between two checkpoints
 _CDO = 0x10  # RF_ClassDefaultObject: no object trailer
 _NULL_REF = ObjectRef('null', None, None, None)
 _ZERO_TEXT = TextValue('None', None, None, None, None, None)
 _EMPTY_MAP = MapValue()
 _PROBLEMS = (InvalidMappingError, UnsupportedAssetError)
+_NO_LOCK = contextlib.nullcontext()  # the lock of a per-read schema, which no other thread sees
 _LABELS = {
     0: 'Byte', 1: 'Bool', 2: 'Int', 3: 'Float', 4: 'Object', 5: 'Name', 6: 'Delegate', 7: 'Double', 10: 'Str', 11: 'Text',
     12: 'Interface', 13: 'MulticastDelegate', 14: 'WeakObject', 15: 'LazyObject', 16: 'AssetObject', 17: 'SoftObject',
@@ -101,7 +103,17 @@ class Schema:
                         local[i] = (base + i, e, rec.name, p.name, label, p.type)
             templates.extend(local[i] for i in sorted(local))
             base += rec.property_count
-        self.templates = tuple(templates)
+        self._build(tuple(templates), lock)
+
+    @classmethod
+    def of(cls, templates: tuple) -> 'Schema':
+        """The schema of slot `templates` in index order, such as a property bag's descriptors."""
+        self = object.__new__(cls)
+        self._build(templates, _NO_LOCK)
+        return self
+
+    def _build(self, templates: tuple, lock) -> None:
+        self.templates = templates
         self.where = {t[0]: pos for pos, t in enumerate(templates)}
         self.absent = tuple(Slot(i, owner, name, label, 'absent', None, e) for i, e, owner, name, label, _t in templates)
         self.zero = tuple(Slot(i, owner, name, label, 'zero', None, e) for i, e, owner, name, label, _t in templates)
@@ -197,13 +209,15 @@ def _render(path: list, cls: str) -> str:
 
 class PropertyReader:
     """Reads one export's unversioned property block and object trailer; `ref(v)` maps an FPackageIndex to an ObjectRef,
-    or None when `v` is outside the export and import maps; `check()` is the closed and cancel checkpoint."""
+    or None when `v` is outside the export and import maps; `resolve(ref)` names the export a package import ref names;
+    `check()` is the closed and cancel checkpoint."""
 
-    def __init__(self, *, schemas: Schemas, names: tuple, ref, usmap: str, package: str, export: str, container: str,
+    def __init__(self, *, schemas: Schemas, names: tuple, ref, resolve, usmap: str, package: str, export: str, container: str,
                  size: int, class_name: str, check):
         self.schemas = schemas
         self.names = names
         self.ref = ref
+        self.resolve = resolve
         self.usmap = usmap
         self.package = package
         self.export = export
@@ -217,11 +231,14 @@ class PropertyReader:
         self.row = None
         self.n = 0
         self.units = 0  # decode units spent: decoded values and built slots
+        self.slots = 0  # slots built, for their checkpoint
+        self.payloads = 0  # InstancedStruct-family payloads read after their type items, for their checkpoint
         self.budget = size + _BUDGET
         self.data = b''
         self.pos = self.end = 0
         self._zeros = {}  # struct name -> (zero value, nesting depth below it)
         self._empty = {}  # fieldless native name -> its one value
+        self._resolving = None  # the error of naming a package import, which partial=True still raises
 
     # ---- failures -----------------------------------------------------------------------------------------------
 
@@ -284,6 +301,19 @@ class PropertyReader:
         if not self.n % _CHECK_EVERY:
             self.check()
         self.spend(1, self.pos)
+
+    def built(self, n: int) -> None:
+        """`n` more slots built: the checkpoint every 4,096 built slots, which costs no decode unit."""
+        k = self.slots // _CHECK_EVERY
+        self.slots += n
+        for _ in range(self.slots // _CHECK_EVERY - k):
+            self.check()
+
+    def payload(self) -> None:
+        """One InstancedStruct-family payload read after its type items: the checkpoint every 4,096, which costs no decode unit."""
+        self.payloads += 1
+        if not self.payloads % _CHECK_EVERY:
+            self.check()
 
     def spend(self, units: int, pos: int) -> None:
         """Charge `units` decode units for the value or block that begins at `pos`; past the budget, the walk failure."""
@@ -375,6 +405,16 @@ class PropertyReader:
         asset = '' if asset == 'None' else asset
         path = '' if not package else package if not asset else f'{package}.{asset}' + (f':{sub}' if sub else '')
         return SoftObjectRef(package, asset, sub, path)
+
+    def named(self, ref: ObjectRef) -> str:
+        """The name of the struct a non-null ObjectRef names; a package import's is read from its package's cooked header."""
+        if ref.kind != 'import':
+            return ref.name
+        try:
+            return self.resolve(ref)
+        except _PROBLEMS as e:
+            self._resolving = e
+            raise
 
     def nat(self, name: str, fields: tuple) -> StructValue:
         """A native StructValue of `fields`, each (name, label, position, value)."""
@@ -473,31 +513,51 @@ class PropertyReader:
             self.native = native
             return StructValue._new(name, False, schema.absent, schema.nones, self.ctx, None, schema.layout)
         self.spend(len(schema.templates), start)
+        self.built(max(0, len(schema.templates) - total))
         slots, values = list(schema.absent), list(schema.nones)
         for index, nonzero in self._header_entries(frags, mask):
+            self.slots += 1
+            if not self.slots % _CHECK_EVERY:
+                self.check()
             pos, slot, value = self._entry(schema, name, index, nonzero, level, depth)
             slots[pos], values[pos] = slot, value
         self.native = native
         return StructValue._new(name, False, tuple(slots), tuple(values), self.ctx, None, schema.layout)
+
+    def reflected(self, name: str, level: int, depth: int) -> StructValue:
+        """The reflected block of struct `name` that a native's layout names, one level below `level` and one deeper than `depth`."""
+        if depth >= _MAX_DEPTH:
+            self.fail('value nesting', self.pos)
+        if level >= _MAX_LEVEL:
+            self.fail('struct nesting', self.pos)
+        return self.block(self.schema(name), name, level + 1, depth + 1)
+
+    @staticmethod
+    def bag_schema(templates: tuple) -> Schema:
+        return Schema.of(templates)
 
     def read(self, data: bytes, schema: Schema, flags: int, partial: bool) -> tuple:
         """(properties, native_size, guid, complete, problem) of the export's bytes `data`, whose class has `schema`."""
         self.data, self.pos, self.end = data, 0, len(data)
         name = self.cls
         try:
-            frags, mask, _total = self._header_frags()
+            frags, mask, total = self._header_frags()
             self.spend(len(schema.templates), 0)
         except _PROBLEMS as e:
             if not partial:
                 raise
             _kept(e)
             return StructValue._new(name, False, schema.unread, schema.nones, self.ctx, e, schema.layout), 0, None, False, e
+        self.built(max(0, len(schema.templates) - total))
         slots, values = list(schema.absent), list(schema.nones)
         for k, (index, nonzero) in enumerate(self._header_entries(frags, mask)):
+            self.slots += 1
+            if not self.slots % _CHECK_EVERY:
+                self.check()
             try:
                 pos, slot, value = self._entry(schema, name, index, nonzero, 0, 0)
             except _PROBLEMS as e:
-                if not partial:
+                if not partial or e is self._resolving:
                     raise
                 for later, _nz in self._header_entries(frags, mask, skip=k):
                     if (p := schema.where.get(later)) is not None:
@@ -681,7 +741,7 @@ class PropertyReader:
             v = fn(self, level + 1, depth + 1)
             self.native = native
             return v
-        if name in _natives.PENDING:
+        if name in _natives.UNSUPPORTED:
             self._unsupported_native(name, pos)
         return self.block(self.schema(name), name, level + 1, depth + 1)
 
@@ -705,11 +765,13 @@ class PropertyReader:
             return self._zero_nat('FieldPath', (('Path', 'Array<Name>', ()), ('Owner', 'Object', _NULL_REF)))
         self._unknown()
 
-    def _zero_struct(self, name, level: int, depth: int) -> tuple:
-        """(the all-zero value of struct `name` one level below `level` and one deeper than `depth`, the levels below it)."""
+    def _zero_struct(self, name, level: int, depth: int, reflected: bool = False) -> tuple:
+        """(the all-zero value of struct `name` one level below `level` and one deeper than `depth`, the levels below it);
+        `reflected` takes the zero of `name`'s reflected block even when `name` is a native."""
         if name is None or name == 'None':
             self._struct_none()
-        if (hit := self._zeros.get(name)) is not None:
+        key = (name,) if reflected and _natives.is_native(name) else name
+        if (hit := self._zeros.get(key)) is not None:
             if depth + 1 + hit[1] > _MAX_DEPTH:
                 self.fail('value nesting', self.pos)
             if level + 1 + hit[1] > _MAX_LEVEL:
@@ -719,15 +781,20 @@ class PropertyReader:
             self.fail('value nesting', self.pos)
         if level >= _MAX_LEVEL:
             self.fail('struct nesting', self.pos)
-        if (v := _natives.zero(name, self.ctx, _NULL_REF)) is not None:
-            hit = (v, 0)
-        elif name in _natives.PENDING:
+        if not reflected and (spec := _natives.FIXED.get(name)) is not None:
+            hit = (spec.zero(self.ctx), 0)
+        elif not reflected and (zero := _natives.ZEROS.get(name)) is not None:
+            hit = zero(self, level + 1, depth + 1)
+        elif not reflected and name in _natives.UNSUPPORTED:
             self._unsupported_native(name, self.pos)
         else:
             schema = self.schema(name)
             self.spend(len(schema.templates), self.pos)
             values, deepest = [], 0
             for index, _e, _owner, pname, label, t in schema.templates:
+                self.slots += 1
+                if not self.slots % _CHECK_EVERY:
+                    self.check()
                 self.path.append((name, index, pname, label))
                 if t.code == 0xFF:
                     self._unknown()
@@ -739,7 +806,7 @@ class PropertyReader:
                 values.append(v)
                 self.path.pop()
             hit = (StructValue._new(name, False, schema.zero, tuple(values), self.ctx, None, schema.layout), deepest)
-        self._zeros[name] = hit
+        self._zeros[key] = hit
         return hit
 
     # ---- FText ----------------------------------------------------------------------------------------------------

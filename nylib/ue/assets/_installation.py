@@ -1119,8 +1119,18 @@ class Installation:
             if v >= 0:
                 return _NULL_REF if v == 0 else infos.ref(v - 1) if v <= n_exports else None
             return infos.ref(imports[-v - 1]) if -v <= len(imports) else None
-        reader = PropertyReader(schemas=self._schemas, names=header.names, ref=ref, usmap=self._usmap_name, package=pkg,
-                                export=export, container=c, size=size, class_name=class_name, check=check)
+        named, resolving = {}, [0.0]  # this read's resolved import names; the seconds spent resolving them
+
+        def resolve(r: ObjectRef) -> str:
+            if (name := named.get(key := (r.package, r._target))) is None:
+                t = time.perf_counter()
+                try:
+                    name = named[key] = self._import_name(r, counters, check, (pkg, export, c))
+                finally:
+                    resolving[0] += time.perf_counter() - t
+            return name
+        reader = PropertyReader(schemas=self._schemas, names=header.names, ref=ref, resolve=resolve, usmap=self._usmap_name,
+                                package=pkg, export=export, container=c, size=size, class_name=class_name, check=check)
         schema = reader.schema(class_name)
         start = header.export_range(i)[0]
         data = container.read_range(idx, start, size, cache=self._cache, counters=counters, checkpoint=check.blocks(toc, idx, start, size))
@@ -1128,7 +1138,7 @@ class Installation:
         try:
             properties, native_size, guid, complete, problem = reader.read(data, schema, info.flags, partial)
         finally:
-            counters.seconds_decode += time.perf_counter() - t0
+            counters.seconds_decode += time.perf_counter() - t0 - resolving[0]
         return info, properties, None, native_size, complete and native_size == 0, guid, complete, problem
 
     def read(self, target: 'str | ExportInfo | ObjectRef | SoftObjectRef', *, partial: bool = False,
