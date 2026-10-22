@@ -155,8 +155,8 @@ class MarshalError(UeError, TypeError):
 
 
 class AssetError(UeError):
-    """Base for every nylib.ue.assets failure except argument-type errors; .package, .container."""
-    _fields = ('package', 'container')
+    """Base for every nylib.ue.assets failure except argument-type errors; .package, .container, .export."""
+    _fields = ('package', 'container', 'export')
 
     def __init__(self, message: str, **details):
         for cls in type(self).__mro__:
@@ -176,7 +176,8 @@ class InvalidKeyError(AssetError):
 
 class InvalidMappingError(AssetError):
     """Raised when the .usmap mapping is missing, invalid, or does not fit the asset data."""
-    _fields = ('usmap', 'class_name', 'property_index', 'property_name', 'reason', 'path')
+    _fields = ('usmap', 'class_name', 'property_index', 'property_name', 'reason', 'path', 'property_path', 'property_type',
+               'position', 'struct_name', 'row')
 
 
 class BuildMismatchError(InvalidMappingError):
@@ -186,7 +187,6 @@ class BuildMismatchError(InvalidMappingError):
 
 class MissingAssetError(AssetError, LookupError):
     """Raised when a package or export is not in any mounted container."""
-    _fields = ('export',)
 
 
 class MissingTileError(MissingAssetError):
@@ -205,7 +205,8 @@ class UnsupportedContainerError(UnsupportedError):
 
 class UnsupportedAssetError(UnsupportedError):
     """Raised for an unsupported asset class or native layout."""
-    _fields = ('exports',)
+    _fields = ('exports', 'class_name', 'property_index', 'property_name', 'property_path', 'property_type', 'position',
+               'struct_name', 'row')
 
 
 class UnsupportedPixelFormatError(UnsupportedError):
@@ -229,3 +230,11 @@ class ReadCancelledError(AssetError):
 
 class InstallationClosedError(AssetError, ValueError):
     """Raised when a method other than close() is called on a closed Installation."""
+
+
+class AbsentPropertyError(AssetError, KeyError):
+    """Raised when a property slot was not serialized, so its value is the archetype's; str() is the message."""
+    _fields = ('class_name', 'property_index', 'property_name')
+
+    def __str__(self) -> str:
+        return str(self.args[0]) if self.args else ''

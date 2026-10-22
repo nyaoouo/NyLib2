@@ -25,8 +25,9 @@ from ._bcrypt import Aes256Ecb
 from ._hashes import package_id
 from ._iostore import Container, Toc, check_key, iter_directory_index, read_directory_index
 from ._keys import AesKey, _check_path
+from ._props import PropertyReader, Schemas
 from ._records import BuildInfo, ContainerInfo, PackageInfo, ReadStats, Region, _Counters
-from ._values import ExportInfo, ObjectRef, SoftObjectRef
+from ._values import Export, ExportInfo, ObjectRef, SoftObjectRef
 from ._zen import MAX_PACKAGE_CHUNK, NULL_INDEX, Reader, ScriptObjects, ZenHeader, _INDEX_MASK, _SUMMARY_SIZE, _load_name_batch, \
     _local_name, check_package_chunk_size
 
@@ -51,6 +52,7 @@ _GLOBAL = 'global.utoc'
 _COLON = f'name must be {_NAME_FORMS}; a colon may appear only in the export part of an object path'
 _MAX_HEADER = 64 << 20  # a cooked header (HeaderSize) is read only up to this many bytes
 _MAX_RAW = 64 << 20  # the largest raw() limit
+_MAX_EXPORT = 64 << 20  # read() decodes exports up to this many bytes
 _CHECK_EVERY = 4096  # export-map entries between two checkpoints while building an Exports
 _REF_KINDS = ('null', 'export', 'import', 'script')
 _NULL_REF = ObjectRef('null', None, None, None)
@@ -531,6 +533,7 @@ class Installation:
         self._containers = containers
         self._usmap_name = usmap_name
         self._mappings = mappings
+        self._schemas = Schemas(mappings)
         self._mounted = tuple((toc, Container(toc, aes), aes) for toc, aes in mounted)
         self._mounted_count = len(mounted)
         self._decryptors = decryptors
@@ -648,7 +651,7 @@ class Installation:
         finally:
             self._mounted = ()
             self._decryptors = ()
-            self._script = self._listing = self._mappings = None
+            self._script = self._listing = self._mappings = self._schemas = None
             with self._state:
                 self._released = True
                 self._state.notify_all()
@@ -1081,6 +1084,74 @@ class Installation:
         start, n = header.export_range(i)[0] + offset, min(limit, size - offset)
         return container.read_range(idx, start, n, cache=self._cache, counters=counters, checkpoint=check.blocks(toc, idx, start, n))
 
+    def _import_name(self, ref: ObjectRef, counters, check: '_Check', referrer: tuple) -> str:
+        """The name of the export that package import `ref` names, from its package's cooked header; `referrer` is
+        (package, export path after the package, container) of the export being read."""
+        pkg = ref.package
+        try:
+            toc, container, idx = self._locate(pkg)
+        except MissingAssetError:
+            rpkg, rexport, rc = referrer
+            raise MissingAssetError(f'{rpkg}.{rexport} references package {pkg!r}, which is not in the {self._mounted_count} '
+                                    'mounted IoStore containers', package=rpkg, container=rc, export=rexport) from None
+        try:
+            header, _script = self._read_cooked(toc, container, idx, pkg, counters, check, 'read')
+            return header.exports[_by_hash(header, ref._target, toc.basename)].name
+        except AssetError as e:
+            _annotate(e, pkg, toc.basename)
+            raise
+
+    def _read_export(self, toc: Toc, container: Container, idx: int, header: ZenHeader, infos: '_Infos', i: int, partial: bool,
+                     counters, check: '_Check') -> tuple:
+        """The fields of the Export of export `i` of `header`, all but its stats."""
+        pkg, c = header.name, toc.basename
+        info = infos.info(i)
+        export = info.path[len(pkg) + 1:]
+        size = info.size
+        if size > _MAX_EXPORT:
+            detail = f'export data of {size} bytes exceeds the {_MAX_EXPORT}-byte limit'
+            raise CorruptAssetError(f'{pkg}.{export}: {detail}', package=pkg, container=c, export=export, detail=detail)
+        cls = info.class_ref
+        class_name = self._import_name(cls, counters, check, (pkg, export, c)) if cls.kind == 'import' else cls.name
+        n_exports, imports = len(header.exports), header.imports
+
+        def ref(v: int):
+            if v >= 0:
+                return _NULL_REF if v == 0 else infos.ref(v - 1) if v <= n_exports else None
+            return infos.ref(imports[-v - 1]) if -v <= len(imports) else None
+        reader = PropertyReader(schemas=self._schemas, names=header.names, ref=ref, usmap=self._usmap_name, package=pkg,
+                                export=export, container=c, size=size, class_name=class_name, check=check)
+        schema = reader.schema(class_name)
+        start = header.export_range(i)[0]
+        data = container.read_range(idx, start, size, cache=self._cache, counters=counters, checkpoint=check.blocks(toc, idx, start, size))
+        t0 = time.perf_counter()
+        try:
+            properties, native_size, guid, complete, problem = reader.read(data, schema, info.flags, partial)
+        finally:
+            counters.seconds_decode += time.perf_counter() - t0
+        return info, properties, None, native_size, complete and native_size == 0, guid, complete, problem
+
+    def read(self, target: 'str | ExportInfo | ObjectRef | SoftObjectRef', *, partial: bool = False,
+             cancel: Callable[[], bool] | None = None) -> Export:
+        """The export's typed properties and object trailer, from its package's cooked header and its own range."""
+        if not isinstance(partial, bool):
+            raise TypeError(f'partial must be a bool, got {type(partial).__name__}')
+        _cancel_arg(cancel)
+        shown = _shown(target)
+        with self._op(reads=1) as op:
+            check = _Check(self, cancel, f'read of {shown!r}')
+            check()
+            toc, container, idx, header, script, i = self._select(self._plan(target), op.counters, check, 'read')
+            try:
+                fields = self._read_export(toc, container, idx, header, _Infos(header, script, toc.basename), i, partial,
+                                           op.counters, check)
+            except AssetError as e:
+                _annotate(e, header.name, toc.basename)
+                raise
+            op.finish()
+            stats = op.counters.snapshot()
+        return Export(*fields, stats=stats)
+
     def exports(self, name: str, *, cancel: Callable[[], bool] | None = None) -> 'Exports':
         """The package's exports, from its cooked header alone; the name's export part is ignored."""
         pkg, _export = self._parse_name(name)
@@ -1250,6 +1321,29 @@ class Exports(Sequence):
         if not -n <= i < n:
             raise IndexError('export index out of range')
         return i % n
+
+    def read(self, which: 'int | str | ExportInfo', *, partial: bool = False, cancel: Callable[[], bool] | None = None) -> Export:
+        """The selected export's typed properties and object trailer, from this handle's header and the export's own range."""
+        i = self._which(which)
+        if not isinstance(partial, bool):
+            raise TypeError(f'partial must be a bool, got {type(partial).__name__}')
+        _cancel_arg(cancel)
+        inst = self._inst
+        info = self._infos[i]
+        with inst._op(reads=1) as op:
+            try:
+                check = _Check(inst, cancel, f'read of {info.path!r}')
+                check()
+                toc, container, _aes = inst._mounted[self._mi]
+                script = inst._script_objects(op.counters, 'read', check)
+                fields = inst._read_export(toc, container, self._idx, self._header, _Infos(self._header, script, toc.basename), i,
+                                           partial, op.counters, check)
+            except AssetError as e:
+                _annotate(e, self._package.name, self._package.container)
+                raise
+            op.finish()
+            stats = op.counters.snapshot()
+        return Export(*fields, stats=stats)
 
     def raw(self, which: 'int | str | ExportInfo', *, offset: int = 0, limit: int,
             cancel: Callable[[], bool] | None = None) -> bytes:
