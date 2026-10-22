@@ -2,7 +2,7 @@
 
 <!-- dt:meta v="1" lang="zh" source="index.md" -->
 
-<!-- dt:section id="__preamble__" hash="befe732c7e51" -->
+<!-- dt:section id="__preamble__" hash="39093993b7b6" -->
 # nylib.ue
 
 `nylib.ue` 读取虚幻引擎游戏的反射数据（UE 4.25+ 和 UE5，Windows x64）。
@@ -13,7 +13,7 @@
 - [Runtime](runtime.md)：附加到运行中的游戏并从 Python 使用其对象：读取成员、写入成员（可选）、调用 UFunctions（可选）。
 - [IDA](ida.md)：将快照的名称、类型和注释导入到 IDA 9.x。
 - [Stubs](stubs.md)：为编辑器补全写入快照类型的 `.pyi` 存根。
-- [Assets](assets.md)：只读 IoStore 资源访问 —— `open_installation`、包查找、`Texture2D` 元数据，以及针对 UE 5.7 游戏的受限虚拟纹理 BC1 区域读取。
+- [Assets](assets.md)：只读 IoStore 资源访问 —— `open_installation`、包查找、`Texture2D` 元数据、类型化的导出属性和跨包引用，以及针对 UE 5.7 游戏的受限虚拟纹理 BC1 区域读取。
 
 默认情况下，它从游戏外部（另一个进程）工作，也可以从游戏内部（注入的 Python）工作。
 详情在代码及其文档字符串中；这些页面只展示如何使用它。

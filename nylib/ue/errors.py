@@ -225,7 +225,7 @@ class RegionOutOfBoundsError(AssetError, ValueError):
 
 
 class ReadCancelledError(AssetError):
-    """Raised when cancel() returns true during a region read."""
+    """Raised when a cancel callable returns true during a read."""
 
 
 class InstallationClosedError(AssetError, ValueError):
