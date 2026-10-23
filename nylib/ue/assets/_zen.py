@@ -12,6 +12,8 @@ from ..errors import CorruptAssetError, InvalidMappingError, UnsupportedAssetErr
 
 _UE5_OBJECT_VERSION = 1018  # the stage-1 profile; implies VERSE_CELLS offsets and the DATA_RESOURCES bulk map
 _NAME_INDEX_MASK = (1 << 30) - 1
+_INDEX_MASK = (1 << 62) - 1  # an FPackageObjectIndex without its two type bits
+NULL_INDEX = (1 << 64) - 1  # the null FPackageObjectIndex
 _SUMMARY_FMT = '<IIIIIIiiiiiii'  # has_versioning, header_size, name(2xu32), flags, cooked_size, 7 section offsets
 _SUMMARY_SIZE = struct.calcsize(_SUMMARY_FMT)
 _BULK_ENTRY_FMT = '<QQQIBhB'
@@ -23,6 +25,7 @@ _SCRIPT_ENTRY_SIZE = struct.calcsize(_SCRIPT_ENTRY_FMT)
 _CONTROL = re.compile('[\x00-\x1f\x7f-\x9f\u2028\u2029]')  # C0/C1 controls, DEL, and the Unicode line/paragraph separators
 
 MAX_PACKAGE_CHUNK = 64 << 20  # an ExportBundleData chunk is read whole only up to this many bytes
+_MAX_SCRIPT_CHAIN = 64  # entries in one ScriptObjects outer chain
 
 
 def check_package_chunk_size(length: int, container: str, chunk_id: int) -> None:
@@ -130,10 +133,15 @@ class Export(NamedTuple):
 
 
 class ZenHeader:
-    """A parsed zen package header (summary, name batch, bulk-data map, import and export maps)."""
+    """A parsed zen package header (summary, name batch, bulk-data map, import and export maps).
 
-    def __init__(self, data: bytes):
-        self.data = data
+    With `chunk_size`, `data` is the cooked header alone: the imported hashes and package names are parsed too, every
+    map index is checked and export paths are built; export ranges must lie in `chunk_size`. Without it, `data` is the
+    whole header chunk, parsed by the whole-chunk rules only.
+    """
+
+    def __init__(self, data: bytes, chunk_size: int | None = None):
+        self.data = data if chunk_size is None else None
         pkg = None
 
         def corrupt(detail: str) -> CorruptAssetError:
@@ -143,13 +151,19 @@ class ZenHeader:
         try:
             r = Reader(data)
             has_versioning, header_size, n0, n1, package_flags, _cooked_header_size, hashes_off, import_off, \
-                export_off, bundle_off, _dep_headers_off, _dep_entries_off, _pkg_names_off = \
+                export_off, bundle_off, _dep_headers_off, _dep_entries_off, pkg_names_off = \
                 struct.unpack('<IIIIIIiiiiiii', r.take(_SUMMARY_SIZE))
         except ValueError as e:
             raise corrupt(str(e)) from None
         if has_versioning:
             raise UnsupportedAssetError('a versioned zen package is not supported by this nylib version',
                                          feature='versioned zen package')
+        if chunk_size is not None:
+            if not _SUMMARY_SIZE + 8 <= header_size <= min(len(data), chunk_size):
+                raise corrupt(f'the header size {header_size} is outside the {len(data)}-byte cooked header')
+            if len(data) > header_size:
+                data = data[:header_size]
+                r = Reader(data, r.pos)
         if _UE5_OBJECT_VERSION >= 1015:  # VERSE_CELLS: two more i32 section offsets, unused in stage 1
             try:
                 r.take(8)
@@ -199,10 +213,24 @@ class ZenHeader:
                 raise corrupt(str(e)) from None
             exports.append(Export(fields[0], fields[1], name, *fields[4:9], *fields[9:11]))
 
+        end_limit = n if chunk_size is None else chunk_size
         for e in exports:
             start, end = header_size + e.offset, header_size + e.offset + e.size
-            if not 0 <= start <= end <= n:
-                raise corrupt(f"export {e.name!r}'s data range is outside the header chunk")
+            if not 0 <= start <= end <= end_limit:
+                raise corrupt(f"export {e.name!r}'s data range is outside the {'header ' if chunk_size is None else ''}chunk")
+
+        self.imported_hashes = self.imported_packages = self._paths = None
+        if chunk_size is not None:
+            try:
+                if not _SUMMARY_SIZE + 8 <= pkg_names_off <= n:
+                    raise ValueError(f'the imported package names offset {pkg_names_off} is outside the cooked header')
+                n_hashes = (import_off - hashes_off) // 8
+                self.imported_hashes = struct.unpack_from(f'<{n_hashes}Q', data, hashes_off) if n_hashes else ()
+                self.imported_packages = _imported_package_names(data, pkg_names_off)
+                _check_maps(self.imports, exports, len(self.imported_packages), n_hashes)
+                self._paths = _export_paths(pkg, exports, 4 * header_size)
+            except ValueError as e:
+                raise corrupt(str(e)) from None
 
         self.name = pkg
         self.header_size = header_size
@@ -216,6 +244,95 @@ class ZenHeader:
         e = self.exports[i]
         start = self.header_size + e.offset
         return start, start + e.size
+
+    def paths(self) -> tuple:
+        """Every export's full object path, in export-map order; CorruptAssetError for a broken outer chain or the path cap."""
+        if self._paths is None:
+            try:
+                self._paths = _export_paths(self.name, self.exports, 4 * self.header_size)
+            except ValueError as e:
+                raise CorruptAssetError(f'{self.name}: {e}', package=self.name, detail=str(e)) from None
+        return self._paths
+
+
+def _imported_package_names(data: bytes, offset: int) -> tuple:
+    """The imported package names at `offset`: a name batch, then one FName number per name, ending at the end of `data`."""
+    r = Reader(data, offset)
+    if r.i32() < 0:
+        raise ValueError('the imported package name count is negative')
+    r.pos = offset
+    names = []
+    for i, base in enumerate(_load_name_batch(r)):
+        if (number := r.i32()) < 0:
+            raise ValueError(f'imported package name {i} has the negative number {number}')
+        names.append(base if number == 0 else f'{base}_{number - 1}')
+    if r.pos != len(data):
+        raise ValueError(f'the imported package names end at {r.pos}, not at the header size {len(data)}')
+    return tuple(names)
+
+
+def _check_index(v: int, what: str, n_exports: int, n_packages: int, n_hashes: int) -> None:
+    """Raise ValueError unless FPackageObjectIndex `v` is null, a local export, a script import or a package import in range."""
+    if v == NULL_INDEX:
+        return
+    kind = v >> 62
+    if kind == 0 and v >= n_exports:
+        raise ValueError(f'{what} is export {v}, past the {n_exports}-entry export map')
+    if kind == 2 and ((v & _INDEX_MASK) >> 32 >= n_packages or v & 0xFFFFFFFF >= n_hashes):
+        raise ValueError(f'{what} is a package import past the {n_packages} imported names or {n_hashes} imported hashes')
+    if kind == 3:
+        raise ValueError(f'{what} has the invalid index type 3')
+
+
+def _check_maps(imports: tuple, exports: list, n_packages: int, n_hashes: int) -> None:
+    """The import-map and export-map index rules of a cooked header; raises ValueError."""
+    n = len(exports)
+    for i, v in enumerate(imports):
+        if v != NULL_INDEX and v >> 62 == 0:
+            raise ValueError(f'import {i} is a local export')
+        _check_index(v, f'import {i}', n, n_packages, n_hashes)
+    for i, e in enumerate(exports):
+        if e.cls == NULL_INDEX:
+            raise ValueError(f'export {i} has a null class')
+        if e.outer != NULL_INDEX and e.outer >> 62:
+            raise ValueError(f'the outer of export {i} is not a local export')
+        for what, v in (('outer', e.outer), ('class', e.cls), ('super', e.super), ('template', e.template)):
+            _check_index(v, f'the {what} of export {i}', n, n_packages, n_hashes)
+
+
+def _export_paths(pkg: str, exports, cap: int) -> tuple:
+    """Export paths by UE's GetPathName rule (':' after a top-level outer); ValueError for a non-local or cyclic outer, or
+    for paths summing to more than `cap` characters, which is checked before any path is built."""
+    n = len(exports)
+    lens = [0] * n
+    order = []
+    on_chain = bytearray(n)
+    for i in range(n):
+        chain = []
+        j = i
+        while not lens[j]:
+            if on_chain[j]:
+                raise ValueError(f'the outer chain of export {i} cycles')
+            on_chain[j] = 1
+            chain.append(j)
+            o = exports[j].outer
+            if o == NULL_INDEX:
+                break
+            if o >= n:
+                raise ValueError(f'the outer of export {j} is not a local export')
+            j = o
+        for k in reversed(chain):
+            o = exports[k].outer
+            lens[k] = (len(pkg) if o == NULL_INDEX else lens[o]) + 1 + len(exports[k].name)
+            order.append(k)
+    if (total := sum(lens)) > cap:
+        raise ValueError(f'the export paths of {total} characters exceed the {cap}-character limit')
+    out = [None] * n
+    for k in order:
+        e = exports[k]
+        o = e.outer
+        out[k] = f'{pkg}.{e.name}' if o == NULL_INDEX else f"{out[o]}{':' if exports[o].outer == NULL_INDEX else '.'}{e.name}"
+    return tuple(out)
 
 
 class ScriptObjects:
@@ -266,6 +383,29 @@ class ScriptObjects:
         """The script object's own name at global index `index`, or None when there is no such entry."""
         e = self._by_global_index(index)
         return None if e is None else self._name(e[0], e[1])
+
+    def has(self, index: int) -> bool:
+        """True iff the table holds an entry at global index `index`."""
+        i = bisect.bisect_left(self._keys, index)
+        return i < len(self._keys) and self._keys[i] == index
+
+    def ref_parts(self, index: int) -> 'tuple | None':
+        """(outermost name, own name, path) of the script object at global index `index`, or None when there is no such entry.
+
+        Raises CorruptAssetError for an outer missing from the table or an outer chain longer than 64 entries.
+        """
+        if (e := self._by_global_index(index)) is None:
+            return None
+        chain = [self._name(e[0], e[1])]
+        while e[3] != NULL_INDEX:
+            if len(chain) >= _MAX_SCRIPT_CHAIN or (e := self._by_global_index(e[3])) is None:
+                detail = 'an outer chain is broken or longer than 64 entries'
+                raise CorruptAssetError(f'the global ScriptObjects chunk is truncated or malformed: {detail}', detail=detail)
+            chain.append(self._name(e[0], e[1]))
+        path = chain[-1]
+        for k in range(len(chain) - 2, -1, -1):
+            path += f"{':' if k == len(chain) - 3 else '.'}{chain[k]}"
+        return chain[-1], chain[0], path
 
     def index_of(self, path: str) -> 'int | None':
         """The global index of `path` ('/Script/Package.Object'), or None when there is no such entry."""

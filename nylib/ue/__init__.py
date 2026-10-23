@@ -7,7 +7,7 @@ from .errors import UeError, MemoryReadError, MemoryWriteError, TargetError, PeF
     UnverifiedOffsetsError, AmbiguousNameError, CallError, MarshalError, \
     AssetError, InvalidKeyError, InvalidMappingError, BuildMismatchError, MissingAssetError, MissingTileError, \
     UnsupportedError, UnsupportedContainerError, UnsupportedAssetError, UnsupportedPixelFormatError, \
-    CorruptAssetError, RegionOutOfBoundsError, ReadCancelledError, InstallationClosedError
+    CorruptAssetError, RegionOutOfBoundsError, ReadCancelledError, InstallationClosedError, AbsentPropertyError
 
 if TYPE_CHECKING:
     from .pipeline import probe, dump
@@ -21,7 +21,7 @@ __all__ = [
     'AmbiguousNameError', 'CallError', 'MarshalError',
     'AssetError', 'InvalidKeyError', 'InvalidMappingError', 'BuildMismatchError', 'MissingAssetError', 'MissingTileError',
     'UnsupportedError', 'UnsupportedContainerError', 'UnsupportedAssetError', 'UnsupportedPixelFormatError',
-    'CorruptAssetError', 'RegionOutOfBoundsError', 'ReadCancelledError', 'InstallationClosedError',
+    'CorruptAssetError', 'RegionOutOfBoundsError', 'ReadCancelledError', 'InstallationClosedError', 'AbsentPropertyError',
     'probe', 'dump', 'load_snapshot', 'Unreal',
 ]
 

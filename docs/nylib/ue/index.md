@@ -8,7 +8,7 @@ Keywords: Unreal Engine, UE4, UE5, reflection, dump, Unreal.attach, snapshot, Du
 - [Runtime](runtime.md): attach to the running game and use its objects from Python: read members, write them (opt-in), call UFunctions (opt-in).
 - [IDA](ida.md): import a snapshot's names, types and comments into IDA 9.x.
 - [Stubs](stubs.md): write `.pyi` stubs of a snapshot's types for editor completion.
-- [Assets](assets.md): read-only IoStore asset access -- `open_installation`, package lookup, `Texture2D` metadata, and bounded virtual-texture BC1 region reads for a UE 5.7 game.
+- [Assets](assets.md): read-only IoStore asset access -- `open_installation`, package lookup, `Texture2D` metadata, typed export properties and cross-package references, and bounded virtual-texture BC1 region reads for a UE 5.7 game.
 
 It works from outside the game (another process) by default, and from inside it (injected Python).
 The details are in the code and its docstrings; these pages only show how to use it.
