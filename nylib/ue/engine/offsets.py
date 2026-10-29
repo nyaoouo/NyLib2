@@ -254,11 +254,11 @@ def off_init(e: 'Engine', *, pins: Mapping[str, int] | None = None) -> None:
         _find(e, pins, 'Off.FField.Next', 'FindFFieldNextOffset', OffsetFinder.find_ffield_next_offset)
         e.cerr(f'Off::FField::Next: 0x{off.FField.Next:X}\n')
 
-        if not OffsetFinder.has_consistent_ffield_layout(e):
-            _check_ffield_layout(e, pins)
-
         _find(e, pins, 'Off.FField.Class', 'FindFFieldClassOffset', OffsetFinder.find_ffield_class_offset)
         e.cerr(f'Off::FField::Class: 0x{off.FField.Class:X}\n')
+
+        if not OffsetFinder.has_consistent_ffield_layout(e):
+            _check_ffield_layout(e, pins)
 
         _find(e, pins, 'Off.FField.Name', 'FindFFieldNameOffset', OffsetFinder.find_ffield_name_offset)
 

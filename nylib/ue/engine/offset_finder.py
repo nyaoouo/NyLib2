@@ -466,8 +466,10 @@ def _members_hold(e: 'Engine', probes, owner: int, next_: int, masked: bool) -> 
 
 def has_consistent_ffield_layout(e: 'Engine') -> bool:
     """Off.FField.Owner/Next and bUseMaskForFieldOwner walk Guid's 4 and Vector's 3 members, each owned by its struct."""
-    off = e.off.FField
-    return _members_hold(e, _member_probes(e), off.Owner, off.Next, e.settings.Internal.bUseMaskForFieldOwner)
+    off, masked, probes = e.off.FField, e.settings.Internal.bUseMaskForFieldOwner, _member_probes(e)
+    if not _members_hold(e, probes, off.Owner, off.Next, masked):
+        return False
+    return not any(_members_hold(e, probes, off.Owner, n, masked) for n in range(0x8, off.Next, 0x8))  # PropertyLinkNext repeats the chain
 
 
 def find_ffield_owner_next_offsets(e: 'Engine', owner: int | None = None, next_: int | None = None) -> tuple[int, int, bool] | None:
