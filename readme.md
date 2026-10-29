@@ -52,6 +52,7 @@ pip install ".[full]"   # all of the above
 | PDB symbols | `nylib.pdb` | read PDB files via Microsoft DIA; write PDB files from a model | [docs/nylib/pdb.md](docs/nylib/pdb.md) |
 | Remote ctypes | `nylib.ctype` | declarative structs that read/write through a process accessor | [docs/nylib/ctype.md](docs/nylib/ctype.md) |
 | Function hooking | `nylib.hook` | Microsoft Detours wrapper (`Hook`, `@create_hook`) | [docs/nylib/hook.md](docs/nylib/hook.md) |
+| Call queues | `nylib.winutils.inline_call` | run queued calls on a target's own thread at its next entry to a hooked function or vtable slot | [docs/nylib/winutils/inline_call.md](docs/nylib/winutils/inline_call.md) |
 | Breakpoints | `nylib.winutils.breakpoint` | x64 HW/SW breakpoints (VEH + debugger backends) | [docs/nylib/winutils/breakpoint.md](docs/nylib/winutils/breakpoint.md) |
 | PE mapping | `nylib.winutils.pe_map` | pure PE planning, local or cross-process DLL loading from bytes, and optional post-attach block discard | [docs/nylib/winutils/pe_map.md](docs/nylib/winutils/pe_map.md) |
 | Injection | `nylib.winutils.python_loader` / `python_hijack` | run arbitrary Python inside a third-party process | [docs/nylib/winutils/python_loader.md](docs/nylib/winutils/python_loader.md) |

@@ -2,14 +2,14 @@
 
 <!-- dt:meta v="1" lang="zh" source="process.md" -->
 
-<!-- dt:section id="__preamble__" hash="aa2d509ddbbb" -->
+<!-- dt:section id="__preamble__" hash="92db441a67fa" -->
 # nylib.process
 
 读取和写入另一个进程的内存，远程调用其函数，并管理其模块列表。使用它来检查或修改正在运行的游戏，钩取函数，注入DLL，或测试跨进程内存操作。
 
-关键词: Process, RemoteCall, read memory, write memory, function call, DLL injection, PEB, export, pattern scan, module list, get_proc_address, enum_exports, load_library, ReadProcessMemory, WriteProcessMemory, rpm
+关键词: Process, Thread, RemoteCall, read memory, write memory, function call, QueueUserAPC, APC, get_thread, iter_threads, DLL injection, PEB, export, pattern scan, module list, get_proc_address, enum_exports, load_library, ReadProcessMemory, WriteProcessMemory, rpm
 
-<!-- dt:section id="quick-start-0" hash="b580b3252af2" -->
+<!-- dt:section id="quick-start-0" hash="a8c76e2f6f37" -->
 ## 快速开始
 
 从 PID 或名称创建 `Process`；使用类型化访问器读取/写入内存；调用远程函数并等待结果。
@@ -34,7 +34,7 @@ result = p.call(0x140010000, 100, 200)
 
 # Call without blocking; check when ready.
 pending = p.call(func_address, 1, 2, block=False)
-# pending.done -> True when the thread finishes
+# pending.done -> True when the call finishes
 # pending.wait() -> blocks and returns the result
 ```
 
@@ -81,6 +81,31 @@ result = p.call(addr)
 for export in p.enum_exports('kernel32.dll'):
     print(export.name, hex(export.address))
 ```
+
+<!-- dt:section id="threads-and-apc-calls-0" hash="d8fa331f5c6d" -->
+## 线程与 APC 调用
+
+打开目标进程的线程，然后通过 `QueueUserAPC` 而不是新建远程线程，在已有线程上运行调用。
+
+```python
+# needs: a running target process and an alertable target thread
+
+for thread in p.iter_threads():
+    with thread:
+        print(thread.thread_id, thread.process_id)
+
+with p.get_thread(thread_id) as thread:
+    # Execute on this existing thread, with automatic suspend/queue/resume.
+    pending = p.call(func_address, 1, 2, queue_apc_thread=thread, block=False)
+    result = pending.wait(5000)
+```
+
+- `get_thread(thread_id, da=0x1FFFFF)` 会验证该线程属于此进程；`iter_threads(da=0x1FFFFF)` 通过 Toolhelp 快照打开该进程的线程。每个返回的 `Thread` 拥有自己的句柄：使用 `with thread:` 或调用 `thread.close()`。
+- `thread.suspend()` 和 `thread.resume()` 返回之前的挂起计数。`thread.description()` 返回由 `SetThreadDescription` 设置的名称，若未命名则返回 `None`；`thread.creation_time()` 返回 FILETIME（自 1601 年起的 100 纳秒刻度数），进程中最早的线程即其初始线程。两者在没有 `THREAD_QUERY_LIMITED_INFORMATION` 时都会抛出 `OSError`。
+- `call(..., queue_apc_thread=None)` 默认使用 `CreateRemoteThread`；传入 `Thread` 或本地线程句柄则选用 [`QueueUserAPC`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-queueuserapc)。该线程必须属于目标进程，并允许查询、挂起/恢复和设置上下文的访问权限；进程句柄还需要 `PROCESS_DUP_HANDLE` 以用于完成事件。`Process.current.call` 接受当前进程的另一个线程；选择调用线程自身会抛出 `ValueError`。
+- 当目标线程进入可警报等待（例如 `SleepEx(..., True)`）时，APC 才会运行。挂起和恢复会保留其之前的挂起计数，并且不会强制普通线程变为可警报；已经处于挂起状态的线程会保持挂起，直到其所有者恢复它。
+- 阻塞调用以及 `RemoteCall.done` / `.wait()` 跟踪的是回调的完成；目标线程之后可以继续运行。超时会使调用保持未完成状态：保留该 `RemoteCall` 并再次等待。丢弃一个未完成的调用会保留其远程代码和完成资源，直到进程退出。
+- 如果入队成功但恢复失败，则会抛出 `OSError`，并保留已入队的回调内存。请在关闭进程句柄之前等待所有未完成的调用结束。
 
 <!-- dt:section id="pattern-scanning-0" hash="75b1c346d8d2" -->
 ## 特征扫描
