@@ -111,6 +111,14 @@ def _is_address_valid_gobjects_chunked(e: 'Engine', address: int, layout: FChunk
     return True
 
 
+def _readable_candidate(check, e: 'Engine', address: int, layout) -> bool:
+    """check(e, address, layout); a MemoryReadError means the candidate is not GObjects."""
+    try:
+        return check(e, address, layout)
+    except MemoryReadError:  # IsBadReadPtr probes one byte; a later read can still cross into an unreadable page
+        return False
+
+
 def _layout_window(layout) -> int:
     return max(layout.ObjectsOffset + 8, *(o + 4 for o in dataclasses.astuple(layout)))
 
@@ -200,14 +208,14 @@ class ObjectArray:
         def matches_any_layout(layouts, address: int) -> bool:
             for layout in layouts:
                 if isinstance(layout, FFixedUObjectArrayLayout):
-                    if not _is_address_valid_gobjects_fixed(e, address, layout):
+                    if not _readable_candidate(_is_address_valid_gobjects_fixed, e, address, layout):
                         continue
                     e.off.FUObjectArray.bIsChunked = False
                     e.provenance['Off.FUObjectArray.bIsChunked'] = 'auto: ObjectArray::Init'
                     e.off.FUObjectArray.FixedLayout = layout
                     e.provenance['Off.FUObjectArray.FixedLayout'] = 'auto: ObjectArray::Init'
                 else:
-                    if not _is_address_valid_gobjects_chunked(e, address, layout):
+                    if not _readable_candidate(_is_address_valid_gobjects_chunked, e, address, layout):
                         continue
                     e.off.FUObjectArray.bIsChunked = True
                     e.provenance['Off.FUObjectArray.bIsChunked'] = 'auto: ObjectArray::Init'

@@ -499,6 +499,8 @@ def probe_opened(opened: OpenedTarget, *, profile=None, out_root=None) -> ProbeR
         e = Engine(opened.source)
         context = _run_bootstrap(e, prof, pins, steps)
     except errors.DetectionError as err:
+        if opened.check_alive is not None and not opened.check_alive():
+            raise errors.TargetError(opened.info.pid, 'process exited during the probe') from err
         error = err
     except errors.ProfileError:
         raise
