@@ -51,6 +51,7 @@ jpeg = imagecodec.encode_jpeg(region.pixels, region.width, region.height)
 - Baseline JFIF with the standard Huffman tables (WIC cannot optimise them), and a 72 x 72 dpi APP0 header.
 - Quantisation tables are libjpeg's for every quality: with `s = 5000 // q if q < 50 else 200 - 2 * q`, each entry is `min(255, max(1, (base * s + 50) // 100))`, over the standard luminance and chrominance bases.
 - `subsampling` is `'4:2:0'` (Y 2x2), `'4:2:2'` (Y 2x1) or `'4:4:4'`; Cb and Cr are 1x1.
+- WIC writes into a memory stream that cannot grow past 4 GiB, so an image whose JPEG would reach that size raises `ImageCodecError`.
 - JPEG has no alpha, so a non-opaque pixel is refused unless you give a `background=(r, g, b)` to composite over. Each channel becomes `(c * a + bg * (255 - a) + 127) // 255`: alpha 255 keeps the pixel, alpha 0 gives the background. An all-opaque image ignores `background`.
 
 ```python

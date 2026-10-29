@@ -52,13 +52,14 @@ from nylib.utils import imagecodec
 jpeg = imagecodec.encode_jpeg(region.pixels, region.width, region.height)
 ```
 
-<!-- dt:section id="jpeg-0" hash="4539df067edc" -->
+<!-- dt:section id="jpeg-0" hash="1deee40e7204" -->
 ## JPEG
 
 - `encode_jpeg(pixels, width, height, *, quality=90, subsampling='4:2:0', background=None)`；`width` 和 `height` 取值 1..65500，`quality` 取值 1..100。
 - 基线 JFIF，使用标准霍夫曼表（WIC 无法优化它们），并带有 72 x 72 dpi 的 APP0 头。
 - 对于每个质量值，量化表均采用 libjpeg 的方式：当 `s = 5000 // q if q < 50 else 200 - 2 * q` 时，每个条目为 `min(255, max(1, (base * s + 50) // 100))`，基于标准的亮度和色度基表。
 - `subsampling` 为 `'4:2:0'`（Y 为 2x2）、`'4:2:2'`（Y 为 2x1）或 `'4:4:4'`；Cb 和 Cr 均为 1x1。
+- WIC 把结果写进一个不能超过 4 GiB 的内存流，所以 JPEG 结果会达到这个大小的图像会抛出 `ImageCodecError`。
 - JPEG 没有 alpha，因此若像素不是不透明的，除非你提供 `background=(r, g, b)` 作为合成底色，否则会被拒绝。每个通道变为 `(c * a + bg * (255 - a) + 127) // 255`：alpha 为 255 时保留该像素，alpha 为 0 时得到背景色。全部不透明的图像会忽略 `background`。
 
 ```python
