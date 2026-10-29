@@ -159,6 +159,7 @@ High-level Win32 helpers; subpackages are loaded lazily.
 | `winutils.llvm_pdb` | PDB symbol helpers via LLVM |
 | `winutils.driver` | service-control (`SCManager`, `Service`) helpers for loading kernel drivers |
 | `winutils.inline_hook` | hot-patch trampoline based on `keystone-engine` + `capstone` |
+| `winutils.inline_call` | `InlineCallQueue` runs a bounded batch of requested calls on the next entry to a chosen function; see [inline_call.md](docs/nylib/winutils/inline_call.md) |
 | `winutils.pe_unmap` | rebuild an in-memory PE back to its on-disk layout |
 | `winutils.pe_map` | parse/plan a PE without process access; map an AMD64 DLL from bytes with a local or remote `Process` host (`MINIMAL`/`RUNTIME`/`STRICT`); optionally request post-attach block discard with `SectSkip` - see [pe_map.md](docs/nylib/winutils/pe_map.md) |
 | `winutils.pe_exports` | PE export-table reader: `ExportTable` over any `Process` (backs `Process.get_proc_address` / `enum_exports`); `read_exports(base)` for this process, never raises |
