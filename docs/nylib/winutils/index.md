@@ -180,6 +180,8 @@ hook = InlineHook(p, b'\\x90\\x90', addr=0x401000)
 hook.enabled = True
 ```
 
+For queued calls that run on the next entry to a chosen function, see [inline_call.md](inline_call.md). `InlineCallQueue` inherits `InlineHook` and supports a bounded batch with integer and floating-point arguments.
+
 ## Notes
 
 - `iter_processes()` enumerates local processes via ToolHelp32 API.
