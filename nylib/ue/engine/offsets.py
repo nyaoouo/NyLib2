@@ -161,6 +161,24 @@ def _field_class_cast_flags_found(e: 'Engine', value: int) -> bool:
     return False
 
 
+def _check_ffield_layout(e: 'Engine', pins: Mapping[str, int]) -> None:
+    """Off.FField.Owner/Next and bUseMaskForFieldOwner from the member-chain search; unverified when it finds none."""
+    found = OffsetFinder.find_ffield_owner_next_offsets(e, pins.get('Off.FField.Owner'), pins.get('Off.FField.Next'))
+    if found is None:
+        e.cerr("Off::FField::Owner / Next: no layout walks Guid's and Vector's members\n")
+        for key in ('Off.FField.Owner', 'Off.FField.Next'):
+            if key not in pins:
+                e.provenance[key] = "not found: no FField Owner / Next layout walks Guid's and Vector's members"
+        return
+    owner, next_, masked = found
+    label = 'auto: OffsetFinder::FindFFieldOwnerNextOffsets (nylib)'
+    _assign(e, 'Off.FField.Owner', owner, label, pins)
+    _assign(e, 'Off.FField.Next', next_, label, pins)
+    e.settings.Internal.bUseMaskForFieldOwner = masked
+    e.provenance['Settings.Internal.bUseMaskForFieldOwner'] = label
+    e.cerr(f'Off::FField::Owner: 0x{owner:X}, Next: 0x{next_:X}, masked owner: {masked} (member-chain search)\n')
+
+
 def off_init(e: 'Engine', *, pins: Mapping[str, int] | None = None) -> None:
     """Off::Init @ ea0dab3, plus dd8fe34's FFieldClass::CastFlags finder (Q23 = A) and O2's pins."""
     pins = _check_pins(pins, 'Off.')
@@ -235,6 +253,9 @@ def off_init(e: 'Engine', *, pins: Mapping[str, int] | None = None) -> None:
 
         _find(e, pins, 'Off.FField.Next', 'FindFFieldNextOffset', OffsetFinder.find_ffield_next_offset)
         e.cerr(f'Off::FField::Next: 0x{off.FField.Next:X}\n')
+
+        if not OffsetFinder.has_consistent_ffield_layout(e):
+            _check_ffield_layout(e, pins)
 
         _find(e, pins, 'Off.FField.Class', 'FindFFieldClassOffset', OffsetFinder.find_ffield_class_offset)
         e.cerr(f'Off::FField::Class: 0x{off.FField.Class:X}\n')

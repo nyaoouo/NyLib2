@@ -429,6 +429,62 @@ def find_ffield_class_offset(e: 'Engine') -> int:
     return get_valid_pointer_offset(e, guid_child.get_address(), vector_child.get_address(), 0x8, 0x30, True, check_for_vft=False)
 
 
+# FField layout check (nylib; Off::Init runs the search only when the check fails)
+
+_MEMBER_PROBES = (('Guid', 4), ('Vector', 3))  # a struct and its member count
+
+
+def _member_probes(e: 'Engine') -> list[tuple[int, int, int]]:
+    out = []
+    for name, count in _MEMBER_PROBES:
+        struct = e.objects.find_struct_fast(name)
+        out.append((struct.get_address(), struct.get_child_properties().get_address(), count))
+    return out
+
+
+def _owned_by(e: 'Engine', field: int, owner: int, masked: bool, struct: int) -> bool:
+    value = e.mem.u64(field + owner)
+    if masked:
+        return value & 0x1 == 0x1 and value & ~0x1 == struct
+    return value == struct and e.mem.u8(field + owner + 0x8) != 0
+
+
+def _members_hold(e: 'Engine', probes, owner: int, next_: int, masked: bool) -> bool:
+    try:
+        for struct, field, count in probes:
+            n = 0
+            while field:
+                if n == count or not _owned_by(e, field, owner, masked, struct):
+                    return False
+                field, n = e.mem.ptr(field + next_), n + 1
+            if n != count:
+                return False
+        return True
+    except MemoryReadError:  # a wrong candidate offset reads through a non-pointer
+        return False
+
+
+def has_consistent_ffield_layout(e: 'Engine') -> bool:
+    """Off.FField.Owner/Next and bUseMaskForFieldOwner walk Guid's 4 and Vector's 3 members, each owned by its struct."""
+    off = e.off.FField
+    return _members_hold(e, _member_probes(e), off.Owner, off.Next, e.settings.Internal.bUseMaskForFieldOwner)
+
+
+def find_ffield_owner_next_offsets(e: 'Engine', owner: int | None = None, next_: int | None = None) -> tuple[int, int, bool] | None:
+    """The lowest (Owner, Next, masked owner) that has_consistent_ffield_layout accepts; a given owner or next_ is kept."""
+    probes, cls = _member_probes(e), e.off.FField.Class
+    for o in (range(0x8, 0x40, 0x8) if owner is None else (owner,)):
+        if o == cls:
+            continue
+        for masked in (True, False):
+            for n in (range(0x8, 0x40, 0x8) if next_ is None else (next_,)):
+                if n in (o, cls) or (not masked and n == o + 0x8):
+                    continue
+                if _members_hold(e, probes, o, n, masked):
+                    return o, n, masked
+    return None
+
+
 def inialize_uenum_settings(e: 'Engine', enum_obj: int, uenum_num_values_offset: int) -> None:
     """InializeUEnumSettings @ ea0dab3 (the offset is a uint32_t parameter; TPair read field by field)."""
     label = 'auto: InializeUEnumSettings'
