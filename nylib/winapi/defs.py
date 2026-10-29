@@ -464,6 +464,18 @@ class ProcessEntry32(ctypes.Structure):
     ]
 
 
+class ThreadEntry32(ctypes.Structure):
+    _fields_ = [
+        ('dwSize', ctypes.c_ulong),
+        ('cntUsage', ctypes.c_ulong),
+        ('th32ThreadID', ctypes.c_ulong),
+        ('th32OwnerProcessID', ctypes.c_ulong),
+        ('tpBasePri', ctypes.c_long),
+        ('tpDeltaPri', ctypes.c_long),
+        ('dwFlags', ctypes.c_ulong),
+    ]
+
+
 class STARTUPINFOA(ctypes.Structure):
     _fields_ = [
         ('cb', ctypes.c_ulong),
