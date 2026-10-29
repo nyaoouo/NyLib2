@@ -16,6 +16,25 @@ _MAX_ARGS = 8
 _WAITING = 1
 _DONE = 3
 _UNSET = object()
+_THREAD_PATCH_ACCESS = 0x080A  # THREAD_QUERY_LIMITED_INFORMATION|GET_CONTEXT|SUSPEND_RESUME
+_PATCH_RETRIES = 32
+
+_gil_kernel32 = ctypes.PyDLL('kernel32.dll')
+_gil_suspend = _gil_kernel32.SuspendThread
+_gil_suspend.argtypes = (ctypes.c_void_p,)
+_gil_suspend.restype = ctypes.c_ulong
+_gil_resume = _gil_kernel32.ResumeThread
+_gil_resume.argtypes = (ctypes.c_void_p,)
+_gil_resume.restype = ctypes.c_ulong
+_gil_get_context = _gil_kernel32.GetThreadContext
+_gil_get_context.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+_gil_get_context.restype = ctypes.c_bool
+
+
+def _thread_call(func, handle):
+    result = func(handle)
+    if result == 0xFFFFFFFF: raise ctypes.WinError()
+    return result
 
 
 class _AtomicWord:
@@ -304,8 +323,7 @@ class _CallQueue:
     def free(self):
         if self._closed: return
         if self._enabled: raise RuntimeError('disable the call queue first')
-        if self._tickets or self._atomic.load(self._shared.local_at + 0x10):
-            raise RuntimeError('inline calls are still pending or running')
+        if self._tickets: raise RuntimeError('inline calls are still pending or running')
         self._free_hook()
 
     def close(self):
@@ -341,11 +359,12 @@ class _CallQueue:
 class InlineCallQueue(_CallQueue, InlineHook):
     """Call functions on the next entry to a chosen x64 function."""
 
-    def __init__(self, process, addr: int, capacity=16, thread_id=None):
+    def __init__(self, process, addr: int, capacity=16, thread_id=None, *, quiescent_patch=False):
         mbi = process.virtual_query(addr)
         if mbi.State != 0x1000 or not mbi.Protect & 0xF0 or mbi.Protect & 0x100:
             raise ValueError(f'target address {addr:#x} is not executable')
         super().__init__(process, addr, capacity, thread_id)
+        self.quiescent_patch = bool(quiescent_patch)
 
     def alloc(self):
         if self.alloc_at: return
@@ -376,9 +395,17 @@ class InlineCallQueue(_CallQueue, InlineHook):
 
     def _free_hook(self):
         if self.alloc_at:
-            self.process.free(self.alloc_at)
-            self.alloc_at = 0
-            self.hook_code = self.orig_code = b''
+            if self.quiescent_patch:
+                self._run_quiescent(((self.alloc_at, self.alloc_at + 0x1000),), self._release_code, idle=True)
+            else:
+                if self._atomic.load(self._shared.local_at + 0x10):
+                    raise RuntimeError('inline calls are still pending or running')
+                self._release_code()
+
+    def _release_code(self):
+        self.process.free(self.alloc_at)
+        self.alloc_at = 0
+        self.hook_code = self.orig_code = b''
 
     @property
     def enabled(self):
@@ -391,9 +418,59 @@ class InlineCallQueue(_CallQueue, InlineHook):
         if value == self._enabled: return
         if value:
             self.alloc()
-        elif self._tickets or self._atomic.load(self._shared.local_at + 0x10):
+        elif self._tickets or (not self.quiescent_patch and self._atomic.load(self._shared.local_at + 0x10)):
             raise RuntimeError('inline calls are still pending or running')
         expected = self.orig_code if value else self.hook_code
+        if self.quiescent_patch:
+            self._patch_quiescent(value, expected)
+        else:
+            self._patch_bytes(value, expected)
+
+    def _patch_quiescent(self, value, expected):
+        self._run_quiescent(((self.addr, self.addr + len(expected)),), lambda: self._patch_bytes(value, expected))
+
+    def _run_quiescent(self, ranges, action, *, idle=False):
+        own_tid = winapi.GetCurrentThreadId() if self.process.process_id == winapi.GetCurrentProcessId() else None
+        storage = ctypes.create_string_buffer(ctypes.sizeof(winapi.CONTEXT) + 15)
+        context = winapi.CONTEXT.from_address((ctypes.addressof(storage) + 15) & ~15)
+        for _ in range(_PATCH_RETRIES):
+            threads = []
+            try:
+                for thread in self.process.iter_threads(da=_THREAD_PATCH_ACCESS): threads.append(thread)
+            except BaseException:
+                for thread in threads: thread.close()
+                raise
+            suspended = []
+            busy = False
+            try:
+                for thread in threads:
+                    if thread.thread_id == own_tid: continue
+                    _thread_call(_gil_suspend, thread.handle)
+                    suspended.append(thread)
+                for thread in suspended:
+                    context.ContextFlags = winapi.CONTEXT_CONTROL
+                    if not _gil_get_context(thread.handle, ctypes.addressof(context)): raise ctypes.WinError()
+                    rip = context.Rip
+                    if any(start <= rip < end for start, end in ranges):
+                        busy = True
+                        break
+                if idle and self._atomic.load(self._shared.local_at + 0x10): busy = True
+                if not busy:
+                    action()
+                    return
+            finally:
+                resume_error = None
+                for thread in reversed(suspended):
+                    try:
+                        _thread_call(_gil_resume, thread.handle)
+                    except OSError as exc:
+                        if resume_error is None: resume_error = exc
+                for thread in threads: thread.close()
+                if resume_error is not None: raise resume_error
+            time.sleep(0.002)
+        raise RuntimeError('could not find a quiescent interval to patch the inline hook')
+
+    def _patch_bytes(self, value, expected):
         if self.process.read(self.addr, len(expected)) != expected:
             raise RuntimeError('target prologue changed since hook allocation')
         old = self.process.virtual_protect(self.addr, len(expected), 0x40)
@@ -429,4 +506,6 @@ class VTableCallQueue(_CallQueue, VTableHook):
         VTableHook.enabled.fset(self, value)
 
     def _free_hook(self):
+        if self._atomic.load(self._shared.local_at + 0x10):
+            raise RuntimeError('inline calls are still pending or running')
         VTableHook.free(self)
