@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 from nylib import winapi
 from nylib.process import Process
-from nylib.winutils.inline_call import InlineCallQueue
+from nylib.winutils.inline_call import InlineCallQueue, VTableCallQueue
+from nylib.winutils.vtable_hook import VTableHook
 
 
 _TARGET_CODE = b'\xB8\x2A\x00\x00\x00' + b'\x90' * 16 + b'\xC3'  # mov eax, 42; ret
@@ -23,10 +24,12 @@ ctypes.CDLL('ucrtbase.dll')
 addr = Process.current.alloc(0x1000)
 Process.current.write(addr, bytes.fromhex('B82A000000') + bytes([0x90]) * 16 + bytes([0xC3]))
 winapi.FlushInstructionCache(Process.current.handle, addr, 22)
-target = ctypes.CFUNCTYPE(ctypes.c_uint64)(addr)
-print(os.getpid(), addr, winapi.GetCurrentThreadId(), flush=True)
+slot = Process.current.alloc(0x1000, protect=0x04)
+Process.current.write_ptr(slot, addr)
+Process.current.virtual_protect(slot, 0x1000, 0x02)
+print(os.getpid(), addr, winapi.GetCurrentThreadId(), slot, flush=True)
 for line in sys.stdin:
-    if line.strip() == 'hit': print(target(), flush=True)
+    if line.strip() == 'hit': print(ctypes.CFUNCTYPE(ctypes.c_uint64)(Process.current.read_ptr(slot))(), flush=True)
     if line.strip() == 'exit': break
 '''
 
@@ -219,12 +222,114 @@ class InlineCallTests(unittest.TestCase):
         self.assertEqual(count(), before)
 
 
+class VTableCallTests(unittest.TestCase):
+    def setUp(self):
+        self.process = Process.current
+        self.addr = self.process.alloc(0x1000)
+        self.slot = self.process.alloc(0x1000, protect=0x04)
+        self.process.write(self.addr, _TARGET_CODE)
+        self.process.write_ptr(self.slot, self.addr)
+        self.process.virtual_protect(self.slot, 0x1000, 0x02)
+        winapi.FlushInstructionCache(self.process.handle, self.addr, len(_TARGET_CODE))
+
+    def tearDown(self):
+        self.process.free(self.slot)
+        self.process.free(self.addr)
+
+    def target(self):
+        return ctypes.CFUNCTYPE(ctypes.c_uint64)(self.process.read_ptr(self.slot))()
+
+    def test_vtable_batch_jumps_to_original_and_restores_pointer(self):
+        get_tid = self.process.get_proc_address('kernel32.dll', 'GetCurrentThreadId')
+        original = self.process.read_ptr(self.slot)
+        with VTableCallQueue(self.process, self.slot, capacity=2) as hook:
+            self.assertEqual(hook.original_at, original)
+            self.assertEqual(self.process.read_ptr(self.slot), hook.code_at)
+            ticket = hook.submit(get_tid)
+            self.assertEqual(self.target(), 42)
+            self.assertEqual(ticket.wait(1000), winapi.GetCurrentThreadId())
+            self.assertEqual(self.target(), 42)
+        self.assertEqual(self.process.read_ptr(self.slot), original)
+        self.assertEqual(self.process.virtual_query(self.slot).Protect, 0x02)
+
+    def test_plain_vtable_hook_runs_code_then_jumps_to_original(self):
+        code = b'\x48\x89\xC8\x48\x01\xD0\xC3'  # mov rax, rcx; add rax, rdx; ret
+        self.process.write(self.addr, code)
+        winapi.FlushInstructionCache(self.process.handle, self.addr, len(code))
+        target = ctypes.CFUNCTYPE(ctypes.c_uint64, ctypes.c_uint64, ctypes.c_uint64)
+        hook = VTableHook(self.process, 'inc rcx', self.slot)
+        try:
+            hook.enabled = True
+            self.assertEqual(self.process.read_ptr(self.slot), hook.code_at)
+            self.assertEqual(target(self.process.read_ptr(self.slot))(11, 30), 42)
+        finally:
+            hook.free()
+        self.assertEqual(self.process.read_ptr(self.slot), self.addr)
+        self.assertEqual(target(self.process.read_ptr(self.slot))(11, 30), 41)
+
+    def test_rejects_changed_slot_without_overwriting_it(self):
+        hook = VTableCallQueue(self.process, self.slot)
+        other = self.process.get_proc_address('kernel32.dll', 'GetCurrentThreadId')
+        self.process.virtual_protect(self.slot, 8, 0x04)
+        self.process.write_ptr(self.slot, other)
+        self.process.virtual_protect(self.slot, 8, 0x02)
+        try:
+            with self.assertRaisesRegex(RuntimeError, 'vtable slot changed'):
+                hook.enabled = True
+            self.assertFalse(hook.enabled)
+            self.assertEqual(self.process.read_ptr(self.slot), other)
+        finally:
+            self.process.virtual_protect(self.slot, 8, 0x04)
+            self.process.write_ptr(self.slot, self.addr)
+            self.process.virtual_protect(self.slot, 8, 0x02)
+            hook.close()
+
+    def test_rejects_unaligned_slot(self):
+        with self.assertRaisesRegex(ValueError, 'aligned'):
+            VTableCallQueue(self.process, self.slot + 1)
+
+    def test_changed_slot_on_disable_keeps_code_allocated(self):
+        hook = VTableHook(self.process, b'\x90', self.slot)
+        hook.enabled = True
+        other = self.process.get_proc_address('kernel32.dll', 'GetCurrentThreadId')
+        self.process.virtual_protect(self.slot, 8, 0x04)
+        self.process.write_ptr(self.slot, other)
+        self.process.virtual_protect(self.slot, 8, 0x02)
+        try:
+            with self.assertRaisesRegex(RuntimeError, 'vtable slot changed'):
+                hook.free()
+            self.assertEqual(self.process.virtual_query(hook.alloc_at).State, 0x1000)  # MEM_COMMIT
+        finally:
+            self.process.virtual_protect(self.slot, 8, 0x04)
+            self.process.write_ptr(self.slot, hook.code_at)
+            self.process.virtual_protect(self.slot, 8, 0x02)
+            hook.free()
+
+    def test_failed_control_call_keeps_installed_code_owned(self):
+        hook = VTableHook(self.process, b'\x90', self.slot)
+        original_call = self.process.call
+
+        def fail_after_swap(*args):
+            original_call(*args)
+            raise OSError('control result unavailable')
+
+        try:
+            with patch.object(self.process, 'call', side_effect=fail_after_swap):
+                with self.assertRaisesRegex(OSError, 'control result unavailable'):
+                    hook.enabled = True
+            self.assertTrue(hook.enabled)
+            self.assertEqual(self.process.read_ptr(self.slot), hook.code_at)
+        finally:
+            hook.free()
+        self.assertEqual(self.process.read_ptr(self.slot), self.addr)
+
+
 class RemoteInlineCallTests(unittest.TestCase):
     def test_remote_batch_float_returns_and_cleanup(self):
         child = subprocess.Popen([sys.executable, '-B', '-u', '-c', _CHILD], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         process = hook = None
         try:
-            pid, addr, tid = map(int, child.stdout.readline().split())
+            pid, addr, tid, _ = map(int, child.stdout.readline().split())
             process = Process(pid)
             hook = InlineCallQueue(process, addr, capacity=4)
             hook.enabled = True
@@ -256,7 +361,7 @@ class RemoteInlineCallTests(unittest.TestCase):
         child = subprocess.Popen([sys.executable, '-B', '-u', '-c', _CHILD], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         process = hook = None
         try:
-            pid, addr, _ = map(int, child.stdout.readline().split())
+            pid, addr, _, _ = map(int, child.stdout.readline().split())
             process = Process(pid)
             hook = InlineCallQueue(process, addr)
             hook.enabled = True
@@ -267,6 +372,36 @@ class RemoteInlineCallTests(unittest.TestCase):
             with self.assertRaises(ProcessLookupError): ticket.wait(0)
             self.assertTrue(ticket.done)
         finally:
+            if process is not None: process.close()
+            if child.poll() is None: child.terminate()
+            child.wait(5)
+            child.stdin.close()
+            child.stdout.close()
+
+    def test_remote_vtable_batch_and_cleanup(self):
+        child = subprocess.Popen([sys.executable, '-B', '-u', '-c', _CHILD], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        process = hook = None
+        try:
+            pid, addr, tid, slot = map(int, child.stdout.readline().split())
+            process = Process(pid)
+            hook = VTableCallQueue(process, slot, capacity=2)
+            hook.enabled = True
+            self.assertEqual(process.read_ptr(slot), hook.code_at)
+            get_tid = process.get_proc_address('kernel32.dll', 'GetCurrentThreadId')
+            sqrt = process.get_proc_address('ucrtbase.dll', 'sqrt')
+            ticket, floating = hook.submit(get_tid), hook.submit(sqrt, 9.0, result_type=float)
+            child.stdin.write('hit\n')
+            child.stdin.flush()
+            self.assertEqual(child.stdout.readline().strip(), '42')
+            self.assertEqual(ticket.wait(5000), tid)
+            self.assertEqual(floating.wait(5000), 3.0)
+            hook.close()
+            hook = None
+            self.assertEqual(process.read_ptr(slot), addr)
+        finally:
+            if process is not None and process.still_alive():
+                winapi.TerminateProcess(process.handle, 0)
+            if hook is not None and not hook._tickets: hook.close()
             if process is not None: process.close()
             if child.poll() is None: child.terminate()
             child.wait(5)

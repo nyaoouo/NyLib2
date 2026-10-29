@@ -180,7 +180,20 @@ hook = InlineHook(p, b'\\x90\\x90', addr=0x401000)
 hook.enabled = True
 ```
 
-For queued calls that run on the next entry to a chosen function, see [inline_call.md](inline_call.md). `InlineCallQueue` inherits `InlineHook` and supports a bounded batch with integer and floating-point arguments.
+## VTable Hook
+
+Swap a virtual function pointer, run hook code, then jump to the original function.
+
+```python
+from nylib.winutils.vtable_hook import VTableHook
+hook = VTableHook(p, b'\x90', addr=vtable_at + index * 8)
+hook.enabled = True
+hook.free()
+```
+
+Install and free it while calls through that slot are quiescent. The slot must be 8-byte aligned.
+
+For batched calls on either hook type, see [inline_call.md](inline_call.md).
 
 ## Notes
 

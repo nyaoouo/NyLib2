@@ -7,6 +7,7 @@ import capstone
 
 from .. import winapi
 from .inline_hook import InlineHook, asm, read_code
+from .vtable_hook import VTableHook
 
 
 _HEADER_SIZE = 64
@@ -192,7 +193,7 @@ def _argument_bits(value) -> int:
 class CallTicket:
     """A submitted call; wait or close after completion to release its slot."""
 
-    def __init__(self, owner: 'InlineCallQueue', sequence: int, result_type):
+    def __init__(self, owner: '_CallQueue', sequence: int, result_type):
         self.owner = owner
         self.sequence = sequence
         self.result_type = result_type
@@ -243,21 +244,18 @@ class CallTicket:
             return result
 
 
-class InlineCallQueue(InlineHook):
-    """Call functions on the next entry to a chosen x64 function."""
+class _CallQueue:
+    """Share a bounded call queue with a function entry dispatcher."""
 
     def __init__(self, process, addr: int, capacity=16, thread_id=None):
-        if not winapi.IS_64BIT: raise OSError('InlineCallQueue requires a 64-bit host')
+        if not winapi.IS_64BIT: raise OSError('call queue requires a 64-bit host')
         if capacity < 1 or capacity > 64 or capacity & (capacity - 1):
             raise ValueError('capacity must be a power of two from 1 to 64')
         if thread_id is not None and not (isinstance(thread_id, int) and 0 < thread_id <= 0xFFFFFFFF):
             raise ValueError(f'thread_id {thread_id!r} is not a thread id')
         wow64 = ctypes.c_long()
         winapi.IsWow64Process(process.handle, ctypes.byref(wow64))
-        if wow64.value: raise OSError('InlineCallQueue requires a 64-bit target')
-        mbi = process.virtual_query(addr)
-        if mbi.State != 0x1000 or not mbi.Protect & 0xF0 or mbi.Protect & 0x100:
-            raise ValueError(f'target address {addr:#x} is not executable')
+        if wow64.value: raise OSError('call queue requires a 64-bit target')
         self.thread_id = thread_id
         self._closed = False
         self._lock = threading.Lock()
@@ -303,6 +301,52 @@ class InlineCallQueue(InlineHook):
     def call(self, func: int, *args, result_type=int, timeout_ms=-1):
         return self.submit(func, *args, result_type=result_type).wait(timeout_ms)
 
+    def free(self):
+        if self._closed: return
+        if self._enabled: raise RuntimeError('disable the call queue first')
+        if self._tickets or self._atomic.load(self._shared.local_at + 0x10):
+            raise RuntimeError('inline calls are still pending or running')
+        self._free_hook()
+
+    def close(self):
+        with self._lock:
+            if self._closed: return
+            if not self.process.still_alive():
+                for ticket in self._tickets.values():
+                    ticket._error = ProcessLookupError('target exited before inline call completed')
+                self._tickets.clear()
+                self._shared.close()
+                self._atomic.close()
+                self.alloc_at = 0
+                self._enabled = False
+                self._closed = True
+                return
+            self.enabled = False
+            self.free()
+            self._shared.close()
+            self._atomic.close()
+            self._closed = True
+
+    def __enter__(self):
+        self.enabled = True
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def __del__(self):
+        pass
+
+
+class InlineCallQueue(_CallQueue, InlineHook):
+    """Call functions on the next entry to a chosen x64 function."""
+
+    def __init__(self, process, addr: int, capacity=16, thread_id=None):
+        mbi = process.virtual_query(addr)
+        if mbi.State != 0x1000 or not mbi.Protect & 0xF0 or mbi.Protect & 0x100:
+            raise ValueError(f'target address {addr:#x} is not executable')
+        super().__init__(process, addr, capacity, thread_id)
+
     def alloc(self):
         if self.alloc_at: return
         cs = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
@@ -329,6 +373,12 @@ class InlineCallQueue(InlineHook):
             self.process.free(alloc_at)
             raise
         self.alloc_at, self.hook_code, self.orig_code = alloc_at, hook_code, orig_code
+
+    def _free_hook(self):
+        if self.alloc_at:
+            self.process.free(self.alloc_at)
+            self.alloc_at = 0
+            self.hook_code = self.orig_code = b''
 
     @property
     def enabled(self):
@@ -364,41 +414,19 @@ class InlineCallQueue(InlineHook):
         finally:
             self.process.virtual_protect(self.addr, len(expected), old)
 
-    def free(self):
-        if self._closed: return
-        if self._enabled: raise RuntimeError('disable the inline call queue first')
-        if self._tickets or self._atomic.load(self._shared.local_at + 0x10):
+class VTableCallQueue(_CallQueue, VTableHook):
+    """Call functions before a virtual function, then jump to its original pointer."""
+
+    @property
+    def enabled(self):
+        return VTableHook.enabled.fget(self)
+
+    @enabled.setter
+    def enabled(self, value):
+        if self._closed: raise RuntimeError('vtable call queue is closed')
+        if not value and self._enabled and (self._tickets or self._atomic.load(self._shared.local_at + 0x10)):
             raise RuntimeError('inline calls are still pending or running')
-        if self.alloc_at:
-            self.process.free(self.alloc_at)
-            self.alloc_at = 0
-            self.hook_code = self.orig_code = b''
+        VTableHook.enabled.fset(self, value)
 
-    def close(self):
-        with self._lock:
-            if self._closed: return
-            if not self.process.still_alive():
-                for ticket in self._tickets.values():
-                    ticket._error = ProcessLookupError('target exited before inline call completed')
-                self._tickets.clear()
-                self._shared.close()
-                self._atomic.close()
-                self.alloc_at = 0
-                self._enabled = False
-                self._closed = True
-                return
-            self.enabled = False
-            self.free()
-            self._shared.close()
-            self._atomic.close()
-            self._closed = True
-
-    def __enter__(self):
-        self.enabled = True
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
-
-    def __del__(self):
-        pass
+    def _free_hook(self):
+        VTableHook.free(self)
