@@ -56,7 +56,7 @@ def find_offset(e: 'Engine', pairs: Sequence[tuple[int, int]], min_offset: int =
                 found_offset = True
                 if j > highest_found_offset:
                     highest_found_offset = j
-                    i = 0  # the for-increment follows: the restart is at pair 1
+                    i = -1  # restart at pair 0; Dumper-7 restarts at pair 1 and never rechecks pair 0
                 j = max_offset
             j += alignment
         i += 1
