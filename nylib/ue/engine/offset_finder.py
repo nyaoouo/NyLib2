@@ -485,6 +485,35 @@ def find_ffield_owner_next_offsets(e: 'Engine', owner: int | None = None, next_:
     return None
 
 
+# FFieldClass::Name (nylib; Dumper-7 has no finder for it)
+
+_CLASS_NAME_PROBES = (('Guid', 'IntProperty'), ('Color', 'ByteProperty'))  # dd8fe34's FindFieldClassCastFlagsOffset anchors
+
+
+def has_ffield_class_name_at(e: 'Engine', offset: int) -> bool:
+    """The FName at FFieldClass + offset of Guid's and Color's first members decodes to IntProperty and ByteProperty."""
+    unresolved = dict(e.names.unresolved)
+    try:
+        for struct, wanted in _CLASS_NAME_PROBES:
+            cls = e.objects.find_struct_fast(struct).get_child_properties().get_class().get_address()
+            if e.fname.comp_idx_to_string(e.mem.i32(cls + offset + e.off.FName.CompIdx)) != wanted:
+                return False
+        return True
+    except MemoryReadError:  # a wrong candidate offset holds no valid FName
+        return False
+    finally:  # a wrong candidate must not report its index as an unresolved name
+        e.names.unresolved.clear()
+        e.names.unresolved.update(unresolved)
+
+
+def find_ffield_class_name_offset(e: 'Engine') -> int:
+    """The lowest 4-aligned offset below 0x48 that has_ffield_class_name_at accepts."""
+    for offset in range(0x0, 0x48, 0x4):
+        if has_ffield_class_name_at(e, offset):
+            return offset
+    return OffsetNotFound
+
+
 def inialize_uenum_settings(e: 'Engine', enum_obj: int, uenum_num_values_offset: int) -> None:
     """InializeUEnumSettings @ ea0dab3 (the offset is a uint32_t parameter; TPair read field by field)."""
     label = 'auto: InializeUEnumSettings'

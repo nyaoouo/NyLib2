@@ -280,6 +280,13 @@ def off_init(e: 'Engine', *, pins: Mapping[str, int] | None = None) -> None:
                 _assign(e, 'Off.FFieldClass.CastFlags', before, f'default: {_hexs(before)} (dd8fe34 finder missed)', pins)
         e.cerr(f'Off::FFieldClass::CastFlags: 0x{off.FFieldClass.CastFlags:X}\n\n')
 
+        if 'Off.FFieldClass.Name' not in pins and not OffsetFinder.has_ffield_class_name_at(e, off.FFieldClass.Name):
+            if (value := OffsetFinder.find_ffield_class_name_offset(e)) != OffsetFinder.OffsetNotFound:
+                _assign(e, 'Off.FFieldClass.Name', value, 'auto: OffsetFinder::FindFFieldClassNameOffset (nylib)', pins)
+            else:
+                e.provenance['Off.FFieldClass.Name'] = 'not found: no FFieldClass offset names IntProperty and ByteProperty'
+            e.cerr(f'Off::FFieldClass::Name: 0x{off.FFieldClass.Name:X}\n\n')
+
     _find(e, pins, 'Off.UClass.ClassDefaultObject', 'FindDefaultObjectOffset', OffsetFinder.find_default_object_offset)
     e.cerr(f'Off::UClass::ClassDefaultObject: 0x{off.UClass.ClassDefaultObject:X}\n')
 
