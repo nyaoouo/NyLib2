@@ -53,3 +53,6 @@ CreateProcessA = def_win_api(_dll.CreateProcessA, ctypes.c_bool, (ctypes.c_char_
 SuspendThread = def_win_api(_dll.SuspendThread, ctypes.c_ulong, (ctypes.c_void_p,), error_val=0xFFFFFFFF)
 ResumeThread = def_win_api(_dll.ResumeThread, ctypes.c_ulong, (ctypes.c_void_p,), error_val=0xFFFFFFFF)
 DuplicateHandle = def_win_api(_dll.DuplicateHandle, ctypes.c_bool, (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_bool, ctypes.c_ulong), error_zero=True)
+GetThreadDescription = def_win_api(_dll.GetThreadDescription, ctypes.c_long, (ctypes.c_void_p, ctypes.c_void_p))  # HRESULT; negative on failure
+LocalFree = def_win_api(_dll.LocalFree, ctypes.c_void_p, (ctypes.c_void_p,))  # returns NULL on success
+GetThreadTimes = def_win_api(_dll.GetThreadTimes, ctypes.c_bool, (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p), error_zero=True)

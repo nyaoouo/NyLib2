@@ -93,6 +93,8 @@ with p.get_thread(thread_id) as thread:
 `iter_threads(da=0x1FFFFF)` opens the process's threads from a Toolhelp snapshot.
 Each returned `Thread` owns its handle: use `with thread:` or call `thread.close()`.
 `thread.suspend()` and `thread.resume()` return the previous suspend count.
+`thread.description()` returns the name set by `SetThreadDescription`, or `None` if unnamed; it raises `OSError` without `THREAD_QUERY_LIMITED_INFORMATION`.
+`thread.creation_time()` returns the creation time as a FILETIME (100-ns ticks since 1601); the earliest thread of a process is its initial thread. It raises `OSError` without `THREAD_QUERY_LIMITED_INFORMATION`.
 
 `call(..., queue_apc_thread=None)` uses `CreateRemoteThread` by default. Pass a
 `Thread` or a local thread handle to use `QueueUserAPC`; the thread must belong to
