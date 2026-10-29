@@ -7,7 +7,8 @@ from typing import Callable, Iterator
 
 from ..errors import DetectionError, MemoryReadError
 from ..flags import EClassCastFlags
-from .state import FChunkedFixedUObjectArrayLayout, FChunkedFixedUObjectArrayLayouts, FFixedUObjectArrayLayout, FFixedUObjectArrayLayouts
+from .state import (FChunkedFixedUObjectArrayLayout, FChunkedFixedUObjectArrayLayouts, FFixedUObjectArrayLayout, FFixedUObjectArrayLayouts,
+                    NYLIB_CHUNKED_LAYOUTS)
 from .unreal import UEClass, UEObject, UEProperty, UEStruct
 
 if typing.TYPE_CHECKING:
@@ -119,16 +120,21 @@ def _readable_candidate(check, e: 'Engine', address: int, layout) -> bool:
         return False
 
 
+def _data_sections_first(section) -> tuple[bool, bool]:
+    """Section sort key: writable data, then read-only data, then executable sections; GObjects is a writable global."""
+    return section.executable, not section.writable
+
+
 def _layout_window(layout) -> int:
     return max(layout.ObjectsOffset + 8, *(o + 4 for o in dataclasses.astuple(layout)))
 
 
-def _gobjects_candidates(address: int, data) -> list[int]:
+def _gobjects_candidates(address: int, data, fixed_layouts=FFixedUObjectArrayLayouts, chunked_layouts=FChunkedFixedUObjectArrayLayouts) -> list[int]:
     """A1 provider: every address of the chunk where an IsAddressValidGObjects overload can pass its integer checks."""
     n = len(data)
     out = set()
     fixed_anchors = [m.start() for m in _RE_FIXED_NUM.finditer(data)]
-    for layout in FFixedUObjectArrayLayouts:
+    for layout in fixed_layouts:
         window = _layout_window(layout)
         for anchor in fixed_anchors:
             p = anchor - layout.NumObjectsOffset
@@ -137,7 +143,7 @@ def _gobjects_candidates(address: int, data) -> list[int]:
             if _fixed_counts_valid(_I32.unpack_from(data, p + layout.MaxObjectsOffset)[0], _I32.unpack_from(data, anchor)[0]):
                 out.add(address + p)
     chunked_anchors = [m.start() for m in _RE_CHUNKED_NUM_CHUNKS.finditer(data)]
-    for layout in FChunkedFixedUObjectArrayLayouts:
+    for layout in chunked_layouts:
         window = _layout_window(layout)
         for anchor in chunked_anchors:
             p = anchor - layout.NumChunksOffset
@@ -149,7 +155,7 @@ def _gobjects_candidates(address: int, data) -> list[int]:
             if _chunked_counts_valid(_I32.unpack_from(data, p + layout.MaxElementsOffset)[0], _I32.unpack_from(data, p + layout.NumElementsOffset)[0],
                                      max_chunks, _I32.unpack_from(data, anchor)[0]):
                 out.add(address + p)
-    tail = max(_layout_window(layout) for layout in (*FFixedUObjectArrayLayouts, *FChunkedFixedUObjectArrayLayouts))
+    tail = max(_layout_window(layout) for layout in (*fixed_layouts, *chunked_layouts))
     out.update(range(address + max(0, n - tail + 1), address + n))  # windows past the end of data cannot be ruled out
     return sorted(out)
 
@@ -225,19 +231,26 @@ class ObjectArray:
             return False
 
         is_gobjects_chunked = False
+        fixed_layouts, chunked_layouts = FFixedUObjectArrayLayouts, FChunkedFixedUObjectArrayLayouts
 
         def is_address_valid_gobjects(current_address: int) -> bool:
             nonlocal is_gobjects_chunked
-            if matches_any_layout(FFixedUObjectArrayLayouts, current_address):
+            if matches_any_layout(fixed_layouts, current_address):
                 is_gobjects_chunked = False
                 return True
-            elif matches_any_layout(FChunkedFixedUObjectArrayLayouts, current_address):
+            elif matches_any_layout(chunked_layouts, current_address):
                 is_gobjects_chunked = True
                 return True
             return False
 
         if scan_all_memory:
-            gobjects_address = e.platform.iterate_all_sections_with_callback(is_address_valid_gobjects, 0x4, 0x50, candidates=_gobjects_candidates)
+            gobjects_address = e.platform.iterate_all_sections_with_callback(is_address_valid_gobjects, 0x4, 0x50, candidates=_gobjects_candidates,
+                                                                             key=_data_sections_first)
+            if not gobjects_address:  # layouts outside Dumper-7's table, tried only once its rows found nothing
+                fixed_layouts, chunked_layouts = (), NYLIB_CHUNKED_LAYOUTS
+                gobjects_address = e.platform.iterate_all_sections_with_callback(
+                    is_address_valid_gobjects, 0x4, 0x50, key=_data_sections_first,
+                    candidates=lambda address, data: _gobjects_candidates(address, data, fixed_layouts, chunked_layouts))
         else:
             gobjects_address = e.platform.iterate_section_with_callback(e.platform.get_section_info('.data'), is_address_valid_gobjects, 0x4, 0x50,
                                                                         candidates=_gobjects_candidates)
