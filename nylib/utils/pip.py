@@ -118,15 +118,15 @@ def is_installed(*_a):
     :param _a:
     :return: True if all packages are installed.
     """
-    boostrap_pip()
+    from importlib.metadata import distribution, PackageNotFoundError
 
-    import pip._internal.commands.show
-
-    required = len(_a)
-    for _ in pip._internal.commands.show.search_packages_info(_a):
-        required -= 1
-        if required == 0: return True
-    return False
+    if not _a: return False
+    for name in _a:
+        try:
+            distribution(name)
+        except PackageNotFoundError:
+            return False
+    return True
 
 # Inside a PyInstaller-frozen executable the pip-based presence check and
 # install fallback are both broken: pip's ``dist-info`` metadata is not
