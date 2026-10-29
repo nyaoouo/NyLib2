@@ -5,6 +5,7 @@ import operator
 import os
 import re
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
 from ..errors import InvalidMappingError
@@ -580,6 +581,454 @@ def _apply_change(u: 'Usmap', structs: dict, c: MappingChange, k: int) -> Mappin
     return replace(c, struct=rec.name, before=before)
 
 
+# --- requirements, results and reports ---------------------------------------------------------------------------
+
+_STATUSES = ('ok', 'resolved', 'missing', 'type mismatch', 'index mismatch', 'ambiguous')
+_VERDICTS = ('usable', 'usable after apply', 'not usable')
+_REPORT_FORMAT = 'nylib.ue.assets.MappingReport'
+_PREFIX_MIN = 6  # shortest prefix unique_prefix_fallback matches on
+
+
+@dataclass(frozen=True, slots=True)
+class Requirement:
+    """One thing a family reads: a record, and maybe a property by name, chain index and type label."""
+    struct: str
+    name: str | None = None
+    index: int | None = None
+    type: str | None = None
+
+    def __post_init__(self):
+        _text(self.struct, 'struct')
+        if self.name is not None:
+            _text(self.name, 'name')
+        if self.index is not None:
+            if (v := _int(self.index, 'index')) < 0:
+                raise ValueError('index is out of range')
+            if type(self.index) is not int:
+                object.__setattr__(self, 'index', v)
+        if self.type is not None:
+            _parse_label(self.type)
+
+    def to_python(self) -> dict:
+        return {'struct': self.struct, 'name': self.name, 'index': self.index, 'type': self.type}
+
+    @classmethod
+    def from_python(cls, data: dict) -> 'Requirement':
+        return _requirement_from(data, '')
+
+
+def _requirement_from(data, path: str) -> Requirement:
+    d = _data(data, path, ('struct', 'name', 'index', 'type'))
+    try:
+        return Requirement(_val(d, path, 'struct', 'str'), _val(d, path, 'name', 'str', True), _val(d, path, 'index', 'int', True),
+                           _val(d, path, 'type', 'str', True))
+    except (TypeError, ValueError) as e:
+        raise ValueError(f'{path or "data"}: {e}') from None
+
+
+@dataclass(frozen=True, slots=True)
+class RequirementResult:
+    family: str
+    requirement: Requirement
+    status: str
+    found: PropertyInfo | None
+    change: MappingChange | None
+    by: str | None
+    detail: str | None
+
+    def to_python(self) -> dict:
+        return {'family': self.family, 'requirement': self.requirement.to_python(), 'status': self.status,
+                'found': None if self.found is None else self.found.to_python(),
+                'change': None if self.change is None else self.change.to_python(), 'by': self.by, 'detail': self.detail}
+
+    @classmethod
+    def from_python(cls, data: dict) -> 'RequirementResult':
+        return _result_from(data, '', None)
+
+
+def _result_from(data, path: str, family) -> RequirementResult:
+    d = _data(data, path, ('family', 'requirement', 'status', 'found', 'change', 'by', 'detail'))
+    name = _val(d, path, 'family', 'str')
+    if family is not None and name != family:
+        raise ValueError(f'{_join(path, "family")}: differs from the family name')
+    status = _val(d, path, 'status', 'str')
+    if status not in _STATUSES:
+        raise ValueError(f'{_join(path, "status")}: not a status')
+    found = None if d['found'] is None else _property_from(d['found'], _join(path, 'found'))
+    change = None if d['change'] is None else _change_from(d['change'], _join(path, 'change'))
+    return RequirementResult(name, _requirement_from(d['requirement'], _join(path, 'requirement')), status, found, change,
+                             _val(d, path, 'by', 'str', True), _val(d, path, 'detail', 'str', True))
+
+
+@dataclass(frozen=True, slots=True)
+class FamilyResult:
+    name: str
+    verdict: str
+    items: tuple[RequirementResult, ...]
+
+    @property
+    def usable(self) -> bool:
+        return self.verdict == 'usable'
+
+    def to_python(self) -> dict:
+        return {'name': self.name, 'verdict': self.verdict, 'items': [r.to_python() for r in self.items]}
+
+    @classmethod
+    def from_python(cls, data: dict) -> 'FamilyResult':
+        return _family_from(data, '')
+
+
+def _family_from(data, path: str) -> FamilyResult:
+    d = _data(data, path, ('name', 'verdict', 'items'))
+    name = _val(d, path, 'name', 'str')
+    verdict = _val(d, path, 'verdict', 'str')
+    if verdict not in _VERDICTS:
+        raise ValueError(f'{_join(path, "verdict")}: not a verdict')
+    at = _join(path, 'items')
+    return FamilyResult(name, verdict, tuple(_result_from(item, _join(at, n), name) for n, item in enumerate(_val(d, path, 'items', 'list'))))
+
+
+_REPORT_KEYS = ('format', 'format_version', 'file', 'sha256', 'digest', 'version', 'structs', 'enums', 'meta', 'build', 'paired',
+                'families', 'covered', 'counts', 'proposed', 'changes', 'custom_serialization', 'summary')
+
+
+@dataclass(frozen=True, slots=True)
+class MappingReport:
+    file: str
+    sha256: str
+    digest: str
+    version: int
+    structs: int
+    enums: int
+    meta: DumpInfo | None
+    build: int | None
+    families: tuple[FamilyResult, ...]
+    proposed: tuple[MappingChange, ...]
+    changes: tuple[MappingChange, ...]
+    custom_serialization: tuple[str, ...]
+
+    @property
+    def paired(self) -> bool | None:
+        if self.meta is None or self.meta.pe_timestamp is None or self.build is None:
+            return None
+        return self.meta.pe_timestamp == self.build
+
+    @property
+    def covered(self) -> tuple[str, ...]:
+        return tuple(f.name for f in self.families if f.usable)
+
+    @property
+    def items(self) -> tuple[RequirementResult, ...]:
+        return tuple(r for f in self.families for r in f.items)
+
+    @property
+    def counts(self) -> tuple[tuple[str, int], ...]:
+        tally = dict.fromkeys(_STATUSES, 0)
+        for f in self.families:
+            for r in f.items:
+                tally[r.status] += 1
+        return tuple(tally.items())
+
+    def family(self, name: str) -> FamilyResult:
+        if not isinstance(name, str):
+            raise TypeError(f'name must be a str, got {type(name).__name__}')
+        for f in self.families:
+            if f.name == name:
+                return f
+        raise KeyError('no family with that name')
+
+    def __str__(self) -> str:
+        nf, n, p, c = len(self.families), sum(c for _s, c in self.counts), len(self.proposed), len(self.changes)
+        text = (f'{_ascii_form(self.file)} (sha256 {self.sha256[:8]}..., v{self.version}): {len(self.covered)} of {nf} '
+                f'{"family" if nf == 1 else "families"} usable; {n} {_plural(n, "requirement")}: '
+                f'{", ".join(f"{k} {s}" for s, k in self.counts if k)}')
+        if p:
+            text += f'; {p} proposed {_plural(p, "rename")}'
+        text += f'; {c} {_plural(c, "change")}' if c else '; no changes'
+        if self.meta is None:
+            return text + '; no dump meta.json'
+        text += '; dump meta.json'
+        if self.meta.created is not None:
+            text += ' ' + _ascii_form(self.meta.created[:10])
+        if self.meta.quality is not None:
+            text += ' ' + _ascii_form(self.meta.quality)
+        if (paired := self.paired) is not None:
+            text += f', build {self.build:#010x} {"paired" if paired else "not paired"}'
+        return text
+
+    def __repr__(self) -> str:
+        return f'<MappingReport {self}>'
+
+    def to_python(self) -> dict:
+        return {'format': _REPORT_FORMAT, 'format_version': 1, 'file': self.file, 'sha256': self.sha256, 'digest': self.digest,
+                'version': self.version, 'structs': self.structs, 'enums': self.enums,
+                'meta': None if self.meta is None else self.meta.to_python(), 'build': self.build, 'paired': self.paired,
+                'families': [f.to_python() for f in self.families], 'covered': list(self.covered), 'counts': dict(self.counts),
+                'proposed': [c.to_python() for c in self.proposed], 'changes': [c.to_python() for c in self.changes],
+                'custom_serialization': list(self.custom_serialization), 'summary': str(self)}
+
+    @classmethod
+    def from_python(cls, data: dict) -> 'MappingReport':
+        return _report_from(data)
+
+
+def _report_from(data) -> MappingReport:
+    if not isinstance(data, dict):
+        raise TypeError(f'data must be a dict, got {type(data).__name__}')
+    if 'format' not in data:
+        raise ValueError('format: missing key')
+    if data['format'] != _REPORT_FORMAT or not isinstance(data['format'], str):
+        raise ValueError('format: not a MappingReport archive')
+    if 'format_version' not in data:
+        raise ValueError('format_version: missing key')
+    if not _is_int(v := data['format_version']):
+        raise ValueError('format_version: expected int')
+    if v != 1:
+        raise ValueError(f'format_version {v} is not supported by this nylib version')
+    d = _data(data, '', _REPORT_KEYS)
+    build = _val(d, '', 'build', 'int', True)
+    if build is not None and not 0 <= build <= 0xFFFFFFFF:
+        raise ValueError('build: out of range')
+    custom = _val(d, '', 'custom_serialization', 'list')
+    for n, item in enumerate(custom):
+        if not isinstance(item, str):
+            raise ValueError(f'custom_serialization[{n}]: expected str')
+    report = MappingReport(
+        _val(d, '', 'file', 'str'), _val(d, '', 'sha256', 'str'), _val(d, '', 'digest', 'str'), _val(d, '', 'version', 'int'),
+        _val(d, '', 'structs', 'int'), _val(d, '', 'enums', 'int'), None if d['meta'] is None else _dump_from(d['meta'], 'meta'), build,
+        tuple(_family_from(f, f'families[{n}]') for n, f in enumerate(_val(d, '', 'families', 'list'))),
+        tuple(_change_from(c, f'proposed[{n}]') for n, c in enumerate(_val(d, '', 'proposed', 'list'))),
+        tuple(_change_from(c, f'changes[{n}]') for n, c in enumerate(_val(d, '', 'changes', 'list'))), tuple(custom))
+    if _val(d, '', 'paired', 'bool', True) is not report.paired:
+        raise ValueError('paired: differs from meta and build')
+    covered = _val(d, '', 'covered', 'list')
+    if not all(isinstance(c, str) for c in covered) or tuple(covered) != report.covered:
+        raise ValueError('covered: differs from the families')
+    counts = _val(d, '', 'counts', 'dict')
+    if list(counts) != list(_STATUSES) or not all(_is_int(c) for c in counts.values()) or counts != dict(report.counts):
+        raise ValueError('counts: differs from the families')
+    _val(d, '', 'summary', 'str')
+    return report
+
+
+# --- the stock fallbacks -----------------------------------------------------------------------------------------
+
+def _check_chain(requirement, chain) -> None:
+    if not isinstance(requirement, Requirement):
+        raise TypeError(f'requirement must be a Requirement, got {type(requirement).__name__}')
+    if not isinstance(chain, tuple) or not all(isinstance(s, PropertyInfo) for s in chain):
+        raise TypeError('chain must be a tuple of PropertyInfo')
+
+
+def index_and_type_fallback(requirement: Requirement, chain: tuple[PropertyInfo, ...]) -> PropertyInfo | None:
+    """The slot of `chain` at the requirement's index when its type is the required one; names are ignored."""
+    _check_chain(requirement, chain)
+    if requirement.index is None or requirement.type is None:
+        return None
+    s = next((s for s in chain if s.index == requirement.index), None)
+    return s if s is not None and s.type == requirement.type else None
+
+
+def unique_prefix_fallback(requirement: Requirement, chain: tuple[PropertyInfo, ...]) -> PropertyInfo | tuple[PropertyInfo, ...] | None:
+    """The `_aaa` slots of `chain` whose name extends the requirement's name or is a prefix of it, the prefix at least 6 characters."""
+    _check_chain(requirement, chain)
+    n = requirement.name
+    if n is None or not n.startswith('_aaa') or len(n) < _PREFIX_MIN:
+        return None
+    hits = []
+    for s in chain:
+        if s.element != 0 or not s.name.startswith('_aaa') or (requirement.type is not None and s.type != requirement.type):
+            continue
+        t = s.name.split('\0', 1)[0]
+        if t.startswith(n) or (n.startswith(t) and len(t) >= _PREFIX_MIN):
+            hits.append(s)
+    return None if not hits else hits[0] if len(hits) == 1 else tuple(hits)
+
+
+# --- check() -----------------------------------------------------------------------------------------------------
+
+class _Chain:
+    """One struct's resolved chain: its slots, and lookups by chain index and by name (element 0)."""
+    __slots__ = ('slots', 'by_index', 'names', 'records')
+
+    def __init__(self, records, slots):
+        self.slots = slots
+        self.by_index = {s.index: s for s in slots}
+        self.names = {}
+        for s in slots:
+            if s.element == 0:
+                self.names.setdefault(s.name, []).append(s)
+        self.records = frozenset(_lower(r.name) for r in records)
+
+
+class _Chains:
+    """A per-call cache of a mapping's chains: struct -> (_Chain, None), or (None, the `missing` detail)."""
+
+    def __init__(self, mappings):
+        self._mappings = mappings
+        self._cache = {}
+
+    def get(self, struct: str) -> tuple:
+        if (hit := self._cache.get(struct)) is None:
+            records, why = _resolve_chain(self._mappings, struct)
+            if records is None:
+                text = f'no record for {_one_line(why[1])}' if why[0] == 'no record' else f'the super chain of {_one_line(struct)} cycles'
+                hit = (None, text)
+            else:
+                hit = (_Chain(records, _chain_slots(records)), None)
+            self._cache[struct] = hit
+        return hit
+
+
+def _evaluate(chains: _Chains, req: Requirement, ask) -> tuple:
+    """(status or 'pass', found, detail, via, asked) of `req` on one mapping; `ask(req, chain)` is the fallback's validated answer tuple."""
+    chain, why = chains.get(req.struct)
+    if chain is None:
+        return 'missing', None, why, None, False
+    name, index, label = req.name, req.index, req.type
+    if name is None:
+        if index is None:
+            if label is None:
+                return 'pass', None, None, 'struct', False
+            hits = [s for s in chain.slots if s.element == 0 and s.type == label]
+            if not hits:
+                return 'missing', None, f'no property of type {label}', 'type', False
+            if len(hits) > 1:
+                return 'ambiguous', None, f'{len(hits)} properties of type {label}', 'type', False
+            return 'pass', hits[0], None, 'type', False
+        if (s := chain.by_index.get(index)) is None:
+            return 'missing', None, f'no property at index {index}', 'index', False
+        if label is not None and s.type != label:
+            return 'type mismatch', s, f'index {index} is a {_one_line(s.type)}', 'index', False
+        return 'pass', s, None, 'index', False
+    named = chain.names.get(name, ())
+    if len(named) > 1:
+        return 'ambiguous', None, f'{len(named)} properties have the name', 'name', False
+    cand, via, asked = (named[0] if named else None), 'name', False
+    if cand is None and ask is not None:
+        asked = True
+        answer = ask(req, chain)
+        if len(answer) > 1:
+            return 'ambiguous', None, f'the fallback found {len(answer)} candidates', 'fallback', True
+        if answer:
+            cand, via = answer[0], 'fallback'
+    if cand is None and index is not None and (cand := chain.by_index.get(index)) is not None:
+        via = 'index'
+    if cand is None:
+        return 'missing', None, 'no property has the name' + ('; the fallback found none' if asked else ''), 'name', asked
+    if index is not None and cand.index != index:
+        s = chain.by_index.get(index)
+        if s is not None and s.owner == cand.owner and s.own_index == cand.own_index:
+            cand = s
+    if label is not None and cand.type != label:
+        a = _one_line(cand.type)
+        detail = f'the fallback answered index {cand.index}, a {a}' if via == 'fallback' else f'index {cand.index} is a {a}'
+        return 'type mismatch', cand, detail, via, asked
+    if index is not None and cand.index != index:
+        detail = f'the name is at index {cand.index}' if via == 'name' else f'the fallback answered index {cand.index}'
+        return 'index mismatch', cand, detail, via, asked
+    if via == 'index':
+        gap = 'the fallback found none; ' if asked else ''
+        return 'index mismatch', cand, f'no property has the name; {gap}index {cand.index} has another name', via, asked
+    return 'pass', cand, None, via, asked
+
+
+def _answer(answer, chain: _Chain, family: str, n: int) -> tuple:
+    """A fallback's answer as a tuple of slots of `chain`; ValueError for an answer the protocol refuses."""
+    if answer is None:
+        return ()
+    many = (answer,) if isinstance(answer, PropertyInfo) else answer
+    where = f'family {family!r}, position {n}'
+    if not isinstance(many, tuple):
+        raise ValueError(f'{where}: the fallback answered a {type(answer).__name__}, not None, a PropertyInfo or a tuple')
+    if not all(isinstance(a, PropertyInfo) for a in many):
+        raise ValueError(f'{where}: the fallback answered an item that is not a PropertyInfo')
+    if len(set(many)) != len(many):
+        raise ValueError(f'{where}: the fallback answered the same slot twice')
+    if any(chain.by_index.get(a.index) != a for a in many):
+        raise ValueError(f'{where}: the fallback answered a slot that is not in the chain')
+    return many
+
+
+def _families_of(requirements) -> tuple:
+    """((family, requirements), ...) from check()'s first argument."""
+    def items(value, family):
+        if isinstance(value, (str, bytes, Requirement)):
+            raise TypeError(f'family {family!r}: requirements must be an iterable of Requirement, got {type(value).__name__}')
+        try:
+            out = tuple(value)
+        except TypeError:
+            raise TypeError(f'family {family!r}: requirements must be an iterable of Requirement, got {type(value).__name__}') from None
+        for n, r in enumerate(out):
+            if not isinstance(r, Requirement):
+                raise TypeError(f'family {family!r}: position {n} must be a Requirement, got {type(r).__name__}')
+        if not out:
+            raise ValueError(f'family {family!r} has no requirement')
+        return out
+
+    if isinstance(requirements, Mapping):
+        out = []
+        for key, value in requirements.items():
+            if not isinstance(key, str):
+                raise TypeError(f'a family name must be a str, got {type(key).__name__}')
+            out.append((key, items(value, key)))
+        if not out:
+            raise ValueError('no family to check')
+        return tuple(out)
+    return (('', items(requirements, '')),)
+
+
+def _responsible(by_struct: dict, found: PropertyInfo | None, chain: _Chain) -> MappingChange:
+    """The applied change a resolved result names: the last one on `found`'s property, else the last one on the chain's records."""
+    if found is not None:
+        for _pos, c in reversed(by_struct.get(_lower(found.owner), ())):
+            if c.kind == 'record' or (c.kind != 'count' and c.own_index == found.own_index):
+                return c
+    return max((by_struct[r][-1] for r in chain.records if r in by_struct), key=lambda p: p[0])[1]
+
+
+class _Check:
+    """The state of one check() call: claims, the fallback's memo and the pass over the families."""
+
+    def __init__(self, fallback):
+        self.fallback = fallback
+        self.memo = {}
+
+    def ask(self, req, chain, family, n):
+        if req not in self.memo:
+            self.memo[req] = self.fallback(req, chain.slots)
+        return _answer(self.memo[req], chain, family, n)
+
+    def run(self, chains: _Chains, families: tuple, fallback_on: bool) -> list:
+        """Per family, per requirement: (status or 'pass', found, detail, via, asked), claims applied."""
+        claims = {}
+        out = []
+        for family, reqs in families:
+            rows = []
+            for n, req in enumerate(reqs):
+                ask = (lambda r, c, family=family, n=n: self.ask(r, c, family, n)) if fallback_on else None
+                row = _evaluate(chains, req, ask)
+                if row[0] == 'pass' and req.name is not None:
+                    row = self.claim(claims, chains.get(req.struct)[0], req, row)
+                rows.append(row)
+            out.append(rows)
+        return out
+
+    @staticmethod
+    def claim(claims: dict, chain: _Chain, req: Requirement, row: tuple) -> tuple:
+        status, found, detail, via, asked = row
+        key = (_lower(found.owner), found.own_index)
+        if (prior := claims.get(key)) is not None and prior != req.name:
+            return 'ambiguous', None, f'index {found.index} is claimed for another name by an earlier requirement', via, asked
+        if via == 'fallback':
+            for s in chain.slots:
+                k = (_lower(s.owner), s.own_index)
+                if s.element == 0 and k != key and claims.get(k) == req.name:
+                    return 'ambiguous', None, f'the name is claimed for index {s.index} by an earlier requirement', via, asked
+        claims[key] = req.name
+        return row
+
+
 # --- load_usmap and Usmap ----------------------------------------------------------------------------------------
 
 def _meta_error(usmap: str, meta: str, why: str, reason: str) -> InvalidMappingError:
@@ -742,3 +1191,68 @@ class Usmap:
                 return entry
             name = None if (rec := self._eff.record(name)) is None else rec.super
         return None
+
+    def check(self, requirements, *, fallback=None, by: str | None = None, build: int | None = None) -> MappingReport:
+        """Check requirement families against the effective mapping; a `fallback` only proposes renames, `with_changes()` applies them."""
+        families = _families_of(requirements)
+        if fallback is not None and not callable(fallback):
+            raise TypeError(f'fallback must be callable, got {type(fallback).__name__}')
+        if by is not None and not isinstance(by, str):
+            raise TypeError(f'by must be a str, got {type(by).__name__}')
+        if fallback is None and by is not None:
+            raise ValueError('by needs a fallback')
+        if fallback is not None:
+            if by is None:
+                raise TypeError('by must be a str naming the fallback, got NoneType')
+            if not by or by == 'patch' or _CONTROL_RE.search(by):
+                raise ValueError("by must be a non-empty label without control characters, and not 'patch'")
+        if build is not None:
+            build = _ranged(build, 'build', 0, 0xFFFFFFFF)
+        state = _Check(fallback)
+        chains = _Chains(self._eff)
+        base = _Chains(self._file_map) if self.changes else chains
+        rows = state.run(chains, families, fallback is not None)
+        by_struct = None
+        proposed = []
+        results = []
+        usable = []
+        for (family, reqs), fam_rows in zip(families, rows):
+            items = []
+            clean = True
+            for req, (status, found, detail, via, asked) in zip(reqs, fam_rows):
+                change = None
+                label = by if asked else None
+                if status == 'pass' and via == 'fallback':
+                    change = MappingChange('rename', found.owner, found.own_index, req.name, found.type if _parsable(found.type) else None,
+                                           before=found.name or None, by=by)
+                    if change not in proposed:
+                        proposed.append(change)
+                    status, detail = 'resolved', f'rename proposed by {by}'
+                elif status == 'pass':
+                    if not self.changes or ((b := _evaluate(base, req, None))[0] == 'pass' and b[1] == found):
+                        status = 'ok'
+                    else:
+                        if by_struct is None:
+                            by_struct = {}
+                            for pos, c in enumerate(self.changes):
+                                by_struct.setdefault(_lower(c.struct), []).append((pos, c))
+                        change = _responsible(by_struct, found, chains.get(req.struct)[0])
+                        status, label, detail = 'resolved', change.by, f'{change.kind} by {change.by}'
+                items.append(RequirementResult(family, req, status, found, change, label, detail))
+                clean = clean and (status == 'ok' or (status == 'resolved' and via != 'fallback'))
+            results.append(items)
+            usable.append(clean)
+        after = None
+        verdicts = []
+        for n, items in enumerate(results):
+            if usable[n]:
+                verdicts.append('usable')
+            elif not all(r.status in ('ok', 'resolved') for r in items):
+                verdicts.append('not usable')
+            else:
+                if after is None:
+                    after = _Check(None).run(_Chains(self.with_changes(proposed)._eff), families, False)
+                verdicts.append('usable after apply' if all(row[0] == 'pass' for row in after[n]) else 'not usable')
+        return MappingReport(self.file, self.sha256, self.digest, self.version, self.structs, self.enums, self.meta, build,
+                             tuple(FamilyResult(f, v, tuple(items)) for (f, _r), v, items in zip(families, verdicts, results)),
+                             tuple(proposed), self.changes, self.custom_serialization)
