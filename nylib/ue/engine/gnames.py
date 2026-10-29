@@ -534,12 +534,10 @@ class NameArray:
         return False
 
     def name_pools_by_content(self) -> typing.Iterator[int]:
-        """FNamePool candidates: an 8-aligned slot in a writable non-executable section, after a plausible CurrentBlock and
+        """FNamePool candidates: an 8-aligned slot in a writable section (RW, then RWX), after a plausible CurrentBlock and
         CurrentByteCursor, pointing at a block that starts <hdr>"None"<hdr>"ByteProperty"; the pool is the slot - 0x10."""
         e, p = self.e, self.e.platform
-        for section in p.image.sections:
-            if not section.writable or section.executable:
-                continue
+        for section in sorted((s for s in p.image.sections if s.writable), key=lambda s: s.executable):  # RW, then RWX (packed images)
             for chunk_addr, data in p.scanner.chunks(section):
                 skip = (-chunk_addr) % 8
                 words = memoryview(data)[skip:skip + (len(data) - skip) // 8 * 8].cast('Q')
@@ -552,7 +550,7 @@ class NameArray:
                         continue
                     if (head := e.mem.try_read(block, 0x20)) is None:
                         continue
-                    if any(head[h:h + 4] == b'None' and b'ByteProperty' in head[h + 4:] for h in (2, 4)):
+                    if any(head[h:h + 4] == b'None' and b'ByteProperty' in head[h + 4:] for h in (2, 4, 6)):  # 6: ComparisonId + header (case-preserving names)
                         yield chunk_addr + skip + (k - 2) * 8
 
     def _try_name_pool_by_content(self, label: str) -> bool:
