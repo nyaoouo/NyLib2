@@ -85,10 +85,11 @@ class EnumRecord:
 class Mappings:
     """A parsed `.usmap` schema: struct and enum records, keyed per D1's duplicate rules."""
 
-    def __init__(self, structs: dict, enums: dict, usmap_name: str):
+    def __init__(self, structs: dict, enums: dict, usmap_name: str, *, version: int | None = None):
         self._structs = structs  # dict[ascii_lower(name) -> StructRecord]; last-wins
         self._enums = enums  # dict[name -> EnumRecord]; first-wins
         self._usmap = usmap_name
+        self.version = version  # the .usmap format version, None for a hand-built Mappings
 
     def record(self, name: str) -> 'StructRecord | None':
         return self._structs.get(_ascii_lower(name))
@@ -239,7 +240,7 @@ def _parse_bytes(raw: bytes, basename: str) -> Mappings:
         structs, enums = _parse_payload(payload, version)
     except (ValueError, IndexError, struct.error, UnicodeDecodeError, RecursionError, MemoryError) as e:
         raise _malformed(basename, str(e)) from None
-    return Mappings(structs, enums, basename)
+    return Mappings(structs, enums, basename, version=version)
 
 
 def _parse_payload(payload, version: int):
