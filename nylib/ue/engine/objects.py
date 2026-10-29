@@ -119,6 +119,11 @@ def _readable_candidate(check, e: 'Engine', address: int, layout) -> bool:
         return False
 
 
+def _data_sections_first(section) -> tuple[bool, bool]:
+    """Section sort key: writable data, then read-only data, then executable sections; GObjects is a writable global."""
+    return section.executable, not section.writable
+
+
 def _layout_window(layout) -> int:
     return max(layout.ObjectsOffset + 8, *(o + 4 for o in dataclasses.astuple(layout)))
 
@@ -237,7 +242,8 @@ class ObjectArray:
             return False
 
         if scan_all_memory:
-            gobjects_address = e.platform.iterate_all_sections_with_callback(is_address_valid_gobjects, 0x4, 0x50, candidates=_gobjects_candidates)
+            gobjects_address = e.platform.iterate_all_sections_with_callback(is_address_valid_gobjects, 0x4, 0x50, candidates=_gobjects_candidates,
+                                                                             key=_data_sections_first)
         else:
             gobjects_address = e.platform.iterate_section_with_callback(e.platform.get_section_info('.data'), is_address_valid_gobjects, 0x4, 0x50,
                                                                         candidates=_gobjects_candidates)

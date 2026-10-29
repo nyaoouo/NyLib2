@@ -117,9 +117,9 @@ class Platform:
         return 0
 
     def iterate_all_sections_with_callback(self, callback, granularity: int = 4, offset_from_end: int = 0, *,
-                                            candidates=None) -> int:
-        """PlatformWindows::IterateAllSectionsWithCallback @ ea0dab3."""
-        for section in self.image.sections:
+                                            candidates=None, key=None) -> int:
+        """PlatformWindows::IterateAllSectionsWithCallback @ ea0dab3; `key` sorts the sections (stable), header order without it."""
+        for section in self.image.sections if key is None else sorted(self.image.sections, key=key):
             if not (section.characteristics & IMAGE_SCN_MEM_READ):
                 continue
             result = self.iterate_section_with_callback(section, callback, granularity, offset_from_end, candidates=candidates)
