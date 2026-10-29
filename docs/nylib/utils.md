@@ -121,6 +121,7 @@ packed = pkg_archive.pack('pkg/', is_main=True, package_name='myapp')
 | `delegate` | Event handler pattern, single or grouped | `Delegate`, `GroupDelegate` |
 | `enum` | Enum helpers for fallback on missing values | `missing()`, `auto_missing()` |
 | `handles` | Allocate and free integer handles | `Handles.get()`, `.free()` |
+| [`imagecodec`](utils/imagecodec.md) | JPEG (Windows WIC) and PNG (zlib) encoding of RGBA8 pixels | `encode_jpeg()`, `encode_png()` |
 | `mutex` | Cross-process file-based lock | `Mutex(__enter__, __exit__)` |
 | [`oodle`](utils/oodle.md) | Oodle Data compression and Oodle Network 1 UDP/TCP packet codecs | `compress()`, `decompress()`, `UdpCodec`, `TcpCodec` |
 | `preprocessor` | Compile-time macro and conditional code processor | `IProcessors` |

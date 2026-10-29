@@ -44,6 +44,7 @@ nylib/                       importable package
   tkinter_/                  small tkinter extras
   ue/                        Unreal Engine reflection: dumper, snapshots, runtime API
   utils/                     pip bootstrap, eventloop, threading, web, ...
+    imagecodec/              JPEG (WIC, ctypes) and PNG (zlib) encoding of RGBA8
     oodle/                   Oodle Data/Network 1 bindings (ctypes) + bundled DLLs
   vmware_wp/                 VMware Workstation Pro backend (own README.md)
   winapi/                    typed ctypes for kernel32 / ntdll / user32 / ...
@@ -101,6 +102,7 @@ canonical entry points.
 | `nylib.mono` | Runtime inspector for Mono / IL2CPP games | mono, il2cpp, unity, MonoClass, MonoMethod, runtime inspection | [docs/nylib/mono.md](docs/nylib/mono.md) |
 | `nylib.utils` | Catch-all: lazy pip install, asm, event loop, downloads, archive packing | pip, install, keystone, capstone, event loop, download, pack, archive | [docs/nylib/utils.md](docs/nylib/utils.md) |
 | `nylib.utils.oodle` | Oodle Data compression and Oodle Network 1 UDP/TCP packet codecs over bundled 2.9.14 DLLs | oodle, compress, decompress, Kraken, OodleLZ, UdpCodec, TcpCodec, Oodle Network | [docs/nylib/utils/oodle.md](docs/nylib/utils/oodle.md) |
+| `nylib.utils.imagecodec` | JPEG encoding through Windows WIC and PNG encoding through zlib, of RGBA8 pixels | JPEG, PNG, encode_jpeg, encode_png, WIC, zlib, RGBA, alpha | [docs/nylib/utils/imagecodec.md](docs/nylib/utils/imagecodec.md) |
 | `nylib.logging` | Color console logging with file rotation and custom verbosity levels | install, std2file, color console, log to file, file rotation, custom log levels | [docs/nylib/logging.md](docs/nylib/logging.md) |
 | `nylib.vmware_wp` | Control VMware Workstation Pro (power, snapshots, guest, REST) | Vmrun, Vmcli, WorkstationRest, VmwareConfig, snapshot, guest command | [docs/nylib/vmware_wp.md](docs/nylib/vmware_wp.md) |
 | `nylib.ue` | Unreal Engine reflection dumper + runtime object access | Unreal Engine, UE4, UE5, reflection, dump, Unreal.attach, GObjects | [docs/nylib/ue/index.md](docs/nylib/ue/index.md) |
@@ -380,6 +382,8 @@ Catch-all for non-Win32 helpers. The notable ones:
   builder (used by `python_loader`).
 - `template`, `preprocessor`, `yaml2json`, `prime`, `simple` - small
   text / data utilities.
+- `imagecodec/` - JPEG encoding through Windows WIC and PNG encoding through
+  zlib, of RGBA8; own page, [imagecodec.md](docs/nylib/utils/imagecodec.md).
 - `oodle/` - Oodle Data compression and Oodle Network 1 UDP/TCP packet
   codecs over the bundled 2.9.14 DLLs; own page, [oodle.md](docs/nylib/utils/oodle.md).
 
