@@ -15,4 +15,6 @@ with hook:
 
 `submit(func, *args, result_type=int)` returns a ticket. `ticket.wait(timeout_ms=-1)` returns the result and releases its slot; `hook.call(...)` submits and waits in one step. A timeout leaves the ticket pending. Up to eight scalar arguments are supported: integers, `float`/`ctypes.c_double`, and `ctypes.c_float`. Return types are `int`, `float`/`ctypes.c_double`, `ctypes.c_float`, or `None`.
 
-Use a 64-bit target with only one thread entering the hooked function at a time. Enable and close while that function is quiescent; close refuses pending tickets. The vtable variant requires an aligned pointer slot and uses an atomic compare-and-exchange to install and restore it. Native exceptions cannot unwind through the generated dispatcher.
+Set `thread_id` in `InlineCallQueue(process, addr, capacity=16, thread_id=None)` to let only that thread drain requests. Other threads continue into the original function. A nonexistent thread id leaves calls pending until timeout.
+
+Use a 64-bit target. For a hot inline trigger, pass `quiescent_patch=True` to suspend other target threads and check their instruction pointers during installation, removal and code release. Close refuses pending tickets. The vtable variant requires an aligned pointer slot. Native exceptions cannot unwind through the generated dispatcher.

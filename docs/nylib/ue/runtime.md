@@ -73,10 +73,36 @@ print(ksl.GetEngineVersion())                       # one output: the value itse
 pawn = ue.local_player_controller().Pawn
 r = pawn.K2_SetActorLocation((0.0, 0.0, 500.0), False, True)   # NewLocation, bSweep, bTeleport
 print(r.ReturnValue, r.SweepHitResult)              # several outputs: a named tuple, return value first
-ue.call_timeout = 5.0                               # remote-thread only; seconds, default 10, None waits forever
+ue.call_timeout = 5.0                               # seconds; default 10, None waits forever
 ```
 
-- `calls='remote-thread'` runs each call on a new thread in the game; inside the game use `attach_current(calls='any-thread')`, which runs it on the calling thread. Neither is the game thread: a call can crash the game or corrupt its state.
+- `calls='game-thread'` queues calls for the next natural `ProcessEvent` entry on the game thread, inside or outside the game. It patches `ProcessEvent` on first use and needs `keystone-engine` and `capstone`. It can time out if the game thread stops entering that function; calling from that same thread is refused. After a timeout, `close()` refuses to remove the hook while the call remains pending; retry after it finishes.
+- `calls='remote-thread'` runs each call on a new thread in the game; inside the game `attach_current(calls='any-thread')` runs it on the calling thread. These can race the game thread and its garbage collector. `call_timeout` applies to `game-thread` and `remote-thread`; `any-thread` ignores it.
+- `ue.game_thread()` opens the detected game thread. Close the returned `Thread` handle, or use it with `with`.
+- For an APC, pass `calls=ApcCaller(thread)` instead of a string. `thread` is a TID, a `Thread`, or `None` for the detected game thread. The thread must enter an alertable wait; a timed-out APC may run later and retains its call memory.
 - Inputs go in reflection order or by keyword. Omitted inputs are zero; an `FText` input cannot be omitted. A struct input takes the struct, a tuple or a dict. Out parameters are never passed; they come back in the result.
 - Results are copies. A call with no outputs returns `None`. UE skips some calls without a sign, so zero outputs can mean "not run".
 - Without `calls=`, a call raises `CallsDisabledError`. Latent functions are refused. Bad arguments raise `MarshalError`; a failed or timed-out call raises `CallError`.
+
+To use an existing game-thread pump, pass a `Caller` instance. Its `call` must return the target's integer `rax` and raise `CallError` for failed or uncertain execution:
+
+```python
+from nylib.ue import calls
+
+class MyHookCaller(calls.Caller):
+    policy = 'game-thread'
+
+    def __init__(self, queue):
+        super().__init__()
+        self.queue = queue
+
+    def arena(self):
+        return calls.CallArena(self.process)
+
+    def call(self, function, *args, timeout):
+        return self.queue.run_on_game_thread(function, args, timeout)
+
+ue = Unreal.attach(target, calls=MyHookCaller(my_queue))
+```
+
+The session calls `bind(site)` once; the base implementation stores `site.process` for `arena()`. `site` also supplies the ProcessEvent index and address, a game-thread opener, and the default timeout. The caller owns any hook it installs and should release it in `close()`.

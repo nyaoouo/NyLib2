@@ -41,8 +41,8 @@ The snapshot stays usable without the game: [load it](dump.md#load-a-snapshot), 
 
 - Reads are the default. The dumper and a default session open the game with read rights only and never run code in it.
 - Writes need `write=True` on `Unreal.attach`. They go straight into the game's memory.
-- UFunction calls need `calls=` on `Unreal.attach` (`'remote-thread'` outside the game, `'any-thread'` inside it). The dumper's own calls need `allow_calls=` (CLI: `--allow-calls`).
-- A call runs `ProcessEvent` on a thread that is not the game thread. It races the game thread and its garbage collector and can crash the game or corrupt its state.
+- UFunction calls need `calls=` on `Unreal.attach`: `'game-thread'` queues through a filtered `ProcessEvent` hook, `'remote-thread'` creates a thread, and `'any-thread'` is available inside the game. A custom `Caller` can use another call mechanism. The dumper's own calls need `allow_calls=` (CLI: `--allow-calls`).
+- Calls on a new or arbitrary thread can race the game thread and its garbage collector and crash the game or corrupt its state. The game-thread hook needs a naturally occurring `ProcessEvent` entry.
 - Latent functions (those taking an `FLatentActionInfo`) are refused.
 - Offsets the dumper could not verify block writes and calls; the error lists them and how to fix them.
 - A profile's hooks are Python code that the dumper runs (inside the game in internal mode): use only profiles you trust.
@@ -56,4 +56,4 @@ The snapshot stays usable without the game: [load it](dump.md#load-a-snapshot), 
 - Dumps: verified on captures of all three, and live against Dumper-7 on all three; the internal (injected) dump live on PalServer; the `.usmap` export matches Dumper-7's on captures of all three.
 - The IDA importer, runtime reads, call parameter layouts, `--allow-calls` targets and stubs: checked on captures of all three; the importer applied in IDA 9.3.
 - Live on FrostBound (main menu): runtime reads through both type sources, one property write (restored), one remote-thread UFunction call, and `dump --allow-calls` with all three features, checked against Dumper-7's output for the same build.
-- Not yet verified on a real game: `attach_current` and `calls='any-thread'`; runtime sessions and `--allow-calls` on PalServer and TRIANGLE STRATEGY; calls with inputs or with string, array or FText outputs.
+- Not yet verified on a real game: `attach_current`, `calls='any-thread'`, `calls='game-thread'` and custom `Caller`; runtime sessions and `--allow-calls` on PalServer and TRIANGLE STRATEGY; calls with inputs or with string, array or FText outputs.
