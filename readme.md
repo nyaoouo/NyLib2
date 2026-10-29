@@ -62,6 +62,7 @@ pip install ".[full]"   # all of the above
 | Unreal Engine | `nylib.ue` | UE4.25+/UE5 reflection dumper (snapshots, Dumper-7-format exports, IDA importer), runtime objects with opt-in writes and UFunction calls | [docs/nylib/ue/index.md](docs/nylib/ue/index.md) |
 | VMware | `nylib.vmware_wp` | drive VMware Workstation Pro (power/snapshots/guest/REST) | [docs/nylib/vmware_wp.md](docs/nylib/vmware_wp.md) |
 | Compression | `nylib.utils.oodle` | Oodle Data compression and Oodle Network 1 UDP/TCP packet codecs, bundled 2.9.14 DLLs | [docs/nylib/utils/oodle.md](docs/nylib/utils/oodle.md) |
+| Image encoding | `nylib.utils.imagecodec` | JPEG (Windows WIC) and PNG (zlib) encoding of RGBA8 pixels | [docs/nylib/utils/imagecodec.md](docs/nylib/utils/imagecodec.md) |
 | Misc | `nylib.utils`, `nylib.logging` | lazy pip, asm, eventloop, color logging, ... | [docs/nylib/utils.md](docs/nylib/utils.md), [docs/nylib/logging.md](docs/nylib/logging.md) |
 
 ---
