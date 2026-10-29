@@ -536,19 +536,25 @@ def init_gworld(e: 'Engine') -> None:
     uworld = e.objects.find_class_fast('World')
 
     worlds: dict[int, bool] = {}
-    candidates = []
-    for obj in e.objects:
+
+    def is_world(obj: UEObject) -> bool:
         try:
-            if obj.has_any_flags(EObjectFlags.ClassDefaultObject) or not (_is_a_class_memo(obj, uworld, worlds) if uworld else obj.is_a_class(uworld)):
-                continue
+            return not obj.has_any_flags(EObjectFlags.ClassDefaultObject) and (_is_a_class_memo(obj, uworld, worlds) if uworld else obj.is_a_class(uworld))
         except MemoryReadError:  # one unreadable object (live churn) must not end the search
-            continue
-        candidates.append(obj)
-    hits = e.platform.find_all_aligned_values_in_process_many([obj.get_address() for obj in candidates])
+            return False
 
-    for obj in candidates:
-        results = hits[obj.get_address()]
+    def world_hits():
+        """(UWorld, its aligned image references): the first world by its own scan, every later one from a single pass."""
+        objs = (obj for obj in e.objects if is_world(obj))
+        if (first := next(objs, None)) is None:
+            return
+        yield first, e.platform.find_all_aligned_values_in_process(first.get_address())
+        rest = list(objs)
+        hits = e.platform.find_all_aligned_values_in_process_many([obj.get_address() for obj in rest])
+        for obj in rest:
+            yield obj, hits[obj.get_address()]
 
+    for obj, results in world_hits():
         result = 0
         if results:
             if len(results) == 1:
