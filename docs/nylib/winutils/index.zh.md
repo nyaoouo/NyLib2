@@ -2,17 +2,17 @@
 
 <!-- dt:meta v="1" lang="zh" source="index.md" -->
 
-<!-- dt:section id="__preamble__" hash="7d06cc5fbf23" -->
+<!-- dt:section id="__preamble__" hash="7e3364c2d3a7" -->
 # nylib.winutils
 
 Windows 工具库：进程枚举、PE 检查与映射、管道、RPC、驱动程序、内联挂钩和工具链管理。
 
-关键词: process, version, PE, PE exports, PE unmap, PE map, memory DLL, pipe, RPC, IPC, driver, service, MSVC, toolchain, inline hook, PDB, Win32
+关键词: process, version, PE, PE exports, PE unmap, PE map, memory DLL, pipe, RPC, IPC, driver, service, MSVC, toolchain, inline hook, vtable hook, call queue, PDB, Win32
 
-<!-- dt:section id="quick-start-0" hash="db609d128e3c" -->
+<!-- dt:section id="quick-start-0" hash="6289afa907c8" -->
 ## 快速开始
 
-直接从 `nylib.winutils` 导入；子包 `breakpoint`、`sign`、`python_loader`、`python_hijack` 和 `pe_map` 有各自的页面。
+直接从 `nylib.winutils` 导入；子包 `breakpoint`、`sign`、`python_loader`、`python_hijack` 和 `pe_map`，以及 `inline_call` 调用队列，有各自的页面。
 
 ```python
 from nylib.winutils import iter_processes
@@ -79,18 +79,21 @@ if disk:
         f.write(disk)
 ```
 
-<!-- dt:section id="pe-map-0" hash="ed71a2983935" -->
+<!-- dt:section id="pe-map-0" hash="96779ead3014" -->
 ## PE 映射
 
 验证 DLL 字节并将 AMD64 DLL 映射到当前进程或另一个 `Process`。解析器和 Host 契约与两种 Process 适配器分离。安装层次、目标要求和限制详见 [pe_map.zh.md](pe_map.zh.md)。
 
 ```python
+# needs: the bytes of an AMD64 DLL that exports add
 from nylib.process import Process
 from nylib.winutils.pe_map.process import InstallTier, load
 
 with load(dll_bytes, tier=InstallTier.RUNTIME) as image:
     result = image.call_export('add', 3, 4)
+```
 
+```python
 # needs: an initialized AMD64 target with the DLL's imports already loaded
 target = Process(child_pid)
 try:
@@ -198,8 +201,25 @@ hook = InlineHook(p, b'\\x90\\x90', addr=0x401000)
 hook.enabled = True
 ```
 
-<!-- dt:section id="notes-0" hash="379210aa4c10" -->
-## 注释
+<!-- dt:section id="vtable-hook-0" hash="81551d9403a4" -->
+## 虚表挂钩
+
+替换虚函数指针，运行挂钩代码，然后跳转到原始函数。
+
+```python
+# needs: target process with a vtable
+from nylib.winutils.vtable_hook import VTableHook
+hook = VTableHook(p, b'\x90', addr=vtable_at + index * 8)
+hook.enabled = True
+hook.free()
+```
+
+请在通过该槽位的调用处于静止状态时安装和释放它。该槽位必须 8 字节对齐。
+
+对于任一类挂钩的批量调用，参见 [inline_call.md](inline_call.md)。
+
+<!-- dt:section id="notes-0" hash="7df787cad56e" -->
+## 注意
 
 - `iter_processes()` 通过 ToolHelp32 API 枚举本地进程。
 - `enable_privilege()` 尝试启用 `SeDebugPrivilege`；无声地成功或失败。
@@ -207,4 +227,4 @@ hook.enabled = True
 - `read_exports(base)` 仅读取此进程且不抛出异常；改用 `Process.enum_exports(dll)`。
 - `ExportTable(process, base)` 通过 `ReadProcessMemory` 在任何进程上工作。
 - 命名管道仅限本地每台机器。
-- 子包：[breakpoint.md](breakpoint.md)、[sign.md](sign.md)、[python_loader.md](python_loader.md)、[python_hijack.md](python_hijack.md)、[pe_map.zh.md](pe_map.zh.md)。
+- 各自的页面：[breakpoint.md](breakpoint.md)、[sign.md](sign.md)、[python_loader.md](python_loader.md)、[python_hijack.md](python_hijack.md)、[pe_map.zh.md](pe_map.zh.md)、[inline_call.md](inline_call.md)。

@@ -44,13 +44,13 @@ with Unreal.attach(exe, dump=result.path) as ue:  # read-only session, types fro
 
 快照在没有游戏运行的情况下依然可用：[加载它](dump.md#load-a-snapshot)、将其导入 [IDA](ida.md)，或用它生成 [stubs](stubs.md)。
 
-<!-- dt:section id="safety-0" hash="35996b607970" -->
+<!-- dt:section id="safety-0" hash="f327b4efe413" -->
 ## 安全性
 
 - 读取是默认行为。dumper 和默认会话打开游戏时只拥有读取权限,从不在游戏中执行代码。
 - 写入需要在 `Unreal.attach` 上设置 `write=True`。写入会直接作用于游戏的内存。
-- UFunction 调用需要在 `Unreal.attach` 上设置 `calls=`(游戏外用 `'remote-thread'`,游戏内用 `'any-thread'`)。dumper 自身的调用需要 `allow_calls=`(CLI 为 `--allow-calls`)。
-- 调用会在非游戏线程上运行 `ProcessEvent`。它会与游戏线程及其垃圾回收器产生竞争,可能导致游戏崩溃或状态损坏。
+- UFunction 调用需要在 `Unreal.attach` 上设置 `calls=`:`'game-thread'` 通过经过过滤的 `ProcessEvent` hook 排队执行,`'remote-thread'` 创建一个线程,`'any-thread'` 在游戏内可用。自定义的 `Caller` 可以使用其他调用机制。dumper 自身的调用需要 `allow_calls=`(CLI 为 `--allow-calls`)。
+- 在新线程或任意线程上调用可能会与游戏线程及其垃圾回收器产生竞争,导致游戏崩溃或状态损坏。game-thread hook 需要一次自然发生的 `ProcessEvent` 入口。
 - 潜在函数(接受 `FLatentActionInfo` 的函数)会被拒绝。
 - dumper 无法验证的偏移量会阻止写入和调用;错误信息会列出这些偏移量以及修复方法。
 - Profile 的 hooks 是 dumper 运行的 Python 代码(在内部模式下在游戏内运行):只使用你信任的 profile。
@@ -58,11 +58,11 @@ with Unreal.attach(exe, dump=result.path) as ue:  # read-only session, types fro
 - 在 remote-thread 调用期间按 Ctrl+C 可能导致游戏崩溃。
 - 向已经加载了相同 `python3XY.dll` 的游戏注入 Python 会使其崩溃。缺失的 `python_loader.dll` 会在首次使用时构建,这需要 MSVC,且当 MSVC 缺失时会下载并安装 Visual Studio Build Tools;可以提前用 `python -m nylib.winutils.python_loader build` 构建一次。
 
-<!-- dt:section id="tested-with-0" hash="43748d48395b" -->
+<!-- dt:section id="tested-with-0" hash="6c36f4c15fd5" -->
 ## 测试环境
 
 - PalServer（UE 5.1，build 25247047）、TRIANGLE STRATEGY（UE 4.27，build 11410614）和 FrostBound（UE 5.4，build 24486464）。
 - Dumps：已在三者的捕获（captures）上验证，也针对 Dumper-7 在三者上进行了实时对比；内部（注入式）dump 在 PalServer 上实时验证；`.usmap` 导出在三者的捕获上与 Dumper-7 的一致。
 - IDA 导入器、运行时读取、调用参数布局、`--allow-calls` 目标与 stub：已在三者的捕获上检查，该导入器已在 IDA 9.3 中应用。
 - 在 FrostBound（主菜单）上实时验证：通过两种类型来源进行运行时读取、一次属性写入（已还原）、一次远程线程 UFunction 调用，以及对全部三项功能使用 `dump --allow-calls`，并与 Dumper-7 针对同一 build 的输出进行了比对。
-- 尚未在真实游戏中验证：`attach_current` 与 `calls='any-thread'`；在 PalServer 和 TRIANGLE STRATEGY 上的运行时会话与 `--allow-calls`；带输入参数或带字符串、数组或 FText 输出的调用。
+- 尚未在真实游戏中验证：`attach_current`、`calls='any-thread'`、`calls='game-thread'` 和自定义 `Caller`；在 PalServer 和 TRIANGLE STRATEGY 上的运行时会话与 `--allow-calls`；带输入参数或带字符串、数组或 FText 输出的调用。

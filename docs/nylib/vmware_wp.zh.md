@@ -2,12 +2,12 @@
 
 <!-- dt:meta v="1" lang="zh" source="vmware_wp.md" -->
 
-<!-- dt:section id="__preamble__" hash="31a7fac319ea" -->
+<!-- dt:section id="__preamble__" hash="c69473cad6c6" -->
 # nylib.vmware_wp
 
 从 Python 控制 VMware Workstation Pro — 打开/关闭 VM 电源、管理快照、运行来宾命令并捕获输出，以及调用 Workstation REST API。零第三方依赖；后端包括 `vmrun`、`vmcli`（子流程）和 REST 守护程序（stdlib `urllib`）。
 
-关键词: Vmrun, Vmcli, WorkstationRest, Workstation, VmwareConfig, REST API, power, snapshot, guest command, exec_in_guest, encrypted VM password, Credential Manager, GuestExecResult, ProcessResult, password auto-resolve
+关键词: Vmrun, Vmcli, WorkstationRest, Workstation, VmwareConfig, KernelDebugger, WinDbg, KD, serial named pipe, kernel debugging, REST API, power, snapshot, guest command, exec_in_guest, encrypted VM password, Credential Manager, GuestExecResult, ProcessResult, password auto-resolve
 
 <!-- dt:section id="quick-start-0" hash="265063375286" -->
 ## Quick start
@@ -74,6 +74,32 @@ print(vr.list_snapshots(vmx))                    # list all
 vr.revert_to_snapshot(vmx, "baseline")           # revert to it
 vr.delete_snapshot(vmx, "baseline")              # remove it
 ```
+
+<!-- dt:section id="windows-kernel-debugging-with-windbg-or-kd-0" hash="8e0db86614d9" -->
+## Windows kernel debugging with WinDbg or KD
+
+`KernelDebugger` 将 Windows 来宾的虚拟 COM 端口连接到一个命名管道，宿主机上以提升权限运行的 WinDbg 或 KD 可附加到该管道；完整的演练见 [README](../../nylib/vmware_wp/README.md#windows-kernel-debugging-over-a-named-pipe)。
+
+```python
+# needs: VMware Workstation Pro, a powered-off Windows VM, an elevated host process
+from nylib.vmware_wp import KernelDebugger, Vmrun, VmwareConfig
+
+vmx = r"D:\vm\Win11\Win11.vmx"
+vr = Vmrun.from_config(VmwareConfig())
+kd = KernelDebugger(vmx, "analysis_kd", serial_port=1)  # COM1, host pipe \\.\pipe\analysis_kd
+
+kd.configure_vmx(vmrun=vr)  # powered-off VM only; returns False if already configured
+vr.power(vmx, "start")
+# ... wait until vr.check_tools_state(vmx) reports "running"
+kd.enable_guest("administrator", "guest-password", vmrun=vr)  # guest BCD; applies at the next guest reboot
+debugger = kd.launch_debugger(
+    r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\windbg.exe",
+    break_on_connect=True,
+    commands="g",
+)
+```
+
+然后从来宾内部重启来宾，在初始中断继续执行之前保持调试器附加，完成后调用 `kd.disable_guest(...)`，再重启或关闭来宾。`configure_vmx` 会拒绝已被占用的 COM 端口（请选择 `serial_port` 1 到 4），并启用 VMware 的 **Yield CPU on poll**；来宾中 BitLocker 或 Secure Boot 的调整由你自行处理。
 
 <!-- dt:section id="notes-0" hash="0adf06c84708" -->
 ## Notes
