@@ -19,6 +19,7 @@ from ..memory import ProcessSource, current_process
 from ..model import ClassRecord, EnumRecord, FunctionRecord, StructRecord, hexs, unhex
 from ..snapshot import SCHEMA_MAJOR, Snapshot
 from .accessor import RuntimeAccessor
+from .gamethread import THREAD_QUERY_LIMITED, find_game_thread_id
 from .index import ObjectIndex
 from .invoke import Invoker
 from .names import FNameValue, NameDecoder
@@ -26,6 +27,7 @@ from .types import ClassFactory, RawPointer, StructView, UObjectProxy
 from .typesource import LiveTypeSource, SnapshotTypeSource
 
 if TYPE_CHECKING:
+    from ...process.thread import Thread
     from ..stubs import StubReport
 
 logger = logging.getLogger('nylib.ue.runtime.session')
@@ -647,6 +649,15 @@ class Unreal:
         if players is None or len(players) == 0 or (player := players[0]) is None:
             return None
         return player._get_('PlayerController')
+
+    def game_thread(self) -> 'Thread':
+        """Open and return the target's game thread (see find_game_thread_id); the caller owns it: close it or use `with`.
+
+        Raises SessionError on a closed or capture session, DetectionError when no thread qualifies."""
+        ctx = self._live()
+        if (process := self._opened.process) is None:
+            raise SessionError('this session has no live process')
+        return process.get_thread(find_game_thread_id(process, mem=ctx.e.mem).thread_id, da=THREAD_QUERY_LIMITED)
 
     def enum(self, path: str) -> type[enum.IntEnum] | None:
         return self._live().enum_class(path)
