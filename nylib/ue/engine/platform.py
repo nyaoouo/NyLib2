@@ -284,6 +284,35 @@ class Platform:
             last = align(found + size, alignment)
         return results
 
+    def find_all_aligned_values_in_process_many(self, values) -> dict[int, list[int]]:
+        """{value: find_all_aligned_values_in_process(value)} for 8-byte values, from one pass over the sections."""
+        wanted = set(values)
+        out = {value: [] for value in wanted}
+        if not wanted:
+            return out
+        for section in self.image.sections:
+            if not (section.characteristics & IMAGE_SCN_MEM_READ):
+                continue
+            search_start, search_range = _search_start_and_range(self.image, section, 0, 0)
+            if search_start == 0 or search_range == 0:
+                continue
+            size_from_end = _aligned_size_with_offset_from_end(search_range, 8, 8)
+            if size_from_end == -1:
+                continue
+            last_start = search_start + size_from_end
+            for chunk_addr, data in self.scanner.chunks(section):
+                skip = (search_start - chunk_addr) % 8
+                count = (len(data) - skip) // 8
+                if count <= 0:
+                    continue
+                for value in sorted(wanted.intersection(memoryview(data)[skip:skip + count * 8].cast('Q'))):
+                    needle, pos = value.to_bytes(8, 'little'), skip
+                    while (pos := data.find(needle, pos)) != -1:
+                        if (addr := chunk_addr + pos) <= last_start and addr >= search_start and (addr - search_start) % 8 == 0:
+                            out[value].append(addr)
+                        pos += 1
+        return out
+
     def _find_aligned_value_fast(self, value: int, size: int, alignment: int, start_address: int, range_: int) -> int:
         """FindAlignedValueInAllSectionsImpl, bytes.find over cached section chunks (A8)."""
         needle = value.to_bytes(size, 'little')

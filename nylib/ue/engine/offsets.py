@@ -536,11 +536,18 @@ def init_gworld(e: 'Engine') -> None:
     uworld = e.objects.find_class_fast('World')
 
     worlds: dict[int, bool] = {}
+    candidates = []
     for obj in e.objects:
-        if obj.has_any_flags(EObjectFlags.ClassDefaultObject) or not (_is_a_class_memo(obj, uworld, worlds) if uworld else obj.is_a_class(uworld)):
+        try:
+            if obj.has_any_flags(EObjectFlags.ClassDefaultObject) or not (_is_a_class_memo(obj, uworld, worlds) if uworld else obj.is_a_class(uworld)):
+                continue
+        except MemoryReadError:  # one unreadable object (live churn) must not end the search
             continue
+        candidates.append(obj)
+    hits = e.platform.find_all_aligned_values_in_process_many([obj.get_address() for obj in candidates])
 
-        results = e.platform.find_all_aligned_values_in_process(obj.get_address())
+    for obj in candidates:
+        results = hits[obj.get_address()]
 
         result = 0
         if results:
@@ -549,13 +556,16 @@ def init_gworld(e: 'Engine') -> None:
             elif len(results) == 2:
                 obj_address = obj.get_address()
                 possible_gworld = results[0]
-                current_value = e.mem.fresh.u64(possible_gworld)
-
-                i = 0
-                while current_value == obj_address and i < 50:
-                    time.sleep(0.001)
+                try:
                     current_value = e.mem.fresh.u64(possible_gworld)
-                    i += 1
+
+                    i = 0
+                    while current_value == obj_address and i < 50:
+                        time.sleep(0.001)
+                        current_value = e.mem.fresh.u64(possible_gworld)
+                        i += 1
+                except MemoryReadError:
+                    continue
                 if current_value == obj_address:
                     result = results[0]
                 else:
