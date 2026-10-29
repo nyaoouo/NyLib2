@@ -71,10 +71,16 @@ class _SharedQueue:
             self.section = 0
 
 
-def _dispatcher_code(data_at: int, capacity: int) -> bytes:
+def _dispatcher_code(data_at: int, capacity: int, thread_id=None) -> bytes:
+    only_thread = '' if thread_id is None else f'''
+        mov rax, qword ptr gs:[0x48]
+        cmp eax, {thread_id}
+        jne passthrough
+    '''  # TEB ClientId.UniqueThread
     code = f'''
         pushfq
         push rax
+        {only_thread}
         push rcx
         push rdx
         push r8
@@ -165,6 +171,7 @@ def _dispatcher_code(data_at: int, capacity: int) -> bytes:
         pop r8
         pop rdx
         pop rcx
+    passthrough:
         pop rax
         popfq
     '''
@@ -239,16 +246,19 @@ class CallTicket:
 class InlineCallQueue(InlineHook):
     """Call functions on the next entry to a chosen x64 function."""
 
-    def __init__(self, process, addr: int, capacity=16):
+    def __init__(self, process, addr: int, capacity=16, thread_id=None):
         if not winapi.IS_64BIT: raise OSError('InlineCallQueue requires a 64-bit host')
         if capacity < 1 or capacity > 64 or capacity & (capacity - 1):
             raise ValueError('capacity must be a power of two from 1 to 64')
+        if thread_id is not None and not (isinstance(thread_id, int) and 0 < thread_id <= 0xFFFFFFFF):
+            raise ValueError(f'thread_id {thread_id!r} is not a thread id')
         wow64 = ctypes.c_long()
         winapi.IsWow64Process(process.handle, ctypes.byref(wow64))
         if wow64.value: raise OSError('InlineCallQueue requires a 64-bit target')
         mbi = process.virtual_query(addr)
         if mbi.State != 0x1000 or not mbi.Protect & 0xF0 or mbi.Protect & 0x100:
             raise ValueError(f'target address {addr:#x} is not executable')
+        self.thread_id = thread_id
         self._closed = False
         self._lock = threading.Lock()
         self._tickets = {}
@@ -256,7 +266,7 @@ class InlineCallQueue(InlineHook):
         self._atomic = _AtomicWord()
         try:
             self._shared = _SharedQueue(process, capacity)
-            code = _dispatcher_code(self._shared.remote_at, capacity)
+            code = _dispatcher_code(self._shared.remote_at, capacity, thread_id)
             super().__init__(process, code, addr)
             self.capacity = capacity
         except BaseException:
