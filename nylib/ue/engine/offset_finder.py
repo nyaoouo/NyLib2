@@ -391,16 +391,19 @@ def find_ffield_name_offset(e: 'Engine') -> int:
     ffield = e.off.FField
     guid_child = e.objects.find_struct_fast('Guid').get_child_properties()
     vector_child = e.objects.find_struct_fast('Vector').get_child_properties()
-    guid_child_name = guid_child.get_name()
-    vector_child_name = vector_child.get_name()
-    if guid_child_name in ('A', 'D') and vector_child_name in ('X', 'Z'):
+
+    def names_match() -> bool:
+        try:
+            return guid_child.get_name() in ('A', 'D') and vector_child.get_name() in ('X', 'Z')
+        except MemoryReadError:  # a wrong candidate offset holds no valid FName
+            return False
+
+    if names_match():
         return ffield.Name
     ffield.Name = ffield.Owner
     e.provenance['Off.FField.Name'] = label
     while ffield.Name < 0x40:
-        guid_child_name = guid_child.get_name()
-        vector_child_name = vector_child.get_name()
-        if guid_child_name in ('A', 'D') and vector_child_name in ('X', 'Z'):
+        if names_match():
             return ffield.Name
         ffield.Name = _i32(ffield.Name + 4)
         e.provenance['Off.FField.Name'] = label
