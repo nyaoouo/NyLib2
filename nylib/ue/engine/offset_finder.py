@@ -56,7 +56,7 @@ def find_offset(e: 'Engine', pairs: Sequence[tuple[int, int]], min_offset: int =
                 found_offset = True
                 if j > highest_found_offset:
                     highest_found_offset = j
-                    i = 0  # the for-increment follows: the restart is at pair 1
+                    i = -1  # restart at pair 0; Dumper-7 restarts at pair 1 and never rechecks pair 0
                 j = max_offset
             j += alignment
         i += 1
@@ -391,16 +391,19 @@ def find_ffield_name_offset(e: 'Engine') -> int:
     ffield = e.off.FField
     guid_child = e.objects.find_struct_fast('Guid').get_child_properties()
     vector_child = e.objects.find_struct_fast('Vector').get_child_properties()
-    guid_child_name = guid_child.get_name()
-    vector_child_name = vector_child.get_name()
-    if guid_child_name in ('A', 'D') and vector_child_name in ('X', 'Z'):
+
+    def names_match() -> bool:
+        try:
+            return guid_child.get_name() in ('A', 'D') and vector_child.get_name() in ('X', 'Z')
+        except MemoryReadError:  # a wrong candidate offset holds no valid FName
+            return False
+
+    if names_match():
         return ffield.Name
     ffield.Name = ffield.Owner
     e.provenance['Off.FField.Name'] = label
     while ffield.Name < 0x40:
-        guid_child_name = guid_child.get_name()
-        vector_child_name = vector_child.get_name()
-        if guid_child_name in ('A', 'D') and vector_child_name in ('X', 'Z'):
+        if names_match():
             return ffield.Name
         ffield.Name = _i32(ffield.Name + 4)
         e.provenance['Off.FField.Name'] = label
