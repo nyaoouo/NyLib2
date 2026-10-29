@@ -90,12 +90,13 @@ canonical entry points.
 | `nylib.pdb` | Read PDB files via Microsoft DIA; write PDB files from a model | PDB, DIA, Session, find_symbols, find_type, export_pdb, write_pdb | [docs/nylib/pdb.md](docs/nylib/pdb.md) |
 | `nylib.ctype` | Declarative C-like structures with local or remote-process accessors | CData, Struct, Pointer, Accessor, bit field, remote memory | [docs/nylib/ctype.md](docs/nylib/ctype.md) |
 | `nylib.winapi` | Typed ctypes wrappers for kernel32 / ntdll / user32 / ... | Win32 API, ctypes, kernel32, ntdll, OpenProcess, ReadProcessMemory, NTSTATUS | [docs/nylib/winapi.md](docs/nylib/winapi.md) |
-| `nylib.winutils` | High-level Win32 helpers: process, PE, pipes, RPC, drivers, toolchain | process, PE exports, PE unmap, PE map, pipe, RPC, driver, inline hook, MSVC | [docs/nylib/winutils/index.md](docs/nylib/winutils/index.md) |
+| `nylib.winutils` | High-level Win32 helpers: process, PE, pipes, RPC, drivers, toolchain | process, PE exports, PE unmap, PE map, pipe, RPC, driver, inline hook, vtable hook, MSVC | [docs/nylib/winutils/index.md](docs/nylib/winutils/index.md) |
 | `nylib.winutils.pe_map` | Pure PE image planning, host contracts, local or cross-process DLL mapping, and optional post-attach block discard | parse_image, MapHost, Process.current, RemoteProcessHost, InstallTier, SectSkip, LoadedImage | [docs/nylib/winutils/pe_map.md](docs/nylib/winutils/pe_map.md) |
 | `nylib.winutils.breakpoint` | x64 HW/SW breakpoint primitive (VEH + debugger backends) | hardware breakpoints, debug registers, memory trap, BP_E, BreakPoint, VEH | [docs/nylib/winutils/breakpoint.md](docs/nylib/winutils/breakpoint.md) |
 | `nylib.winutils.sign` | Authenticode signing/verification, driver cross-cert signing | SigningService, VerificationService, Authenticode, driver signing, cross-cert, MSCVStore | [docs/nylib/winutils/sign.md](docs/nylib/winutils/sign.md) |
 | `nylib.winutils.python_loader` | In-process Python loader injected via named pipe | inject, python, remote process, PyConfig, pipe RPC | [docs/nylib/winutils/python_loader.md](docs/nylib/winutils/python_loader.md) |
 | `nylib.winutils.python_hijack` | Proxy DLL that runs Python when a hijacked DLL loads | DLL proxy, DLL hijacking, export forwarding, pefile, create_src | [docs/nylib/winutils/python_hijack.md](docs/nylib/winutils/python_hijack.md) |
+| `nylib.winutils.inline_call` | Bounded call queues that run requested calls when a target thread next enters a hooked function or vtable slot | InlineCallQueue, VTableCallQueue, CallTicket, call queue, batch call, vtable hook, game thread, thread_id | [docs/nylib/winutils/inline_call.md](docs/nylib/winutils/inline_call.md) |
 | `nylib.hook` | Microsoft Detours wrapper for function hooking | Hook, create_hook, detour, trampoline, function interception, Win32 API hooking | [docs/nylib/hook.md](docs/nylib/hook.md) |
 | `nylib.pyimgui` | Direct Dear ImGui bindings (standalone windows + injected overlays) | Dear ImGui, imgui, Dx11Window, Dx11Inbound, overlay, DirectX, Vulkan, texture, CreateTextureFromPixels, DecodeImage, UpdatePixels, sampler, BGRA, premultiplied alpha, SetTextureBlend, dirty rect | [docs/nylib/pyimgui/index.md](docs/nylib/pyimgui/index.md) |
 | `nylib.imguiutils` | Dear ImGui widgets: alerts, file dialog, window manager, debug view | message box, file dialog, window manager, Dear ImGui widgets, memory debugger, debug view | [docs/nylib/imguiutils.md](docs/nylib/imguiutils.md) |
@@ -159,7 +160,8 @@ High-level Win32 helpers; subpackages are loaded lazily.
 | `winutils.llvm_pdb` | PDB symbol helpers via LLVM |
 | `winutils.driver` | service-control (`SCManager`, `Service`) helpers for loading kernel drivers |
 | `winutils.inline_hook` | hot-patch trampoline based on `keystone-engine` + `capstone` |
-| `winutils.inline_call` | `InlineCallQueue` runs a bounded batch of requested calls on the next entry to a chosen function; see [inline_call.md](docs/nylib/winutils/inline_call.md) |
+| `winutils.vtable_hook` | `VTableHook` swaps a vtable pointer slot to run hook code, then jumps to the original function |
+| `winutils.inline_call` | `InlineCallQueue` / `VTableCallQueue` run a bounded batch of requested calls on the next entry to a chosen function or vtable slot; see [inline_call.md](docs/nylib/winutils/inline_call.md) |
 | `winutils.pe_unmap` | rebuild an in-memory PE back to its on-disk layout |
 | `winutils.pe_map` | parse/plan a PE without process access; map an AMD64 DLL from bytes with a local or remote `Process` host (`MINIMAL`/`RUNTIME`/`STRICT`); optionally request post-attach block discard with `SectSkip` - see [pe_map.md](docs/nylib/winutils/pe_map.md) |
 | `winutils.pe_exports` | PE export-table reader: `ExportTable` over any `Process` (backs `Process.get_proc_address` / `enum_exports`); `read_exports(base)` for this process, never raises |

@@ -76,6 +76,8 @@ for export in p.enum_exports('kernel32.dll'):
 
 ## Threads and APC calls
 
+Open the target's threads, then run a call on an existing thread through `QueueUserAPC` instead of a new remote thread.
+
 ```python
 # needs: a running target process and an alertable target thread
 
@@ -89,32 +91,12 @@ with p.get_thread(thread_id) as thread:
     result = pending.wait(5000)
 ```
 
-`get_thread(thread_id, da=0x1FFFFF)` validates that the thread belongs to the process.
-`iter_threads(da=0x1FFFFF)` opens the process's threads from a Toolhelp snapshot.
-Each returned `Thread` owns its handle: use `with thread:` or call `thread.close()`.
-`thread.suspend()` and `thread.resume()` return the previous suspend count.
-`thread.description()` returns the name set by `SetThreadDescription`, or `None` if unnamed; it raises `OSError` without `THREAD_QUERY_LIMITED_INFORMATION`.
-`thread.creation_time()` returns the creation time as a FILETIME (100-ns ticks since 1601); the earliest thread of a process is its initial thread. It raises `OSError` without `THREAD_QUERY_LIMITED_INFORMATION`.
-
-`call(..., queue_apc_thread=None)` uses `CreateRemoteThread` by default. Pass a
-`Thread` or a local thread handle to use `QueueUserAPC`; the thread must belong to
-the target process and allow query, suspend/resume and set-context access. The
-process handle also needs `PROCESS_DUP_HANDLE` for the completion event.
-`Process.current.call` supports the same parameter for another thread in the
-current process; selecting the calling thread raises `ValueError`.
-
-An APC runs when the target thread enters an alertable wait, such as
-`SleepEx(..., True)`. Suspending and resuming preserves its previous suspend
-count and does not force an ordinary thread to become alertable. A thread that
-was already suspended stays suspended until its owner resumes it.
-See [Microsoft's QueueUserAPC documentation](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-queueuserapc).
-
-Both blocking calls and `RemoteCall.done` / `.wait()` track callback completion;
-the target thread can keep running afterward. A timeout leaves the call pending,
-so keep the `RemoteCall` and wait again. Dropping a pending call retains its
-remote code and completion resources until process exit. If queueing succeeds
-but resuming fails, an `OSError` is raised and the queued callback memory is
-retained. Finish pending calls before closing the process handle.
+- `get_thread(thread_id, da=0x1FFFFF)` validates that the thread belongs to the process; `iter_threads(da=0x1FFFFF)` opens the process's threads from a Toolhelp snapshot. Each returned `Thread` owns its handle: use `with thread:` or call `thread.close()`.
+- `thread.suspend()` and `thread.resume()` return the previous suspend count. `thread.description()` returns the name set by `SetThreadDescription`, or `None` if unnamed; `thread.creation_time()` returns a FILETIME (100-ns ticks since 1601), and the earliest thread of a process is its initial thread. Both raise `OSError` without `THREAD_QUERY_LIMITED_INFORMATION`.
+- `call(..., queue_apc_thread=None)` uses `CreateRemoteThread` by default; a `Thread` or a local thread handle selects [`QueueUserAPC`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-queueuserapc). The thread must belong to the target process and allow query, suspend/resume and set-context access; the process handle also needs `PROCESS_DUP_HANDLE` for the completion event. `Process.current.call` takes another thread of the current process; selecting the calling thread raises `ValueError`.
+- The APC runs when the target thread enters an alertable wait, such as `SleepEx(..., True)`. Suspending and resuming preserves its previous suspend count and does not force an ordinary thread to become alertable; a thread that was already suspended stays suspended until its owner resumes it.
+- Blocking calls and `RemoteCall.done` / `.wait()` track callback completion; the target thread can keep running afterward. A timeout leaves the call pending: keep the `RemoteCall` and wait again. Dropping a pending call retains its remote code and completion resources until process exit.
+- If queueing succeeds but resuming fails, an `OSError` is raised and the queued callback memory is retained. Finish pending calls before closing the process handle.
 
 ## Pattern scanning
 

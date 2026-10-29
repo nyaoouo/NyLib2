@@ -2,11 +2,11 @@
 
 Windows utilities: process enumeration, PE inspection and mapping, pipes, RPC, drivers, inline hooks, and toolchain management.
 
-Keywords: process, version, PE, PE exports, PE unmap, PE map, memory DLL, pipe, RPC, IPC, driver, service, MSVC, toolchain, inline hook, PDB, Win32
+Keywords: process, version, PE, PE exports, PE unmap, PE map, memory DLL, pipe, RPC, IPC, driver, service, MSVC, toolchain, inline hook, vtable hook, call queue, PDB, Win32
 
 ## Quick start
 
-Import directly from `nylib.winutils`; subpackages `breakpoint`, `sign`, `python_loader`, `python_hijack`, and `pe_map` have their own pages.
+Import directly from `nylib.winutils`; subpackages `breakpoint`, `sign`, `python_loader`, `python_hijack` and `pe_map`, plus the `inline_call` call queues, have their own pages.
 
 ```python
 from nylib.winutils import iter_processes
@@ -74,12 +74,15 @@ if disk:
 Validate and map an AMD64 DLL from bytes in the current process or another `Process`. The parser and host contracts are separate from both Process adapters. See [pe_map.md](pe_map.md) for installation tiers, target requirements, and limitations.
 
 ```python
+# needs: the bytes of an AMD64 DLL that exports add
 from nylib.process import Process
 from nylib.winutils.pe_map.process import InstallTier, load
 
 with load(dll_bytes, tier=InstallTier.RUNTIME) as image:
     result = image.call_export('add', 3, 4)
+```
 
+```python
 # needs: an initialized AMD64 target with the DLL's imports already loaded
 target = Process(child_pid)
 try:
@@ -185,6 +188,7 @@ hook.enabled = True
 Swap a virtual function pointer, run hook code, then jump to the original function.
 
 ```python
+# needs: target process with a vtable
 from nylib.winutils.vtable_hook import VTableHook
 hook = VTableHook(p, b'\x90', addr=vtable_at + index * 8)
 hook.enabled = True
@@ -203,5 +207,5 @@ For batched calls on either hook type, see [inline_call.md](inline_call.md).
 - `read_exports(base)` reads only this process and never raises; use `Process.enum_exports(dll)` instead.
 - `ExportTable(process, base)` works on any process via `ReadProcessMemory`.
 - Named pipes are local per-machine only.
-- Subpackages: [breakpoint.md](breakpoint.md), [sign.md](sign.md), [python_loader.md](python_loader.md), [python_hijack.md](python_hijack.md), [pe_map.md](pe_map.md).
+- Own pages: [breakpoint.md](breakpoint.md), [sign.md](sign.md), [python_loader.md](python_loader.md), [python_hijack.md](python_hijack.md), [pe_map.md](pe_map.md), [inline_call.md](inline_call.md).
 
