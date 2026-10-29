@@ -2,7 +2,7 @@
 
 Read and write another process's memory, call its functions remotely, and manage its module list. Use it to inspect or modify a running game, hook functions, inject DLLs, or test memory operations cross-process.
 
-Keywords: Process, RemoteCall, read memory, write memory, function call, DLL injection, PEB, export, pattern scan, module list, get_proc_address, enum_exports, load_library, ReadProcessMemory, WriteProcessMemory, rpm
+Keywords: Process, Thread, RemoteCall, read memory, write memory, function call, QueueUserAPC, APC, get_thread, iter_threads, DLL injection, PEB, export, pattern scan, module list, get_proc_address, enum_exports, load_library, ReadProcessMemory, WriteProcessMemory, rpm
 
 ## Quick start
 
@@ -28,7 +28,7 @@ result = p.call(0x140010000, 100, 200)
 
 # Call without blocking; check when ready.
 pending = p.call(func_address, 1, 2, block=False)
-# pending.done -> True when the thread finishes
+# pending.done -> True when the call finishes
 # pending.wait() -> blocks and returns the result
 ```
 
@@ -73,6 +73,46 @@ result = p.call(addr)
 for export in p.enum_exports('kernel32.dll'):
     print(export.name, hex(export.address))
 ```
+
+## Threads and APC calls
+
+```python
+# needs: a running target process and an alertable target thread
+
+for thread in p.iter_threads():
+    with thread:
+        print(thread.thread_id, thread.process_id)
+
+with p.get_thread(thread_id) as thread:
+    # Execute on this existing thread, with automatic suspend/queue/resume.
+    pending = p.call(func_address, 1, 2, queue_apc_thread=thread, block=False)
+    result = pending.wait(5000)
+```
+
+`get_thread(thread_id, da=0x1FFFFF)` validates that the thread belongs to the process.
+`iter_threads(da=0x1FFFFF)` opens the process's threads from a Toolhelp snapshot.
+Each returned `Thread` owns its handle: use `with thread:` or call `thread.close()`.
+`thread.suspend()` and `thread.resume()` return the previous suspend count.
+
+`call(..., queue_apc_thread=None)` uses `CreateRemoteThread` by default. Pass a
+`Thread` or a local thread handle to use `QueueUserAPC`; the thread must belong to
+the target process and allow query, suspend/resume and set-context access. The
+process handle also needs `PROCESS_DUP_HANDLE` for the completion event.
+`Process.current.call` supports the same parameter for another thread in the
+current process; selecting the calling thread raises `ValueError`.
+
+An APC runs when the target thread enters an alertable wait, such as
+`SleepEx(..., True)`. Suspending and resuming preserves its previous suspend
+count and does not force an ordinary thread to become alertable. A thread that
+was already suspended stays suspended until its owner resumes it.
+See [Microsoft's QueueUserAPC documentation](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-queueuserapc).
+
+Both blocking calls and `RemoteCall.done` / `.wait()` track callback completion;
+the target thread can keep running afterward. A timeout leaves the call pending,
+so keep the `RemoteCall` and wait again. Dropping a pending call retains its
+remote code and completion resources until process exit. If queueing succeeds
+but resuming fails, an `OSError` is raised and the queued callback memory is
+retained. Finish pending calls before closing the process handle.
 
 ## Pattern scanning
 
