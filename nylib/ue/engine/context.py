@@ -124,7 +124,10 @@ def init_engine_rest(e: Engine, *, offsets_pins: Mapping[str, int] | None = None
         else:
             init_pe_windows(e)
         step('InitGWorld')
-        init_gworld(e)
+        if 'Off.InSDK.World.GWorld' in (offsets_pins or {}):  # off_init set the pin; its image-wide scan is skipped
+            e.provenance['Off.InSDK.World.GWorld'] = 'profile: value'
+        else:
+            init_gworld(e)
         step('InitTextOffsets')
         init_text_offsets(e)
         step('InitSettings')

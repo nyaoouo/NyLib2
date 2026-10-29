@@ -166,6 +166,12 @@ def off_init(e: 'Engine', *, pins: Mapping[str, int] | None = None) -> None:
     pins = _check_pins(pins, 'Off.')
     off = e.off
 
+    def repin() -> None:  # finders read pinned keys no finder assigns; the Fixup/FName adjusters shift pinned keys
+        for key, value in pins.items():
+            setattr(*_target(e, key), value)
+
+    repin()
+
     def overwrite_if_invalid_offset(key: str, default_value: int, expression: str) -> None:
         if _get(e, key) == OffsetFinder.OffsetNotFound:
             e.cerr(f'Defaulting to offset: 0x{default_value:X}\n')
@@ -193,6 +199,7 @@ def off_init(e: 'Engine', *, pins: Mapping[str, int] | None = None) -> None:
     overwrite_if_invalid_offset('Off.UObject.Outer', _i32(off.UObject.Name + 4 + 4), 'Off::UObject::Name + sizeof(int32) + sizeof(int32)')
 
     OffsetFinder.init_fname_settings(e)
+    repin()
 
     e.names.post_init()
 
@@ -224,6 +231,7 @@ def off_init(e: 'Engine', *, pins: Mapping[str, int] | None = None) -> None:
         e.cerr(f'Off::UStruct::ChildProperties: 0x{off.UStruct.ChildProperties:X}\n')
 
         OffsetFinder.fixup_hardcoded_offsets(e)
+        repin()
 
         _find(e, pins, 'Off.FField.Next', 'FindFFieldNextOffset', OffsetFinder.find_ffield_next_offset)
         e.cerr(f'Off::FField::Next: 0x{off.FField.Next:X}\n')
@@ -343,6 +351,7 @@ def off_init(e: 'Engine', *, pins: Mapping[str, int] | None = None) -> None:
     e.cerr(f'Off::InSDK::UDataTable::RowMap: 0x{off.InSDK.UDataTable.RowMap:X}\n\n')
 
     OffsetFinder.post_init_fname_settings(e)
+    repin()
 
     e.cerr('\n')
 
