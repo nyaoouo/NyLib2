@@ -434,14 +434,18 @@ class NameArray:
             if not p.is_address_in_process_range(possible_constructor_address):
                 continue
 
-            window = mem.read(possible_constructor_address, init_srw_lock_search_range + 1)  # A4
+            window = mem.try_read(possible_constructor_address, init_srw_lock_search_range + 1)  # A4
+            if window is None:  # a call target in the image range can still sit in an unreadable page
+                continue
             for i in range(init_srw_lock_search_range):
                 if window[i] != 0xFF or window[i + 1] != 0x15:
                     continue
                 relative_call_target = p.resolve_32_bit_section_relative_call(possible_constructor_address + i)
                 if not p.is_address_in_process_range(relative_call_target):
                     continue
-                value_of_call_target = mem.u64(relative_call_target)
+                if (raw := mem.try_read(relative_call_target, 8)) is None:
+                    continue
+                value_of_call_target = int.from_bytes(raw, 'little')
                 if value_of_call_target != init_srw_lock_address and value_of_call_target != rtl_init_srw_lock_address:
                     continue
 
@@ -476,6 +480,13 @@ class NameArray:
             return True
         return False
 
+    def _try_commit(self, gnames_address: int, found_name_array: bool, found_name_pool: bool, label: str) -> bool:
+        """_commit; a MemoryReadError means the candidate is not GNames."""
+        try:
+            return self._commit(gnames_address, found_name_array, found_name_pool, label)
+        except MemoryReadError:  # a K14 candidate's chunk pointer can lead into an unreadable page
+            return False
+
     def try_init(self, is_test_only: bool = False) -> bool:
         """NameArray::TryInit(bool) @ ea0dab3."""
         e = self.e
@@ -505,14 +516,14 @@ class NameArray:
         if is_test_only:
             return False
 
-        if self._commit(gnames_address, found_name_array, found_name_pool, label):
+        if self._try_commit(gnames_address, found_name_array, found_name_pool, label):
             return True
 
         if found_name_pool:  # K14: retry the next candidate; keep the first one recorded if none is usable
             first_gnames = e.off.InSDK.NameArray.GNames
             while self.try_find_name_pool_windows(self._name_pool_sig_occurrence):
                 e.cerr(f"Found 'FNamePool GNames' at offset 0x{e.off.InSDK.NameArray.GNames:X}\n\n")
-                if self._commit(image_base + e.off.InSDK.NameArray.GNames, False, True, label):
+                if self._try_commit(image_base + e.off.InSDK.NameArray.GNames, False, True, label):
                     return True
             e.off.InSDK.NameArray.GNames = first_gnames
             self._rec('Off.InSDK.NameArray.GNames', 'auto: NameArray::TryFindNamePool_Windows')
