@@ -1,10 +1,12 @@
-"""UFunction call plumbing (C10): parameter roles and layout, call memory, ProcessEvent transports, strict target reads."""
+"""UFunction call plumbing (C10): parameter roles and layout, call memory, ProcessEvent callers, strict target reads."""
+import abc
 import bisect
 import logging
 import math
 import struct
+import threading
 import time
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 from ..process import Process
 from .errors import CallError, MemoryReadError
@@ -18,8 +20,6 @@ DEFAULT_TIMEOUT = 10.0  # seconds; Unreal.call_timeout's default
 ROLES = ('in', 'const-ref', 'ref', 'out', 'return', 'local')
 STATES = ('not started', 'finished', 'unknown')  # CallError.state
 
-_GAME_THREAD = ("calls='game-thread' (a detour on UObject::ProcessEvent) is not implemented yet (stage 15); "
-                "use calls='remote-thread' outside the game or calls='any-thread' inside it")
 _NO_PROCESS = 'calls need a live process; a capture cannot run code'
 _STRING_KINDS = {'StrProperty': ('utf-16-le', 2), 'AnsiStrProperty': ('latin-1', 1), 'Utf8StrProperty': ('utf-8', 1)}
 _INPUT_ROLES = ('in', 'const-ref', 'ref')
@@ -336,10 +336,13 @@ class RemoteThreadTransport(_Transport):
 
     policy = 'remote-thread'
 
+    def _start_call(self, function: int, args: tuple):
+        return self.process.call(function, *args, block=False)
+
     def _call(self, function: int, args: tuple, timeout: float | None) -> int:
         process = self.process
         try:
-            pending = process.call(function, *args, block=False)
+            pending = self._start_call(function, args)
         except OSError as exc:
             raise _call_error(f'the call could not start: {exc}', state='not started') from exc
         deadline = None if timeout is None else time.monotonic() + timeout
@@ -407,9 +410,246 @@ def open_transport(policy: str | None, process) -> RemoteThreadTransport | AnyTh
         return RemoteThreadTransport(process)
     if policy == 'any-thread':
         return AnyThreadTransport(process)
-    if policy == 'game-thread':
-        raise NotImplementedError(_GAME_THREAD)
     raise ValueError(f'unknown calls policy {policy!r}')
+
+
+class CallSite(NamedTuple):
+    """Live target information supplied once when a session binds a Caller."""
+    process: Process
+    mem: MemorySource
+    process_event_index: int
+    process_event_address: int
+    find_game_thread: Callable
+    default_timeout: float | None
+    mode: str = 'external'
+
+
+class Caller(abc.ABC):
+    policy = ''
+
+    def __init__(self):
+        self._site = None
+        self.closed = False
+
+    @property
+    def process(self) -> Process:
+        if self._site is None:
+            raise RuntimeError('caller is not bound to a session')
+        return self._site.process
+
+    def bind(self, site: CallSite) -> None:
+        if self.closed or self._site is not None:
+            raise ValueError('caller is closed or already bound')
+        if site.process is None:
+            raise ValueError(_NO_PROCESS)
+        self._site = site
+
+    @abc.abstractmethod
+    def arena(self) -> CallArena: ...
+
+    @abc.abstractmethod
+    def call(self, function: int, *args: int, timeout: float | None) -> int: ...
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class RemoteThreadCaller(Caller):
+    policy = 'remote-thread'
+
+    def bind(self, site: CallSite) -> None:
+        if site.mode != 'external':
+            raise ValueError('RemoteThreadCaller requires an external session')
+        super().bind(site)
+        self._transport = RemoteThreadTransport(site.process)
+
+    def arena(self) -> CallArena:
+        return self._transport.arena()
+
+    def call(self, function: int, *args: int, timeout: float | None) -> int:
+        return self._transport.call(function, *args, timeout=timeout)
+
+    def close(self) -> None:
+        if hasattr(self, '_transport'):
+            self._transport.close()
+        super().close()
+
+
+class AnyThreadCaller(RemoteThreadCaller):
+    policy = 'any-thread'
+
+    def bind(self, site: CallSite) -> None:
+        if site.mode != 'internal':
+            raise ValueError('AnyThreadCaller requires an internal session')
+        Caller.bind(self, site)
+        self._transport = AnyThreadTransport(site.process)
+
+
+class _ApcTransport(RemoteThreadTransport):
+    policy = 'apc'
+
+    def __init__(self, process, thread):
+        super().__init__(process)
+        self.thread = thread
+
+    def _start_call(self, function: int, args: tuple):
+        return self.process.call(function, *args, block=False, queue_apc_thread=self.thread)
+
+
+class ApcCaller(RemoteThreadCaller):
+    """Queue a call on a target thread when it enters an alertable wait."""
+    policy = 'apc'
+
+    def __init__(self, thread=None):
+        super().__init__()
+        self.thread = thread
+        self._owned_thread = None
+
+    def bind(self, site: CallSite) -> None:
+        Caller.bind(self, site)
+        try:
+            if self.thread is None:
+                self._owned_thread = site.find_game_thread()
+                self.thread = self._owned_thread
+            elif _is_int(self.thread):
+                self._owned_thread = site.process.get_thread(self.thread)
+                self.thread = self._owned_thread
+            if getattr(self.thread, 'process_id', None) != site.process.process_id:
+                raise ValueError('APC thread is not in the target process')
+            self._transport = _ApcTransport(site.process, self.thread)
+        except OSError as exc:
+            self.close()
+            raise ValueError('APC thread cannot be opened or queried') from exc
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        super().close()
+        if self._owned_thread is not None:
+            self._owned_thread.close()
+            self._owned_thread = None
+
+
+class HookCaller(Caller):
+    """Run calls from a filtered ProcessEvent detour on the game thread."""
+    policy = 'game-thread'
+
+    def __init__(self, thread_id=None, trigger=None, capacity=16):
+        super().__init__()
+        self.thread_id, self.trigger, self.capacity = thread_id, trigger, capacity
+        self._lock = threading.Lock()
+        self._queue = None
+        self._tickets = []
+        self._broken = False
+
+    def bind(self, site: CallSite) -> None:
+        Caller.bind(self, site)
+        try:
+            if self.thread_id is None:
+                with site.find_game_thread() as thread:
+                    self.thread_id = thread.thread_id
+            if not _is_int(self.thread_id) or self.thread_id <= 0:
+                raise ValueError('thread_id must be a positive thread id')
+            try:
+                with site.process.get_thread(self.thread_id, da=0x0800) as thread:
+                    if thread.process_id != site.process.process_id:
+                        raise ValueError('hook thread is not in the target process')
+            except OSError as exc:
+                raise ValueError(f'hook thread {self.thread_id} cannot be opened') from exc
+            if self.trigger is None:
+                self.trigger = site.process_event_address
+            if not _is_int(self.trigger) or self.trigger <= 0:
+                raise ValueError('trigger must be a nonzero executable address')
+            if not _is_int(self.capacity) or self.capacity < 1 or self.capacity > 64 or self.capacity & (self.capacity - 1):
+                raise ValueError('capacity must be a power of two from 1 to 64')
+        except BaseException:
+            self.close()
+            raise
+
+    def arena(self) -> CallArena:
+        if self.closed:
+            raise _closed_error()
+        return CallArena(self.process)
+
+    def _get_queue(self):
+        if self._broken:
+            raise RuntimeError('hook installation failed and cleanup is pending')
+        if self._queue is None:
+            from ..winutils.inline_call import InlineCallQueue
+            queue = InlineCallQueue(self.process, self.trigger, self.capacity, self.thread_id, quiescent_patch=True)
+            self._queue = queue
+            try:
+                queue.enabled = True
+            except BaseException:
+                try:
+                    queue.close()
+                    self._queue = None
+                except Exception:
+                    self._broken = True
+                raise
+        return self._queue
+
+    def call(self, function: int, *args: int, timeout: float | None) -> int:
+        _check_call_args(function, args, timeout)
+        if self.process.process_id == Process.current.process_id and threading.get_native_id() == self.thread_id:
+            raise _call_error('a HookCaller cannot wait for a call on its own trigger thread', state='not started')
+        with self._lock:
+            if self.closed:
+                raise _closed_error()
+            try:
+                queue = self._get_queue()
+            except ValueError as exc:
+                raise _call_error(f'the hook refused the trigger prologue: {exc}', refused='prologue', state='not started') from exc
+            except (OSError, BufferError, RuntimeError) as exc:
+                raise _call_error(f'the hook could not install: {exc}', state='not started') from exc
+            try:
+                ticket = queue.submit(function, *args)
+            except (ValueError, OSError, BufferError, RuntimeError) as exc:
+                raise _call_error(f'the hook could not queue the call: {exc}', state='not started') from exc
+            self._tickets.append(ticket)
+        try:
+            return ticket.wait(-1 if timeout is None else math.ceil(timeout * 1000))
+        except TimeoutError as exc:
+            raise _call_error(f'the call did not return within {timeout} s', timed_out=True, state='unknown') from exc
+        except ProcessLookupError as exc:
+            raise _call_error(f'the target exited during the call: {exc}', exited=True, state='finished') from exc
+        except (OSError, RuntimeError) as exc:
+            raise _call_error(f'the hook call failed: {exc}', state='unknown') from exc
+        finally:
+            with self._lock:
+                if ticket in self._tickets and ticket.done:
+                    ticket.close()
+                    self._tickets.remove(ticket)
+
+    def close(self) -> None:
+        with self._lock:
+            if self.closed:
+                return
+            if self._queue is not None:
+                for ticket in tuple(self._tickets):
+                    if ticket.done:
+                        ticket.close()
+                        self._tickets.remove(ticket)
+                if self._tickets and self.process.still_alive():
+                    raise RuntimeError('inline calls are still pending; retry close after they finish')
+                self._queue.close()
+            super().close()
+
+
+def resolve_caller(value) -> Caller | None:
+    if value is None:
+        return value
+    if isinstance(value, Caller):
+        if not isinstance(value.policy, str) or not value.policy:
+            raise ValueError('Caller.policy must be a nonempty string')
+        return value
+    if isinstance(value, str):
+        constructors = {'remote-thread': RemoteThreadCaller, 'any-thread': AnyThreadCaller, 'game-thread': HookCaller}
+        if value in constructors:
+            return constructors[value]()
+        raise ValueError(f"calls must be 'remote-thread', 'any-thread', 'game-thread', or a Caller instance, got {value!r}")
+    raise TypeError(f'calls must be None, a string, or a Caller instance, got {type(value).__name__}')
 
 
 def process_event_address(process, mem: MemorySource, obj: int, pe_index: int) -> int:

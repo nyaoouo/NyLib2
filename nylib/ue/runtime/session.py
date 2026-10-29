@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger('nylib.ue.runtime.session')
 _info = logging.getLogger('nylib.ue.runtime')
+_orphaned_callers = []  # Keep an installed hook and its process handle alive if an attach-time call remains pending.
 
 _SUPER_STEPS = 256
 _TEXT_KEYS = ('Off.InSDK.Text.TextDatOffset', 'Off.InSDK.Text.InTextDataStringOffset')
@@ -39,8 +40,6 @@ CALL_EXEMPT = ('Off.InSDK.Text.TextDatOffset', 'Off.InSDK.Text.InTextDataStringO
                'Settings.Generator.GameName', 'Settings.Generator.GameVersion')
 _KNOWN_LABELS = ('auto:', 'profile:')
 _PYTHON_EXE_RE = re.compile(r'pythonw?[0-9.]*\.exe', re.IGNORECASE)
-_GAME_THREAD = ("calls='game-thread' (a detour on UObject::ProcessEvent) is not implemented yet (stage 15); "
-                "use calls='remote-thread' outside the game or calls='any-thread' inside it")
 
 
 def _is_int(x) -> bool:
@@ -173,7 +172,7 @@ class RuntimeContext:
                 f"Choose a policy:\n"
                 f"  Unreal.attach(..., calls='remote-thread')    external: a new remote thread, not the game thread; can crash the game\n"
                 f"  Unreal.attach_current(calls='any-thread')    injected: runs on the calling thread; can crash\n"
-                f"calls='game-thread' (queued onto the game thread through a ProcessEvent detour) is not available yet.",
+                "attach with calls='game-thread' to queue UFunction calls on the game thread.",
                 owner=owner, function=fn.name)
         return self.invoker.invoke(obj, fn, args, kwargs)
 
@@ -252,18 +251,41 @@ def _policy_warning(calls: str) -> None:
                       "(CreateRemoteThread), not the game thread, so it races the game thread and its garbage collector and "
                       "can crash or corrupt the game; its parameters are reserved there; engine-allocated out values are not "
                       'freed; UE skips some calls without a sign, so zero outputs can mean "not run"')
-    else:
+    elif calls == 'any-thread':
         _info.warning("calls='any-thread': UFunction calls run ProcessEvent on the calling thread, not the game thread, so "
                       "they race the game thread and its garbage collector and can crash or corrupt the game; "
                       "engine-allocated out values are not freed; UE skips some calls without a sign, so zero outputs can "
                       'mean "not run"')
+    elif calls == 'game-thread':
+        _info.warning("calls='game-thread': ProcessEvent is patched and calls wait for a natural entry on the selected "
+                      'thread; a call can time out if that entry never occurs, and engine-allocated out values are not freed')
+    elif calls == 'apc':
+        _info.warning("calls='apc': the selected thread must enter an alertable wait; a timed-out APC can still run later, "
+                      'and its call memory remains allocated')
+    else:
+        _info.warning('calls=%r: a custom Caller can run code in the target; ensure its thread and lifetime are safe', calls)
 
 
-def _text_call(keys, engine, opened, *, function, write, calls, allow_unverified, source, target) -> tuple:
+def _bind_caller(caller: _calls.Caller, engine, opened) -> _calls.Caller:
+    index = engine.off.InSDK.ProcessEvent.PEIndex
+    needs_address = (isinstance(caller, _calls.HookCaller) and caller.trigger is None or
+                     type(caller) not in (_calls.RemoteThreadCaller, _calls.AnyThreadCaller, _calls.ApcCaller, _calls.HookCaller))
+    address = 0
+    if needs_address:
+        obj = engine.objects.get_by_index(0).get_address()
+        address = _calls.process_event_address(opened.process, engine.mem, obj, index)
+    site = _calls.CallSite(opened.process, engine.mem, index, address,
+                           lambda: opened.process.get_thread(find_game_thread_id(opened.process, mem=engine.mem).thread_id),
+                           _calls.DEFAULT_TIMEOUT, opened.info.mode)
+    caller.bind(site)
+    return caller
+
+
+def _text_call(keys, engine, opened, *, function, write, calls, caller, allow_unverified, source, target) -> tuple:
     """Resolve the FText offsets with one Conv_StringToText call, then gate the keys still unverified; returns (keys, transport)."""
     transport = text_call = None
     if engine.off.InSDK.ProcessEvent.PEIndex > 0:
-        transport = _calls.open_transport(calls, opened.process)
+        transport = _bind_caller(caller, engine, opened)
         _policy_warning(calls)
         r = _remote_calls.resolve_text_offsets(engine, transport, function=function)
         text_call = None if r.ok else r.detail
@@ -324,7 +346,7 @@ class Unreal:
         raise TypeError('use Unreal.attach(...) or Unreal.attach_current(...)')
 
     @classmethod
-    def attach(cls, target: int | str, *, dump=None, profile=None, write: bool = False, calls: str | None = None,
+    def attach(cls, target: int | str, *, dump=None, profile=None, write: bool = False, calls: str | _calls.Caller | None = None,
                allow_unverified: bool = False, out=None, _open_target=None) -> 'Unreal':
         """Attach to a running game from outside (external) or to a capture through `_open_target`."""
         if target is None:
@@ -334,29 +356,24 @@ class Unreal:
         if target == '':
             raise ValueError('target must not be empty')
         dump = _check_dump_profile(dump, profile)
-        if calls is not None and calls != 'remote-thread':
-            if calls == 'any-thread':
-                raise ValueError("calls='any-thread' runs ProcessEvent on the calling thread, which exists only inside the game: "
-                                 "use Unreal.attach_current(calls='any-thread')")
-            if calls == 'game-thread':
-                raise NotImplementedError(_GAME_THREAD)
-            raise ValueError(f"calls must be None or 'remote-thread' for an external session, got {calls!r}")
+        caller = _calls.resolve_caller(calls)
+        if isinstance(calls, str) and calls == 'any-thread':
+            raise ValueError("calls='any-thread' runs ProcessEvent on the calling thread, which exists only inside the game: "
+                             "use Unreal.attach_current(calls='any-thread')")
         _check_tail(out, _open_target)
         root = store.resolve_out_root(out)
-        return cls._attach(target, root, dump=dump, profile=profile, write=write, calls=calls, allow_unverified=allow_unverified,
+        return cls._attach(target, root, dump=dump, profile=profile, write=write, calls=caller.policy if caller else None,
+                           caller=caller, allow_unverified=allow_unverified,
                            open_target=_open_target)
 
     @classmethod
-    def attach_current(cls, *, dump=None, profile=None, write: bool = False, calls: str | None = None,
+    def attach_current(cls, *, dump=None, profile=None, write: bool = False, calls: str | _calls.Caller | None = None,
                        allow_unverified: bool = False, out=None, _open_target=None) -> 'Unreal':
         """Attach to the game this code runs inside (injected)."""
         dump = _check_dump_profile(dump, profile)
-        if calls is not None and calls != 'any-thread':
-            if calls == 'remote-thread':
-                raise ValueError("calls='remote-thread' starts a thread in another process; inside the game use calls='any-thread'")
-            if calls == 'game-thread':
-                raise NotImplementedError(_GAME_THREAD)
-            raise ValueError(f"calls must be None or 'any-thread' inside the game, got {calls!r}")
+        caller = _calls.resolve_caller(calls)
+        if isinstance(calls, str) and calls == 'remote-thread':
+            raise ValueError("calls='remote-thread' starts a thread in another process; inside the game use calls='any-thread'")
         _check_tail(out, _open_target)
         if dump in ('latest', 'auto'):
             root = store.resolve_out_root(out, internal=True)
@@ -365,11 +382,12 @@ class Unreal:
                 root = store.resolve_out_root(out, internal=True)
             except OutputRootError:
                 root = None
-        return cls._attach(None, root, dump=dump, profile=profile, write=write, calls=calls, allow_unverified=allow_unverified,
+        return cls._attach(None, root, dump=dump, profile=profile, write=write, calls=caller.policy if caller else None,
+                           caller=caller, allow_unverified=allow_unverified,
                            open_target=_open_target)
 
     @classmethod
-    def _attach(cls, target, root, *, dump, profile, write, calls, allow_unverified, open_target) -> 'Unreal':
+    def _attach(cls, target, root, *, dump, profile, write, calls, caller, allow_unverified, open_target) -> 'Unreal':
         write = bool(write)
         snap = opened = None
         dumped = False
@@ -378,7 +396,8 @@ class Unreal:
                 snap = Snapshot.load(dump)
             elif dump is None and isinstance(profile, (str, os.PathLike)):
                 profile = profiles.load_profile(profile)
-            opened = (open_target or pipeline.open_target)(target, write=write, remote_calls=(calls == 'remote-thread'), cache_bytes=None)
+            opened = (open_target or pipeline.open_target)(target, write=write,
+                                                            remote_calls=(calls is not None and target is not None), cache_bytes=None)
             info = opened.info
             ctx = None
             if dump is not None:
@@ -391,13 +410,13 @@ class Unreal:
                     ctx.names = NameDecoder(ctx.e, ctx.lock)
                     ctx.index = ObjectIndex(ctx.e, ctx.names.decode, ctx.lock)
                     function = ctx.index.find(_remote_calls.CONV_STRING_TO_TEXT) or 0
-                    unverified, transport = _text_call(keys, ectx.engine, opened, function=function, write=write, calls=calls,
+                    unverified, transport = _text_call(keys, ectx.engine, opened, function=function, write=write, calls=calls, caller=caller,
                                                        allow_unverified=allow_unverified, source='dump' if dumped else 'snapshot',
                                                        target=info.exe)
                 else:
                     unverified, transport = keys, None
             else:
-                ectx, unverified, probe_line, transport = cls._live_engine(opened, profile, root, write, calls, allow_unverified)
+                ectx, unverified, probe_line, transport = cls._live_engine(opened, profile, root, write, calls, caller, allow_unverified)
 
             if calls is not None and ectx.engine.off.InSDK.ProcessEvent.PEIndex <= 0:
                 raise DetectionError('Off::InSDK::ProcessEvent::InitPE',
@@ -416,7 +435,7 @@ class Unreal:
             ctx.factory = ClassFactory(ctx)
 
             if calls is not None:
-                ctx.invoker = Invoker(ctx, transport or _calls.open_transport(calls, opened.process))
+                ctx.invoker = Invoker(ctx, transport or _bind_caller(caller, ectx.engine, opened))
                 if transport is None:  # else _text_call logged it before the attach-time call
                     _policy_warning(calls)
 
@@ -435,6 +454,14 @@ class Unreal:
                 _info.info(probe_line)
                 _info.info('types are read from the live process on first use')
         except BaseException:
+            if caller is not None:
+                try:
+                    caller.close()
+                except Exception as exc:
+                    if opened is not None:
+                        _orphaned_callers.append((caller, opened))
+                    logger.warning('attach left a pending call in the target; caller resources remain live: %s', exc)
+                    opened = None
             if snap is not None:
                 snap.close()
             if opened is not None:
@@ -508,7 +535,7 @@ class Unreal:
         return snap, ectx, dumped, attempt
 
     @staticmethod
-    def _live_engine(opened, profile, root, write, calls, allow_unverified):
+    def _live_engine(opened, profile, root, write, calls, caller, allow_unverified):
         report = pipeline.probe_opened(opened, profile=profile, out_root=root)
         if not report.ok:
             raise report.error
@@ -520,6 +547,7 @@ class Unreal:
         exe = opened.info.exe
         if _pre_gate(report.unverified, write=write, calls=calls, allow_unverified=allow_unverified, source='probe', target=exe):
             unverified, transport = _text_call(report.unverified, report.context.engine, opened, function=None, write=write, calls=calls,
+                                               caller=caller,
                                                allow_unverified=allow_unverified, source='probe', target=exe)
         else:
             unverified, transport = tuple(report.unverified), None
@@ -685,7 +713,7 @@ class Unreal:
 
     @property
     def call_timeout(self) -> float | None:
-        """Seconds a remote-thread call waits before `CallError(timed_out=True)`; None waits forever; ignored by any-thread."""
+        """Seconds a call waits before `CallError(timed_out=True)`; None waits forever; ignored by any-thread."""
         return self._live().call_timeout
 
     @call_timeout.setter
@@ -706,9 +734,9 @@ class Unreal:
         ctx = self._ctx
         if ctx.closed:
             return
-        ctx.closed = True
         if ctx.invoker is not None:
             ctx.invoker.close()
+        ctx.closed = True
         with ctx.lock:
             if self._snap is not None:
                 self._snap.close()
