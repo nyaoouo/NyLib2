@@ -31,7 +31,7 @@ def view(obj, name: str) -> memoryview:
     if mv.format == 'B' and mv.ndim == 1:
         return mv
     with mv:
-        return mv.cast('B')
+        return mv.cast('B') if mv.nbytes else memoryview(b'')  # cast refuses a zero in the shape
 
 
 class pinned:
