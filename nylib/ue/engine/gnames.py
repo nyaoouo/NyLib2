@@ -511,7 +511,7 @@ class NameArray:
 
         if not found_name_array and not found_name_pool:
             e.cerr('\n\nCould not find GNames!\n\n\n')
-            return False
+            return not is_test_only and self._try_name_pool_by_content(label)
 
         if is_test_only:
             return False
@@ -528,7 +528,42 @@ class NameArray:
             e.off.InSDK.NameArray.GNames = first_gnames
             self._rec('Off.InSDK.NameArray.GNames', 'auto: NameArray::TryFindNamePool_Windows')
 
+        if self._try_name_pool_by_content(label):
+            return True
         e.cerr("The address that was found couldn't be used by the generator, this might be due to GNames-encryption.\n\n")
+        return False
+
+    def name_pools_by_content(self) -> typing.Iterator[int]:
+        """FNamePool candidates: an 8-aligned slot in a writable non-executable section, after a plausible CurrentBlock and
+        CurrentByteCursor, pointing at a block that starts <hdr>"None"<hdr>"ByteProperty"; the pool is the slot - 0x10."""
+        e, p = self.e, self.e.platform
+        for section in p.image.sections:
+            if not section.writable or section.executable:
+                continue
+            for chunk_addr, data in p.scanner.chunks(section):
+                skip = (-chunk_addr) % 8
+                words = memoryview(data)[skip:skip + (len(data) - skip) // 8 * 8].cast('Q')
+                for k in range(2, len(words)):
+                    block = words[k]
+                    if not (0x10000 <= block < 0x7FFF_FFFF_0000) or block & 0x1:
+                        continue
+                    current_block, cursor = words[k - 1] & 0xFFFFFFFF, words[k - 1] >> 32
+                    if current_block >= 0x2000 or not 0 < cursor <= 0x40000:
+                        continue
+                    if (head := e.mem.try_read(block, 0x20)) is None:
+                        continue
+                    if any(head[h:h + 4] == b'None' and b'ByteProperty' in head[h + 4:] for h in (2, 4)):
+                        yield chunk_addr + skip + (k - 2) * 8
+
+    def _try_name_pool_by_content(self, label: str) -> bool:
+        """After the code-pattern finders: the first name_pools_by_content candidate that commits as an FNamePool."""
+        e = self.e
+        for pool in self.name_pools_by_content():
+            if self._try_commit(pool, False, True, label):
+                e.off.InSDK.NameArray.GNames = _i32(e.platform.get_offset(pool))
+                self._rec('Off.InSDK.NameArray.GNames', 'auto: NameArray::FindNamePoolByContent (nylib)')
+                e.cerr(f"Found 'FNamePool GNames' by content at offset 0x{e.off.InSDK.NameArray.GNames:X}\n\n")
+                return True
         return False
 
     def try_init_override(self, offset_override: int, is_name_pool: bool) -> bool:
