@@ -15,6 +15,7 @@ from ..engine.context import EngineContext
 from ..engine.unreal import UEClass
 from ..errors import AmbiguousNameError, CallsDisabledError, DetectionError, DumpMismatchError, MemoryReadError, OutputRootError, \
     ReadOnlySessionError, SessionError, UnverifiedOffsetsError
+from ..exports import EXPORT_SPECS
 from ..memory import ProcessSource, current_process
 from ..model import ClassRecord, EnumRecord, FunctionRecord, StructRecord, hexs, unhex
 from ..snapshot import SCHEMA_MAJOR, Snapshot
@@ -313,6 +314,23 @@ def _check_dump_profile(dump, profile):
     return dump
 
 
+def _check_dump_exports(exports) -> tuple[str, ...] | None:
+    """None, or the distinct export formats of `exports` in order, by the rules pipeline.dump applies."""
+    if exports is None:
+        return None
+    if not isinstance(exports, (list, tuple)):
+        raise TypeError(f'exports must be a list or tuple, got {type(exports).__name__}')
+    fmts = []
+    for fmt in exports:
+        if not isinstance(fmt, str):
+            raise TypeError(f'export format must be a str, got {type(fmt).__name__}')
+        if fmt not in EXPORT_SPECS and fmt != pipeline.IMAGE_EXPORT:
+            raise ValueError(f'unknown export format {fmt!r}')
+        if fmt not in fmts:
+            fmts.append(fmt)
+    return tuple(fmts)
+
+
 def _check_tail(out, open_target):
     if out is not None:
         if not isinstance(out, (str, os.PathLike)):
@@ -347,7 +365,8 @@ class Unreal:
 
     @classmethod
     def attach(cls, target: int | str, *, dump=None, profile=None, write: bool = False, calls: str | _calls.Caller | None = None,
-               allow_unverified: bool = False, out=None, _open_target=None) -> 'Unreal':
+               allow_unverified: bool = False, out=None, dump_exports: list[str] | tuple[str, ...] | None = None,
+               _open_target=None) -> 'Unreal':
         """Attach to a running game from outside (external) or to a capture through `_open_target`."""
         if target is None:
             raise TypeError('Unreal.attach needs a target; inside the game use Unreal.attach_current()')
@@ -356,6 +375,7 @@ class Unreal:
         if target == '':
             raise ValueError('target must not be empty')
         dump = _check_dump_profile(dump, profile)
+        exports = _check_dump_exports(dump_exports)
         caller = _calls.resolve_caller(calls)
         if isinstance(calls, str) and calls == 'any-thread':
             raise ValueError("calls='any-thread' runs ProcessEvent on the calling thread, which exists only inside the game: "
@@ -364,13 +384,15 @@ class Unreal:
         root = store.resolve_out_root(out)
         return cls._attach(target, root, dump=dump, profile=profile, write=write, calls=caller.policy if caller else None,
                            caller=caller, allow_unverified=allow_unverified,
-                           open_target=_open_target)
+                           dump_exports=exports, open_target=_open_target)
 
     @classmethod
     def attach_current(cls, *, dump=None, profile=None, write: bool = False, calls: str | _calls.Caller | None = None,
-                       allow_unverified: bool = False, out=None, _open_target=None) -> 'Unreal':
+                       allow_unverified: bool = False, out=None, dump_exports: list[str] | tuple[str, ...] | None = None,
+                       _open_target=None) -> 'Unreal':
         """Attach to the game this code runs inside (injected)."""
         dump = _check_dump_profile(dump, profile)
+        exports = _check_dump_exports(dump_exports)
         caller = _calls.resolve_caller(calls)
         if isinstance(calls, str) and calls == 'remote-thread':
             raise ValueError("calls='remote-thread' starts a thread in another process; inside the game use calls='any-thread'")
@@ -384,10 +406,10 @@ class Unreal:
                 root = None
         return cls._attach(None, root, dump=dump, profile=profile, write=write, calls=caller.policy if caller else None,
                            caller=caller, allow_unverified=allow_unverified,
-                           open_target=_open_target)
+                           dump_exports=exports, open_target=_open_target)
 
     @classmethod
-    def _attach(cls, target, root, *, dump, profile, write, calls, caller, allow_unverified, open_target) -> 'Unreal':
+    def _attach(cls, target, root, *, dump, profile, write, calls, caller, allow_unverified, dump_exports, open_target) -> 'Unreal':
         write = bool(write)
         snap = opened = None
         dumped = False
@@ -403,7 +425,8 @@ class Unreal:
             info = opened.info
             ctx = None
             if dump is not None:
-                snap, ectx, dumped, attempt = cls._snapshot_engine(target, root, dump, snap, profile, opened, write, calls, allow_unverified)
+                snap, ectx, dumped, attempt = cls._snapshot_engine(target, root, dump, snap, profile, opened, write, calls, allow_unverified,
+                                                                       dump_exports)
                 keys = tuple(ectx.unverified())
                 if not dumped:
                     attempt = _pre_gate(keys, write=write, calls=calls, allow_unverified=allow_unverified, source='snapshot', target=info.exe)
@@ -480,7 +503,7 @@ class Unreal:
         return self
 
     @staticmethod
-    def _snapshot_engine(target, root, dump, snap, profile, opened, write, calls, allow_unverified):
+    def _snapshot_engine(target, root, dump, snap, profile, opened, write, calls, allow_unverified, dump_exports=None):
         info = opened.info
         exe, ts, size = info.exe, info.pe_timestamp, info.size_of_image
         out_part = f' --out {root}' if root is not None else ''
@@ -504,7 +527,8 @@ class Unreal:
             else:
                 _info.info('no snapshot for build %s; running the dumper (%s)', hexs(ts), info.mode)
                 shared = pipeline.OpenedTarget(opened.source, opened.info, opened.process, opened.check_alive, None)
-                res = pipeline.dump(target, profile=profile, out=root, _open_target=lambda *a, **k: shared)
+                options = {} if dump_exports is None else {'exports': dump_exports}
+                res = pipeline.dump(target, profile=profile, out=root, **options, _open_target=lambda *a, **k: shared)
                 attempt = _pre_gate(res.unverified, write=write, calls=calls, allow_unverified=allow_unverified, source='dump', target=exe)
                 snap = loaded = Snapshot.load(res.path)
                 _warn_degraded_quality(res.quality, res.path)
