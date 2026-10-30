@@ -183,6 +183,8 @@ hook = InlineHook(p, b'\\x90\\x90', addr=0x401000)
 hook.enabled = True
 ```
 
+`InlineHook` rejects entry instructions it cannot relocate and uses a 15-byte absolute jump if no trampoline page is available within 2 GB.
+
 ## VTable Hook
 
 Swap a virtual function pointer, run hook code, then jump to the original function.

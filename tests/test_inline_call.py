@@ -1,4 +1,5 @@
 import ctypes
+import struct
 import subprocess
 import sys
 import threading
@@ -9,6 +10,7 @@ from unittest.mock import patch
 from nylib import winapi
 from nylib.process import Process
 from nylib.winutils.inline_call import InlineCallQueue, PrologueError, VTableCallQueue
+from nylib.winutils.inline_hook import InlineHook
 from nylib.winutils.vtable_hook import VTableHook
 
 
@@ -54,6 +56,54 @@ class InlineCallTests(unittest.TestCase):
             self.assertEqual(self.target(), 42)
             self.assertEqual([ticket.wait(1000) for ticket in tickets], [winapi.GetCurrentThreadId(), 21, 42])
             self.assertEqual(self.target(), 42)
+
+    def test_far_jump_fallback_when_near_allocation_is_unavailable(self):
+        get_tid = self.process.get_proc_address('kernel32.dll', 'GetCurrentThreadId')
+        original = self.process.read(self.addr, 15)
+        with patch.object(self.process, 'alloc_near', side_effect=ValueError('No suitable memory region')):
+            with InlineCallQueue(self.process, self.addr) as hook:
+                self.assertEqual(hook.hook_code[:6], b'\xFF\x25\x00\x00\x00\x00')
+                self.assertEqual(struct.unpack_from('<Q', hook.hook_code, 6)[0], hook.alloc_at)
+                self.assertEqual(hook.hook_code[14], 0x90)
+                self.assertEqual(len(hook.orig_code), 15)
+                ticket = hook.submit(get_tid)
+                self.assertEqual(self.target(), 42)
+                self.assertEqual(ticket.wait(1000), winapi.GetCurrentThreadId())
+                code_at = hook.alloc_at
+        self.assertEqual(self.process.read(self.addr, 15), original)
+        self.assertEqual(self.process.virtual_query(code_at).State, 0x10000)  # MEM_FREE
+
+    def test_far_jump_checks_extended_prologue(self):
+        self.process.write(self.addr, b'\xB8\x2A\x00\x00\x00\x48\x8B\x05\x00\x00\x00\x00' + b'\x90' * 10)
+        hook = InlineCallQueue(self.process, self.addr)
+        try:
+            with patch.object(self.process, 'alloc_near', side_effect=ValueError('No suitable memory region')):
+                with self.assertRaisesRegex(PrologueError, 'cannot relocate'):
+                    hook.enabled = True
+        finally:
+            hook.close()
+
+    def test_plain_inline_hook_shares_far_jump_fallback(self):
+        original = self.process.read(self.addr, 15)
+        with patch.object(self.process, 'alloc_near', side_effect=ValueError('No suitable memory region')):
+            hook = InlineHook(self.process, b'\x90', self.addr)
+            try:
+                hook.enabled = True
+                self.assertEqual(len(hook.hook_code), 15)
+                self.assertEqual(struct.unpack_from('<Q', hook.hook_code, 6)[0], hook.alloc_at)
+                self.assertEqual(self.target(), 42)
+            finally:
+                hook.free()
+        self.assertEqual(self.process.read(self.addr, 15), original)
+
+    def test_plain_inline_hook_rejects_jump_prologue(self):
+        self.process.write(self.addr, b'\xE9\x00\x00\x00\x00' + b'\x90' * 16)
+        hook = InlineHook(self.process, b'\x90', self.addr)
+        try:
+            with self.assertRaisesRegex(PrologueError, 'cannot relocate'):
+                hook.enabled = True
+        finally:
+            hook.free()
 
     def test_timeout_capacity_and_reuse(self):
         get_tid = self.process.get_proc_address('kernel32.dll', 'GetCurrentThreadId')
