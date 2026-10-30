@@ -33,8 +33,9 @@ at this hooks directory.
 The pyimgui hooks discover the `*.pyd` files next to the loaded core
 extension whose ABI tag the interpreter being frozen accepts
 (`importlib.machinery.EXTENSION_SUFFIXES`), register them as PyInstaller
-`binaries`, and add their dotted module names to `hiddenimports` so the
-analyser keeps them. Frontends built for another CPython version are
+`binaries`, and add their dotted module names to `hiddenimports`. PyInstaller
+logs `Hidden import ... not found` for each frontend and alias; this is
+harmless, because the `binaries` entries carry the files. Frontends built for another CPython version are
 skipped, so no foreign `pythonXY.dll` is pulled in. The pure-Python modules
 there (`esp.py`) and the `.pyi` stubs are added as data, because the
 analyser cannot see them. The keystone
@@ -78,16 +79,26 @@ pyinstaller your_app.py
 ```
 
 **Option B — in-tree usage.** A checkout reached through a `.pth`
-file, `PYTHONPATH` or `sys.path` has no dist-info and counts as in-tree,
-although `import nylib` works. Pass the hooks directory on the PyInstaller
-command line (or `hookspath=nylib.__pyinstaller.get_hook_dirs()` in a spec file):
+file, `PYTHONPATH` or `sys.path` usually has no dist-info and counts as
+in-tree, although `import nylib` works. (A checkout holding a
+`nylib.egg-info`, which setuptools writes when it is built, is found.) To
+check, run the command below: the hooks are found when the list holds
+`nylib.__pyinstaller:get_hook_dirs`; other packages' entries do not count.
+
+```bash
+python -c "import importlib.metadata as m; print([e.value for e in m.entry_points(group='pyinstaller40', name='hook-dirs')])"
+```
+
+If it is missing, pass the hooks directory on the PyInstaller command line
+(or `hookspath=nylib.__pyinstaller.get_hook_dirs()` in a spec file):
 
 ```bash
 pyinstaller --additional-hooks-dir path/to/nylib/__pyinstaller your_app.py
 ```
 
-Without it the freeze succeeds, but the app fails at its first frontend
-import. Programmatically:
+Without it the freeze succeeds, but the app fails at run time where it
+first needs a hooked file (e.g. its first frontend import): there is also no
+`keystone.dll`, Oodle DLL, TTF, `MSCVStore.p7b` or loader DLL. Programmatically:
 
 ```python
 import PyInstaller.__main__

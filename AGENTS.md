@@ -575,11 +575,18 @@ pyinstaller your_app.py
 ```
 
 **B. `nylib` used in-tree (no install step).** A checkout reached
-through a `.pth` file, `PYTHONPATH` or `sys.path` has no dist-info, so
-it counts as in-tree even though `import nylib` works. Point PyInstaller
-at the hooks directory yourself (or
-`hookspath=nylib.__pyinstaller.get_hook_dirs()` in a spec); without it
-the freeze succeeds, but the app fails at its first frontend import:
+through a `.pth` file, `PYTHONPATH` or `sys.path` usually has no
+dist-info, so it counts as in-tree even though `import nylib` works (one
+holding a `nylib.egg-info`, which setuptools writes when it is built, is
+found). Check with
+`python -c "import importlib.metadata as m; print([e.value for e in m.entry_points(group='pyinstaller40', name='hook-dirs')])"`:
+the hooks are found when the list holds `nylib.__pyinstaller:get_hook_dirs`
+(other packages' entries do not count). If not, point PyInstaller at the
+hooks directory yourself (or `hookspath=nylib.__pyinstaller.get_hook_dirs()`
+in a spec). Without it the freeze succeeds, but the app fails at run time
+where it first needs a hooked file (e.g. its first frontend import), and
+the keystone and Oodle DLLs, TTFs, `MSCVStore.p7b` and loader DLLs are
+missing too:
 
 ```bash
 pyinstaller --additional-hooks-dir nylib\__pyinstaller your_app.py

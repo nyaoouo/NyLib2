@@ -9,17 +9,9 @@ static analysis alone — the ``pyimgui`` core extension installs its
 
 This package exposes the hooks dir to PyInstaller via the standard
 ``pyinstaller40`` entry point, which nylib's own ``pyproject.toml`` declares.
-A pip install (regular or ``-e``) writes the dist-info that holds it, so
-PyInstaller finds the hooks by itself.
-
-A checkout reached through a ``.pth`` file, ``PYTHONPATH`` or ``sys.path`` has
-no dist-info and counts as in-tree: tell PyInstaller about the hooks dir on
-the command line (or ``hookspath=nylib.__pyinstaller.get_hook_dirs()`` in a
-spec)::
-
-    pyinstaller --additional-hooks-dir <path/to>/nylib/__pyinstaller your_app.py
-
-Without it the freeze succeeds, but the app fails at its first frontend import.
+A pip install (regular or ``-e``) is found by PyInstaller by itself; a checkout
+on ``sys.path`` usually is not and needs ``--additional-hooks-dir`` (see
+``README.md`` in this directory).
 """
 
 from __future__ import annotations

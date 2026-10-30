@@ -207,7 +207,8 @@ standalone window and an injected inbound overlay.
 
 `nylib` ships its own PyInstaller hooks under `nylib/__pyinstaller/` and registers
 them through the standard `pyinstaller40` entry point, so once `nylib` is installed
-they are auto-discovered:
+(pip-installed; a checkout on `sys.path` through a `.pth` file is not: see
+AGENTS.md section 6) they are auto-discovered:
 
 ```bash
 pyinstaller your_app.py
