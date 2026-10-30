@@ -176,7 +176,7 @@ UeError
 
 | Layer | Supported in this version | Beyond it |
 |---|---|---|
-| Container | IoStore TOC v8, one partition per container; AES-256-ECB; Oodle (Kraken) and stored blocks; compression blocks a power of two from 4 KiB to 16 MiB | `UnsupportedContainerError` (more than one partition: `feature='multiple partitions'`; one such container makes `open_installation` fail for the whole install); a `.pak` is listed in `containers` but never mounted |
+| Container | IoStore TOC v8, one or more partitions (partition `p >= 1` read from `<base>_s<p>.ucas`); AES-256-ECB; Oodle (Kraken) and stored blocks; compression blocks a power of two from 4 KiB to 16 MiB | `UnsupportedContainerError` (a count of 0 partitions: `feature='zero partitions'`; one such container makes `open_installation` fail for the whole install); a missing partition file or a block crossing a partition end: `CorruptAssetError`; a `.pak` is listed in `containers` but never mounted |
 | Mapping | `.usmap` v0-v4; compression None, Oodle, ZStd (needs Python 3.14+) | `InvalidMappingError` |
 | Package | zen packages, unversioned properties | `InvalidMappingError`, `CorruptAssetError` |
 | Exports and typed properties | every property kind and reference (`exports()`, `read()`, `raw()`, `resolve()`); 121 built-in native struct layouts; any other struct name through the `.usmap` mapping | a native struct this version does not read (named under Supported natives, above): `UnsupportedAssetError` |
