@@ -47,6 +47,14 @@ def _call_error(message: str, *, state: str, refused=None, timed_out=None, exite
     return CallError(message, refused=refused, timed_out=timed_out, exited=exited, exception=exception, partial=partial, state=state)
 
 
+def _starts_with_jump(code: bytes) -> bool:
+    """Whether code opens with an unconditional near jump (E9, EB, FF /4), allowing bnd and REX prefixes."""
+    i = 0
+    while i < len(code) and (code[i] == 0xF2 or 0x40 <= code[i] <= 0x4F):
+        i += 1
+    return i < len(code) and (code[i] in (0xE9, 0xEB) or code[i] == 0xFF and i + 1 < len(code) and code[i + 1] >> 3 & 7 == 4)
+
+
 def _closed_error() -> CallError:
     return _call_error('calls are closed in this session', state='not started')
 
@@ -595,6 +603,14 @@ class HookCaller(Caller):
                 raise
         return self._queue
 
+    def _jump_hint(self) -> str:
+        try:
+            jump = _starts_with_jump(read_target(self.process, self.trigger, 16))
+        except (MemoryReadError, ValueError):
+            return ''
+        return ('; the trigger already starts with a jump (another hook, possibly an earlier nylib session that was not closed); '
+                'restarting the game removes it') if jump else ''
+
     def call(self, function: int, *args: int, timeout: float | None) -> int:
         _check_call_args(function, args, timeout)
         if self.process.process_id == Process.current.process_id and threading.get_native_id() == self.thread_id:
@@ -605,7 +621,7 @@ class HookCaller(Caller):
             try:
                 queue = self._get_queue()
             except ValueError as exc:
-                raise _call_error(f'the hook refused the trigger prologue: {exc}', refused='prologue', state='not started') from exc
+                raise _call_error(f'the hook refused the trigger prologue: {exc}{self._jump_hint()}', refused='prologue', state='not started') from exc
             except (OSError, BufferError, RuntimeError) as exc:
                 raise _call_error(f'the hook could not install: {exc}', state='not started') from exc
             try:
