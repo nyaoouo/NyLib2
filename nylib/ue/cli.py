@@ -105,7 +105,7 @@ def _build_parser() -> argparse.ArgumentParser:
     common(pl)
     pl.set_defaults(func=_cmd_list)
 
-    pp = sub.add_parser('probe', help='detect globals, layouts and offsets only; --write-profile saves them')
+    pp = sub.add_parser('probe', help='detect globals, layouts and offsets only; --write-profile pins GObjects and GNames')
     pp.add_argument('target', type=_nonempty)
     pp.add_argument('--profile', dest='profile', default=None, help='game profile (TOML) with pinned values')
     pp.add_argument('--out', dest='out', default=None, type=_nonempty,
@@ -610,7 +610,7 @@ def _cmd_probe(args, _open_target=None) -> int:
             print(f'{len(report.values)} values found, {len(report.unverified)} unverified. No snapshot was written.')
             print('Next:')
             print(f'  {PROG} dump {args.target}')
-            print(f'  {PROG} probe {args.target} --write-profile    (pin these values for this game)')
+            print(f'  {PROG} probe {args.target} --write-profile    (pin GObjects and GNames for this game)')
         else:
             print(f'detection stopped at {report.error.step}; later steps did not run')
             print(f'error: {report.error}', file=sys.stderr)
