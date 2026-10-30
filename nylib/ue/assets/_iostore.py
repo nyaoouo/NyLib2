@@ -86,9 +86,14 @@ def _pread(f, offset: int, size: int, container: str, basename: str) -> bytes:
         raise _container_error(e, container, basename) from None
 
 
+def _ucas_path(utoc_path: str, partition: int) -> str:
+    """The data file of `partition`: `<base>.ucas` for 0, `<base>_s<partition>.ucas` after."""
+    return utoc_path[:-5] + ('.ucas' if partition == 0 else f'_s{partition}.ucas')
+
+
 def _digest(name: str, header: bytes, ids: bytes, offlens: bytes, blocks: bytes, methods: bytes, metas: bytes,
-            dir_index: bytes, ucas_size: int) -> bytes:
-    """The per-container identity input: sha256 of the length-prefixed name and sections, then the .ucas size."""
+            dir_index: bytes, ucas_sizes: tuple[int, ...]) -> bytes:
+    """The per-container identity input: sha256 of the length-prefixed name and sections, then each partition file's size."""
     def f(b: bytes) -> bytes:
         return len(b).to_bytes(8, 'little') + b
 
@@ -101,20 +106,21 @@ def _digest(name: str, header: bytes, ids: bytes, offlens: bytes, blocks: bytes,
     h.update(f(methods))
     h.update(f(metas))
     h.update(f(dir_index))
-    h.update(ucas_size.to_bytes(8, 'little'))
+    for size in ucas_sizes:
+        h.update(size.to_bytes(8, 'little'))
     return h.digest()
 
 
 class Toc:
     """A parsed .utoc; per-entry fields decode on demand from the retained raw sections."""
     __slots__ = ('path', 'version', 'flags', 'entry_count', 'block_count', 'method_count', 'block_size',
-                 'dir_index_size', 'partition_count', 'container_id', 'key_guid', '_methods',
+                 'dir_index_size', 'partition_count', 'partition_size', 'container_id', 'key_guid', '_methods',
                  '_chunk_ids_raw', '_offlen_raw', '_seeds_raw', 'seeds_count', '_no_hash_raw', 'no_hash_count',
-                 '_raw_blocks', 'dir_index_raw', 'ucas_size', 'digest', '_no_hash_map')
+                 '_raw_blocks', 'dir_index_raw', 'ucas_size', 'ucas_sizes', 'digest', '_no_hash_map')
 
     def __init__(self, path, version, flags, entry_count, block_count, method_count, block_size, dir_index_size,
-                 partition_count, container_id, key_guid, methods, chunk_ids_raw, offlen_raw, seeds_raw,
-                 seeds_count, no_hash_raw, no_hash_count, raw_blocks, dir_index_raw, ucas_size, digest):
+                 partition_count, partition_size, container_id, key_guid, methods, chunk_ids_raw, offlen_raw, seeds_raw,
+                 seeds_count, no_hash_raw, no_hash_count, raw_blocks, dir_index_raw, ucas_sizes, digest):
         self.path = path
         self.version = version
         self.flags = flags
@@ -124,6 +130,7 @@ class Toc:
         self.block_size = block_size
         self.dir_index_size = dir_index_size
         self.partition_count = partition_count
+        self.partition_size = partition_size  # header value; used only when partition_count > 1
         self.container_id = container_id
         self.key_guid = key_guid
         self._methods = methods  # tuple, index 0 is 'None' (stored)
@@ -135,7 +142,8 @@ class Toc:
         self.no_hash_count = no_hash_count
         self._raw_blocks = raw_blocks  # bytes, 12 * block_count
         self.dir_index_raw = dir_index_raw  # bytes or None; still encrypted when the container is
-        self.ucas_size = ucas_size
+        self.ucas_sizes = ucas_sizes  # one size per partition file, in partition order
+        self.ucas_size = ucas_sizes[0]
         self.digest = digest
         self._no_hash_map = None
 
@@ -243,7 +251,7 @@ class Toc:
 
     @classmethod
     def read(cls, path: str, counters: _Counters | None = None) -> 'Toc':
-        """Parse and validate a .utoc in the 'TOC validation' row order, and stat the sibling .ucas."""
+        """Parse and validate a .utoc in the 'TOC validation' row order, and stat every partition's .ucas file."""
         name = os.path.basename(path)
         t0 = time.perf_counter()
         try:
@@ -269,10 +277,11 @@ class Toc:
             if header_size != _TOC_HEADER_LEN:
                 raise _corrupt(name, f'the header size is {header_size}, expected {_TOC_HEADER_LEN}')
             key_guid = _guid_str(head[64:80])
-            flags, _enc_method, _r4, seeds_count, _partition_size, no_hash_count = struct.unpack_from('<BBHIQI', head, 80)
-            if partition_count != 1:
-                raise UnsupportedContainerError(f'{name} has {partition_count} partitions; this nylib version reads 1',
-                                                 feature='multiple partitions', container=name)
+            flags, _enc_method, _r4, seeds_count, partition_size, no_hash_count = struct.unpack_from('<BBHIQI', head, 80)
+            if partition_count == 0:
+                raise UnsupportedContainerError(f'{name} has 0 partitions', feature='zero partitions', container=name)
+            if partition_count > 1 and partition_size == 0:
+                raise _corrupt(name, f'the partition size is 0 with {partition_count} partitions')
             if flags & _FLAG_ON_DEMAND:
                 raise UnsupportedContainerError(f'{name} is an on-demand container, which this nylib version does not read',
                                                  feature='OnDemand container', container=name)
@@ -358,21 +367,23 @@ class Toc:
         if flags & _FLAG_ENCRYPTED and flags & _FLAG_INDEXED and dir_index_size % 16 != 0:
             raise _corrupt(name, f'the encrypted directory index size {dir_index_size} is not a multiple of 16')
 
-        ucas_path = path[:-5] + '.ucas'
-        ucas_name = os.path.basename(ucas_path)
-        try:
-            ust = os.stat(ucas_path)
-        except OSError as e:
-            raise _container_error(e, name, ucas_name) from None
-        if not stat.S_ISREG(ust.st_mode):
-            raise CorruptAssetError(f'container file {ucas_name} cannot be read', container=name, detail='cannot be read') from None
-        ucas_size = ust.st_size
+        sizes = []
+        for part in range(partition_count):
+            ucas_name = os.path.basename(_ucas_path(path, part))
+            try:
+                ust = os.stat(_ucas_path(path, part))
+            except OSError as e:
+                raise _container_error(e, name, ucas_name) from None
+            if not stat.S_ISREG(ust.st_mode):
+                raise CorruptAssetError(f'container file {ucas_name} cannot be read', container=name, detail='cannot be read') from None
+            sizes.append(ust.st_size)
+        ucas_sizes = tuple(sizes)
 
         digest = _digest(name, head, chunk_ids_raw, offlen_raw, raw_blocks, method_name_bytes, metas_raw,
-                          dir_index_raw or b'', ucas_size)
+                          dir_index_raw or b'', ucas_sizes)
         return cls(path, version, flags, entry_count, block_count, method_count, block_size, dir_index_size,
-                    partition_count, container_id, key_guid, methods, chunk_ids_raw, offlen_raw, seeds_raw,
-                    seeds_count, no_hash_raw, no_hash_count, raw_blocks, dir_index_raw, ucas_size, digest)
+                    partition_count, partition_size, container_id, key_guid, methods, chunk_ids_raw, offlen_raw, seeds_raw,
+                    seeds_count, no_hash_raw, no_hash_count, raw_blocks, dir_index_raw, ucas_sizes, digest)
 
 
 def check_key(toc: Toc, key: AesKey) -> None:
@@ -565,14 +576,15 @@ def iter_directory_index(index: DirIndex, container: str, entry_count: int, *, m
 
 
 class Container:
-    """Reads chunk ranges from one .utoc + .ucas pair; the .ucas opens on the first read and never after close()."""
+    """Reads chunk ranges from one .utoc and its .ucas partition files; each opens on the first read that needs it, never after close()."""
 
     def __init__(self, toc: Toc, aes: Aes256Ecb | None = None):
         self.toc = toc
         self._aes = aes
         self._lock = threading.Lock()
-        self._f = None
+        self._f = None  # partition 0
         self._size = None
+        self._parts = {}  # partition >= 1 -> (file, size)
         self._closed = False
 
     def _ensure_open(self):
@@ -583,19 +595,38 @@ class Container:
                 return
             if self._closed:
                 raise InstallationClosedError('the installation is closed')
-            ucas_path = self.toc.path[:-5] + '.ucas'
-            ucas_name = os.path.basename(ucas_path)
-            try:
-                f = open(ucas_path, 'rb')
-            except OSError as e:
-                raise _container_error(e, self.toc.basename, ucas_name) from None
-            try:
-                size = os.fstat(f.fileno()).st_size
-            except OSError as e:
-                f.close()
-                raise _container_error(e, self.toc.basename, ucas_name) from None
+            f, size = self._open_file(0)
             self._size = size  # set before _f is published: readers test _f without the lock
             self._f = f
+
+    def _open_file(self, part: int):
+        ucas_name = os.path.basename(_ucas_path(self.toc.path, part))
+        try:
+            f = open(_ucas_path(self.toc.path, part), 'rb')
+        except OSError as e:
+            raise _container_error(e, self.toc.basename, ucas_name) from None
+        try:
+            return f, os.fstat(f.fileno()).st_size
+        except OSError as e:
+            f.close()
+            raise _container_error(e, self.toc.basename, ucas_name) from None
+
+    def _partition(self, part: int):
+        """(file, size) of partition `part`, opened on first use."""
+        if part == 0:
+            self._ensure_open()
+            if (f := self._f) is None:  # close() ran between the open and here
+                raise InstallationClosedError('the installation is closed')
+            return f, self._size
+        if (entry := self._parts.get(part)) is not None:
+            return entry
+        with self._lock:
+            if (entry := self._parts.get(part)) is not None:
+                return entry
+            if self._closed:
+                raise InstallationClosedError('the installation is closed')
+            entry = self._parts[part] = self._open_file(part)
+            return entry
 
     def close(self) -> None:
         with self._lock:
@@ -603,6 +634,9 @@ class Container:
             if self._f is not None:
                 self._f.close()
                 self._f = None
+            for f, _size in self._parts.values():
+                f.close()
+            self._parts.clear()
 
     def _read_block(self, i: int, chunk: tuple[int, int], expected_usize: int, counters: _Counters | None) -> bytes:
         c = self.toc.basename
@@ -613,18 +647,26 @@ class Container:
         if method == 'None' and csize < usize:
             raise _corrupt(c, f'a stored block has compressed size {csize} below its uncompressed size {usize}', chunk, i)
         raw_len = _align16(csize)
-        self._ensure_open()
-        if off + raw_len > self._size:
-            raise _corrupt(c, f'the .ucas file ends at {self._size} but the block ends at {off + raw_len}', chunk, i)
+        part, local, label = 0, off, '.ucas'
+        if self.toc.partition_count > 1:
+            part, local = divmod(off, self.toc.partition_size)
+            if part >= self.toc.partition_count:
+                raise _corrupt(c, f'the block starts at {off:#x}, in partition {part} of {self.toc.partition_count}', chunk, i)
+            if local + raw_len > self.toc.partition_size:
+                raise _corrupt(c, f'the block at {off:#x} crosses the end of partition {part}', chunk, i)
+            label = os.path.basename(_ucas_path(self.toc.path, part))
+        f, size = self._partition(part)
+        if local + raw_len > size:
+            raise _corrupt(c, f'the {label} file ends at {size} but the block ends at {local + raw_len}', chunk, i)
         buf = bytearray(raw_len)
         t0 = time.perf_counter()
-        ucas_name = os.path.basename(self.toc.path[:-5] + '.ucas')
+        ucas_name = os.path.basename(_ucas_path(self.toc.path, part))
         with self._lock:
             if self._closed:
                 raise InstallationClosedError('the installation is closed')
             try:
-                self._f.seek(off)
-                got = self._f.readinto(buf)
+                f.seek(local)
+                got = f.readinto(buf)
             except OSError as e:
                 raise _container_error(e, self.toc.basename, ucas_name) from None
         if counters is not None:
@@ -632,12 +674,12 @@ class Container:
             counters.blocks_read += 1
             counters.seconds_io += time.perf_counter() - t0
         if got < raw_len:
-            # off + got is only the real end when off itself is within the file; re-stat for a truncation past off.
+            # local + got is only the real end when local itself is within the file; re-stat for a truncation past it.
             try:
-                actual_size = os.fstat(self._f.fileno()).st_size
+                actual_size = os.fstat(f.fileno()).st_size
             except OSError as e:
                 raise _container_error(e, self.toc.basename, ucas_name) from None
-            raise _corrupt(c, f'the .ucas file ends at {actual_size} but the block ends at {off + raw_len}', chunk, i)
+            raise _corrupt(c, f'the {label} file ends at {actual_size} but the block ends at {local + raw_len}', chunk, i)
         data = bytes(buf)
         if self.toc.encrypted:
             t0 = time.perf_counter()
