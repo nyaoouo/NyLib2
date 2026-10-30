@@ -48,7 +48,7 @@ The snapshot stays usable without the game: [load it](dump.md#load-a-snapshot), 
 - A profile's hooks are Python code that the dumper runs (inside the game in internal mode): use only profiles you trust.
 - A call can leave memory in the game: what the engine allocates for out parameters, and the call's own memory when it times out or is interrupted.
 - Ctrl+C during a remote-thread call can crash the game.
-- Injecting Python into a game that already loaded the same `python3XY.dll` crashes it. A missing `python_loader.dll` is built on first use (outside a frozen app, where `ensure_loader_dll()` raises `FileNotFoundError`), which needs MSVC and, when it is missing, downloads and installs Visual Studio Build Tools; build it once beforehand with `python -m nylib.winutils.python_loader build`.
+- Injecting Python into a game that already loaded the same `python3XY.dll` crashes it. Outside a frozen app, a missing `python_loader.dll` is built on first use, which needs MSVC and, when it is missing, downloads and installs Visual Studio Build Tools; build it once beforehand with `python -m nylib.winutils.python_loader build`. In a frozen app, `ensure_loader_dll()` raises `FileNotFoundError` for a missing DLL instead.
 
 ## Tested with
 
