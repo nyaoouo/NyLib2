@@ -131,7 +131,7 @@ class TargetRow:
     engine_hint: str | None  # e.g. '++UE5+Release-5.1'
     note: str  # '' or why the process could not be inspected
     profile: str | None  # file name of the matching profile
-    profile_status: str  # '-' | 'build matches' | 'build differs' | 'no rva pins' | 'ambiguous (<n> profiles)'
+    profile_status: str  # '-' | 'build matches' | 'build differs' | 'no rva pins' | 'ambiguous (<n> profiles)' | 'invalid'
 
 
 @dataclasses.dataclass
@@ -809,7 +809,11 @@ def _find_engine_hint(source, image) -> str | None:
 
 
 def _profile_status(root: str, exe: str, image):
-    matches = profiles.find_profiles(root, exe)
+    try:
+        matches = profiles.find_profiles(root, exe)
+    except errors.ProfileError as e:
+        logger.warning('skipping profile %s: %s', e.path, e.reason)
+        return os.path.basename(e.path), 'invalid'
     if not matches:
         return None, '-'
     if len(matches) > 1:
