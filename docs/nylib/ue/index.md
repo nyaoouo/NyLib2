@@ -42,13 +42,13 @@ The snapshot stays usable without the game: [load it](dump.md#load-a-snapshot), 
 - Reads are the default. The dumper and a default session open the game with read rights only and never run code in it.
 - Writes need `write=True` on `Unreal.attach`. They go straight into the game's memory.
 - UFunction calls need `calls=` on `Unreal.attach`: `'game-thread'` queues through a filtered `ProcessEvent` hook, `'remote-thread'` creates a thread, and `'any-thread'` is available inside the game. A custom `Caller` can use another call mechanism. The dumper's own calls need `allow_calls=` (CLI: `--allow-calls`).
-- Calls on a new or arbitrary thread can race the game thread and its garbage collector and crash the game or corrupt its state. The game-thread hook needs a naturally occurring `ProcessEvent` entry and stays in the game until `close()` or a game restart.
+- Calls on a new or arbitrary thread can race the game thread and its garbage collector and crash the game or corrupt its state. The game-thread hook needs a naturally occurring `ProcessEvent` entry and stays in the game until `close()`, a normal interpreter exit or a game restart.
 - Latent functions (those taking an `FLatentActionInfo`) are refused.
 - Offsets the dumper could not verify block writes and calls, except the two game-name keys (and, for calls, the two FText keys); the error lists them and how to fix them.
 - A profile's hooks are Python code that the dumper runs (inside the game in internal mode): use only profiles you trust.
 - A call can leave memory in the game: what the engine allocates for out parameters, and the call's own memory when it times out or is interrupted.
 - Ctrl+C during a remote-thread call can crash the game.
-- Injecting Python into a game that already loaded the same `python3XY.dll` crashes it. A missing `python_loader.dll` is built on first use, which needs MSVC and, when it is missing, downloads and installs Visual Studio Build Tools; build it once beforehand with `python -m nylib.winutils.python_loader build`.
+- Injecting Python into a game that already loaded the same `python3XY.dll` crashes it. A missing `python_loader.dll` is built on first use (outside a frozen app, where `ensure_loader_dll()` raises `FileNotFoundError`), which needs MSVC and, when it is missing, downloads and installs Visual Studio Build Tools; build it once beforehand with `python -m nylib.winutils.python_loader build`.
 
 ## Tested with
 
