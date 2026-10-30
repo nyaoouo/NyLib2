@@ -392,6 +392,8 @@ class Unreal:
         snap = opened = None
         dumped = False
         try:
+            if isinstance(caller, _calls.HookCaller):
+                _calls.check_hook_dependencies()  # before the target is opened and probed
             if dump not in (None, 'latest', 'auto'):
                 snap = Snapshot.load(dump)
             elif dump is None and isinstance(profile, (str, os.PathLike)):

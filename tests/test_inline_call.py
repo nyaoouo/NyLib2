@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from nylib import winapi
 from nylib.process import Process
-from nylib.winutils.inline_call import InlineCallQueue, VTableCallQueue
+from nylib.winutils.inline_call import InlineCallQueue, PrologueError, VTableCallQueue
 from nylib.winutils.vtable_hook import VTableHook
 
 
@@ -175,8 +175,9 @@ class InlineCallTests(unittest.TestCase):
         self.process.write(self.addr, b'\xE8\x00\x00\x00\x00' + b'\x90' * 16)
         hook = InlineCallQueue(self.process, self.addr)
         try:
-            with self.assertRaisesRegex(ValueError, 'cannot relocate'):
+            with self.assertRaisesRegex(PrologueError, 'cannot relocate'):
                 hook.enabled = True
+            self.assertTrue(issubclass(PrologueError, ValueError))
         finally:
             hook.close()
 

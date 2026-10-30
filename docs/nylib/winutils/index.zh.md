@@ -218,13 +218,13 @@ hook.free()
 
 对于任一类挂钩的批量调用，参见 [inline_call.md](inline_call.md)。
 
-<!-- dt:section id="notes-0" hash="7df787cad56e" -->
+<!-- dt:section id="notes-0" hash="2f1d31ca9bf0" -->
 ## 注意
 
 - `iter_processes()` 通过 ToolHelp32 API 枚举本地进程。
 - `enable_privilege()` 尝试启用 `SeDebugPrivilege`；无声地成功或失败。
-- `run_admin()` 如果还不是管理员，则通过 `ShellExecuteW("runas")` 重新启动，然后抛出异常。
+- `run_admin()` 如果还不是管理员，则通过 `ShellExecuteW("runas")` 重新启动，然后抛出异常。重新启动时会重复原始参数（加引号）和工作目录，无论是脚本、`-m` 还是冻结的应用；在非冻结应用中使用原始命令行（`sys.orig_argv`），因此对 `sys.argv` 所做的更改不会被带入。
 - `read_exports(base)` 仅读取此进程且不抛出异常；改用 `Process.enum_exports(dll)`。
 - `ExportTable(process, base)` 通过 `ReadProcessMemory` 在任何进程上工作。
 - 命名管道仅限本地每台机器。
-- 各自的页面：[breakpoint.md](breakpoint.md)、[sign.md](sign.md)、[python_loader.md](python_loader.md)、[python_hijack.md](python_hijack.md)、[pe_map.zh.md](pe_map.zh.md)、[inline_call.md](inline_call.md)。
+- 各自的页面：[breakpoint.md](breakpoint.md)、[sign.md](sign.md)、[python_loader.md](python_loader.md)、[python_hijack.md](python_hijack.md)、[pe_map.md](pe_map.md)、[inline_call.md](inline_call.md)。

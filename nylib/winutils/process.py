@@ -1,6 +1,8 @@
 import ctypes
+import os
 import sys
 import shlex
+import subprocess
 
 from .. import winapi
 
@@ -35,7 +37,8 @@ def run_admin():
         if ctypes.windll.shell32.IsUserAnAdmin(): return
     except:
         pass
-    ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
+    args = sys.argv[1:] if getattr(sys, 'frozen', False) else sys.orig_argv[1:]
+    ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, subprocess.list2cmdline(args), os.getcwd(), 1)
     raise PermissionError("Need admin permission, a new process should be started, if not, please run it as admin manually")
 
 
