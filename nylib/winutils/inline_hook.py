@@ -36,26 +36,55 @@ def read_code(p: 'Process', a, min_size=1, min_line=0, cs=None) -> tuple[list[ca
     return ret, proceed
 
 
-def create_inline_hook(p: 'Process', a, hook_bytes, entrance_offset=0, skip_original=0):
+class PrologueError(ValueError):
+    """The target's first instructions cannot be relocated into the hook trampoline."""
+
+
+def _read_prologue(p: 'Process', a, min_size, skip_original=0):
+    cs = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+    cs.detail = True
     try:
-        alloc = p.alloc_near(0x1000, a)
+        instructions, size = read_code(p, a, min_size=min_size, min_line=skip_original, cs=cs)
+    except ValueError as exc:
+        raise PrologueError(str(exc)) from exc
+    if (a & ~0xFFF) != ((a + size - 1) & ~0xFFF):
+        raise PrologueError('hook prologue crosses a page boundary')
+    for insn in instructions[skip_original:]:
+        if any(insn.group(group) for group in (capstone.CS_GRP_JUMP, capstone.CS_GRP_CALL, capstone.CS_GRP_RET,
+                                               capstone.CS_GRP_INT, capstone.CS_GRP_IRET)) or any(
+                op.type == capstone.x86.X86_OP_MEM and op.mem.base == capstone.x86.X86_REG_RIP for op in insn.operands):
+            raise PrologueError(f'cannot relocate instruction at {insn.address:#x}')
+    return instructions, size
+
+
+def _absolute_jump(a):
+    return b'\xff\x25\x00\x00\x00\x00' + struct.pack('<Q', a)
+
+
+def _allocate_jump(p: 'Process', a, entrance_offset=0, protect=0x40):
+    try:
+        alloc = p.alloc_near(0x1000, a, protect=protect)
         code_start = alloc + entrance_offset
-        jump_code = b'\xe9' + struct.pack('<i', code_start - a - 5)  # jmp alloc
+        jump_code = b'\xe9' + struct.pack('<i', code_start - a - 5)
     except ValueError:
-        alloc = p.alloc(0x1000)
+        alloc = p.alloc(0x1000, protect=protect)
         code_start = alloc + entrance_offset
-        jump_code = b'\xff\x25\x00\x00\x00\x00' + struct.pack('<Q', code_start)  # jmp qword ptr [rip];dq alloc
+        jump_code = _absolute_jump(code_start) + b'\x90'
+    return alloc, jump_code
 
+
+def create_inline_hook(p: 'Process', a, hook_bytes, entrance_offset=0, skip_original=0):
+    alloc, jump_code = _allocate_jump(p, a, entrance_offset)
     try:
-        orig_codes, orig_size = read_code(p, a, min_size=len(jump_code), min_line=skip_original)
+        orig_codes, orig_size = _read_prologue(p, a, len(jump_code), skip_original)
         if (pad := orig_size - len(jump_code)) > 0: jump_code += b'\x90' * pad
-
         return_at = a + len(jump_code)
         hook_bytes_ = hook_bytes
         for i in orig_codes[skip_original:]:
             # todo: rebuild relative address
             hook_bytes_ += i.bytes
-        hook_bytes_ += b'\xff\x25\x00\x00\x00\x00' + struct.pack('<Q', return_at)  # jmp qword ptr [rip];dq return_at
+        hook_bytes_ += _absolute_jump(return_at)
+        if entrance_offset + len(hook_bytes_) > 0x1000: raise ValueError('hook code exceeds one page')
         p.write(alloc, b'\0' * entrance_offset + hook_bytes_)
     except BaseException:
         p.free(alloc)
