@@ -90,6 +90,7 @@ Without it the freeze succeeds, but the app fails at its first frontend
 import. Programmatically:
 
 ```python
+import PyInstaller.__main__
 import nylib.__pyinstaller as h
 PyInstaller.__main__.run([
     'your_app.py',

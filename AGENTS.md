@@ -560,7 +560,7 @@ editable):
 - `hook-nylib.winutils.breakpoint.py` - bundles the breakpoint backend
   sources / DLLs.
 - `hook-nylib.winutils.python_loader.py` - bundles the in-process Python
-  loader C source.
+  loader C source and DLL.
 - `hook-nylib.utils.oodle.py` - collects the bundled Oodle Data/Network
   DLLs (`oo2core_9_win64.dll`, `oo2net_9_win64.dll`) via
   `collect_dynamic_libs`.
@@ -575,10 +575,11 @@ pyinstaller your_app.py
 ```
 
 **B. `nylib` used in-tree (no install step).** A checkout reached
-through a `.pth` file, `PYTHONPATH` or `sys.path` has no dist-info, so it counts as in-tree even though `import nylib` works. Point PyInstaller
-at the hooks directory yourself (or `hookspath=h.get_hook_dirs()` in a
-spec); without it the freeze succeeds, but the app fails at its first
-frontend import:
+through a `.pth` file, `PYTHONPATH` or `sys.path` has no dist-info, so
+it counts as in-tree even though `import nylib` works. Point PyInstaller
+at the hooks directory yourself (or
+`hookspath=nylib.__pyinstaller.get_hook_dirs()` in a spec); without it
+the freeze succeeds, but the app fails at its first frontend import:
 
 ```bash
 pyinstaller --additional-hooks-dir nylib\__pyinstaller your_app.py

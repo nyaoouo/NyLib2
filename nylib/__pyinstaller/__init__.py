@@ -13,8 +13,9 @@ A pip install (regular or ``-e``) writes the dist-info that holds it, so
 PyInstaller finds the hooks by itself.
 
 A checkout reached through a ``.pth`` file, ``PYTHONPATH`` or ``sys.path`` has
-no dist-info and counts as in-tree: tell PyInstaller about the hooks dir on the command line
-(or ``hookspath=nylib.__pyinstaller.get_hook_dirs()`` in a spec)::
+no dist-info and counts as in-tree: tell PyInstaller about the hooks dir on
+the command line (or ``hookspath=nylib.__pyinstaller.get_hook_dirs()`` in a
+spec)::
 
     pyinstaller --additional-hooks-dir <path/to>/nylib/__pyinstaller your_app.py
 
