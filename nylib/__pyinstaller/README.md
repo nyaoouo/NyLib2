@@ -52,11 +52,11 @@ them automatically.
 
 Neither of those works inside a PyInstaller bundle: pip's `dist-info`
 metadata is not collected by PyInstaller (so the presence check always
-returns False), and the install fallback would fail. nylib imports `pip`
-and `ensurepip` only through `importlib`, so its own imports no longer
-bundle them (an app importing `pip` itself still does). To prevent crashes,
-`nylib.utils.pip` detects `sys.frozen` at module-import time and replaces
-`required` with a no-op:
+returns False), and the install fallback would fail. nylib imports `pip` and
+`ensurepip` only through `importlib`, which PyInstaller's analysis does not see,
+so freezing an app that imports nylib does not bundle them through nylib (an app
+that imports `pip` itself does). To prevent crashes, `nylib.utils.pip` detects
+`sys.frozen` at module-import time and replaces `required` with a no-op:
 
 ```python
 if os.environ.get('PYTHON_PIP_ALL_REQ_INSTALLED') or getattr(sys, 'frozen', False):
@@ -71,16 +71,16 @@ the build-time venv so PyInstaller can bundle them, freezing Just Works.
 ## Debug view and native DLLs
 
 `nylib.imguiutils` loads `DebugViewState` and `render_debug_view` on first
-access, through `importlib`, so a freeze does not follow them. A frozen app
-that uses the debug view imports `nylib.imguiutils.debug_view` (or the names
-from it); `from nylib.imguiutils import *` no longer gives these or `debug_view`.
+access, through `importlib`, which PyInstaller's analysis does not see. A star
+import gives them only once something has loaded the debug view, so import
+them from `nylib.imguiutils.debug_view`; a frozen app must.
 
-The `breakpoint` and `python_loader` hooks build a missing DLL only when MSVC
-is installed; otherwise they log one WARNING per missing DLL and go on.
-Prebuild before freezing with `nylib.winutils.breakpoint.veh.build_backend()`,
+Without MSVC, the `breakpoint` and `python_loader` hooks log one WARNING per
+missing DLL and go on. Prebuild with `nylib.winutils.breakpoint.veh.build_backend()`,
 `nylib.winutils.breakpoint.debugger.build_backend()` and
-`nylib.winutils.python_loader.build_loader()`. A frozen app never builds: a
-missing DLL raises `FileNotFoundError` and `rebuild=` raises `RuntimeError`.
+`nylib.winutils.python_loader.build_loader()`. In a frozen app
+`ensure_backend_dll()` and `ensure_loader_dll()` never build: a missing DLL
+raises `FileNotFoundError` and `rebuild=True` raises `RuntimeError`.
 
 ## Telling PyInstaller about the hooks
 
