@@ -345,7 +345,7 @@ class Process:
         return thread
 
     def iter_threads(self, da=0x1FFFFF) -> typing.Iterator[Thread]:
-        """Yield owned thread objects from a snapshot; close each returned thread."""
+        """Yield owned thread objects from a snapshot, skipping threads that exited since it; close each returned thread."""
         snapshot = winapi.CreateToolhelp32Snapshot(0x4, 0)  # TH32CS_SNAPTHREAD
         try:
             entry = winapi.ThreadEntry32()
@@ -357,7 +357,14 @@ class Process:
                 raise
             while True:
                 if entry.th32OwnerProcessID == self.process_id:
-                    yield self.get_thread(entry.th32ThreadID, da=da)
+                    try:
+                        thread = self.get_thread(entry.th32ThreadID, da=da)
+                    except ValueError:
+                        thread = None  # the TID was reused by another process
+                    except OSError as e:
+                        if e.winerror != 87: raise  # ERROR_INVALID_PARAMETER: the thread exited after the snapshot
+                        thread = None
+                    if thread is not None: yield thread
                 entry.dwSize = ctypes.sizeof(entry)
                 try:
                     winapi.Thread32Next(snapshot, ctypes.byref(entry))

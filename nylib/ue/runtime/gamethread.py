@@ -20,16 +20,19 @@ def find_game_thread_id(process, *, mem=None) -> GameThreadId:
 
     `mem` is reserved for memory-based signals and unused. A thread that cannot be queried is skipped."""
     named, earliest = [], None  # earliest = (creation_time, tid)
-    for t in process.iter_threads(da=THREAD_QUERY_LIMITED):
-        with t:
-            try:
-                created, description = t.creation_time(), t.description()
-            except OSError:
-                continue
-        if description == GAME_THREAD_NAME:
-            named.append(t.thread_id)
-        if earliest is None or created < earliest[0]:
-            earliest = created, t.thread_id
+    try:
+        for t in process.iter_threads(da=THREAD_QUERY_LIMITED):
+            with t:
+                try:
+                    created, description = t.creation_time(), t.description()
+                except OSError:
+                    continue
+            if description == GAME_THREAD_NAME:
+                named.append(t.thread_id)
+            if earliest is None or created < earliest[0]:
+                earliest = created, t.thread_id
+    except OSError as err:
+        raise DetectionError('game thread', f'cannot scan the threads of process {process.process_id}: {err}') from err
     first = earliest[1] if earliest is not None else None
     if len(named) == 1:
         if first != named[0]:
