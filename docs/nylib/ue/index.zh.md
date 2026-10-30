@@ -44,19 +44,19 @@ with Unreal.attach(exe, dump=result.path) as ue:  # read-only session, types fro
 
 快照在没有游戏运行的情况下依然可用：[加载它](dump.md#load-a-snapshot)、将其导入 [IDA](ida.md)，或用它生成 [stubs](stubs.md)。
 
-<!-- dt:section id="safety-0" hash="571dc01c107c" -->
+<!-- dt:section id="safety-0" hash="183a4998312c" -->
 ## 安全性
 
 - 读取是默认行为。dumper 和默认会话打开游戏时只拥有读取权限,从不在游戏中执行代码。
 - 写入需要在 `Unreal.attach` 上设置 `write=True`。写入会直接作用于游戏的内存。
 - UFunction 调用需要在 `Unreal.attach` 上设置 `calls=`:`'game-thread'` 通过经过过滤的 `ProcessEvent` hook 排队执行,`'remote-thread'` 创建一个线程,`'any-thread'` 在游戏内可用。自定义的 `Caller` 可以使用其他调用机制。dumper 自身的调用需要 `allow_calls=`(CLI 为 `--allow-calls`)。
-- 在新线程或任意线程上的调用可能会与游戏线程及其垃圾回收器产生竞争,导致游戏崩溃或状态损坏。game-thread hook 需要一次自然发生的 `ProcessEvent` 入口,并会一直留在游戏中,直到 `close()` 或游戏重启。
+- 在新线程或任意线程上的调用可能会与游戏线程及其垃圾回收器产生竞争,导致游戏崩溃或状态损坏。game-thread hook 需要一次自然发生的 `ProcessEvent` 入口,并会一直留在游戏中,直到 `close()`、正常的解释器退出或游戏重启。
 - 潜在函数(接受 `FLatentActionInfo` 的函数)会被拒绝。
 - dumper 无法验证的偏移量会阻止写入和调用,但游戏名称的两个键(以及调用时的两个 FText 键)除外;错误信息会列出这些偏移量以及修复方法。
 - Profile 的 hooks 是 dumper 运行的 Python 代码(在内部模式下于游戏内运行):只使用你信任的 profile。
 - 调用可能会在游戏中留下内存:引擎为输出参数分配的内存,以及调用超时或被中断时调用自身占用的内存。
 - 在 remote-thread 调用期间按 Ctrl+C 可能会导致游戏崩溃。
-- 向已经加载了相同 `python3XY.dll` 的游戏注入 Python 会使其崩溃。缺失的 `python_loader.dll` 会在首次使用时构建,这需要 MSVC;若 MSVC 缺失,还会下载并安装 Visual Studio Build Tools。可以先用 `python -m nylib.winutils.python_loader build` 构建一次。
+- 向已经加载了相同 `python3XY.dll` 的游戏注入 Python 会使其崩溃。在冻结的应用之外,缺失的 `python_loader.dll` 会在首次使用时构建,这需要 MSVC;若 MSVC 缺失,还会下载并安装 Visual Studio Build Tools。可以先用 `python -m nylib.winutils.python_loader build` 构建一次。在冻结的应用中,对于缺失的 DLL,`ensure_loader_dll()` 会改为抛出 `FileNotFoundError`。
 
 <!-- dt:section id="tested-with-0" hash="6c36f4c15fd5" -->
 ## 测试环境

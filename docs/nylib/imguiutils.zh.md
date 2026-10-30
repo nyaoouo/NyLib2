@@ -126,12 +126,12 @@ install_icon(meta)  # call once before first frame
 
 将 TTF 字形合并到 ImGui 字体图集中。`is_installed(name)` 检查是否已加载。
 
-<!-- dt:section id="debug-view-memory-debugger-0" hash="e432f70e9161" -->
+<!-- dt:section id="debug-view-memory-debugger-0" hash="0d0cf350326e" -->
 ## 调试视图（内存调试器）
 
 ```python
 # needs: a target process with a running pyimgui window
-from nylib.imguiutils import DebugViewState, render_debug_view
+from nylib.imguiutils.debug_view import DebugViewState, render_debug_view
 from nylib.pyimgui import imgui
 from nylib.pyimgui.imgui import ctx as imgui_ctx
 
@@ -144,7 +144,9 @@ state.goto_disasm(0x400000)  # navigate disasm pane
 state.goto_hex(0x400000)      # navigate hex pane
 ```
 
-交互式内存查看器，具有反汇编（由 Capstone 驱动）、十六进制窗格、模块列表、断点管理器、模式扫描器和 Python 控制台。必须在具有 `ImGuiWindowFlags_MenuBar` 的窗口内调用 `render_debug_view(state)`。通过 `show_module_panel`、`show_bp_panel`、`show_address_resolver`、`show_pinned_panel`、`show_history_panel`、`show_pattern_scan`、`show_dump_module`、`show_python_console` 显示面板。将 `address_fmt` 设置为 `AddressFormat.HEX` 或 `AddressFormat.MODULE_OFFSET`。`mem_fmt` 是一个具有 `cell`（U8、U16、U32、U64）和 `radix`（"hex"或"dec"）的 `MemFormat`。调用 `state.close()` 停止后台工作线程。
+交互式内存查看器，包含反汇编（基于 Capstone）、十六进制面板、模块列表、断点管理器、特征码扫描器和 Python 控制台。必须在带有 `ImGuiWindowFlags_MenuBar` 的窗口内调用 `render_debug_view(state)`。面板通过 `show_module_panel`、`show_bp_panel`、`show_address_resolver`、`show_pinned_panel`、`show_history_panel`、`show_pattern_scan`、`show_dump_module`、`show_python_console` 显示。将 `address_fmt` 设为 `AddressFormat.HEX` 或 `AddressFormat.MODULE_OFFSET`。`mem_fmt` 是 `MemFormat`，其 `cell`（U8、U16、U32、U64）和 `radix`（"hex" 或 "dec"）用于设置显示格式。调用 `state.close()` 可停止后台工作线程。
+
+`nylib.imguiutils` 在首次访问时才惰性加载 `DebugViewState` 和 `render_debug_view`；只有在调试视图已被加载后，星号导入才会提供它们，因此请从 `nylib.imguiutils.debug_view` 导入（冻结后的应用必须这样做，否则 PyInstaller 不会打包它）。
 
 <!-- dt:section id="notes-0" hash="14382385d17f" -->
 ## 注意

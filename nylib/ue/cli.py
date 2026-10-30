@@ -105,7 +105,7 @@ def _build_parser() -> argparse.ArgumentParser:
     common(pl)
     pl.set_defaults(func=_cmd_list)
 
-    pp = sub.add_parser('probe', help='detect globals, layouts and offsets only; --write-profile pins GObjects and GNames')
+    pp = sub.add_parser('probe', help='detect globals, layouts and offsets only; --write-profile pins GObjects and GNames and notes other found values as comments')
     pp.add_argument('target', type=_nonempty)
     pp.add_argument('--profile', dest='profile', default=None, help='game profile (TOML) with pinned values')
     pp.add_argument('--out', dest='out', default=None, type=_nonempty,
@@ -314,11 +314,11 @@ def _pin_for_step(step: str):
 
 def _detection_fix_lines(e, target) -> list:
     pin = _pin_for_step(e.step)
+    explain = f'  {PROG} probe {target} --explain          (what the finders reported)'
     if pin is None:
-        return [
-            'fix: pin it in a profile written by hand (see docs/nylib/ue/dump.md), then probe again:',
-            f'  {PROG} probe {target} --explain          (what the finders reported)',
-        ]
+        if e.step.startswith('Off::'):
+            return ['fix: pin it in a profile written by hand (see docs/nylib/ue/dump.md), then probe again:', explain]
+        return [explain]
     return [
         'fix: pin it in a profile, then probe again:',
         f'  {PROG} probe {target} --write-profile    (pins the GObjects and GNames found so far; fill in [globals] {pin})',
@@ -590,8 +590,11 @@ def _cmd_probe(args, _open_target=None) -> int:
                 except FileExistsError as e:  # F7.1 = A
                     logger.debug('%s: %s', type(e).__name__, e, exc_info=True)
                     path = e.args[0] if e.args else str(e)
-                    message = f'{path} exists; merge the lines above by hand, or move it away and run again'
-                    _print_json({'ok': False, 'error': {'type': 'FileExistsError', 'message': message, 'exit': 1}})
+                    error = {'type': 'FileExistsError', 'message': f'{path} exists; merge profile_text by hand, or move it away and run again',
+                             'exit': 1, 'path': path}
+                    if (text := getattr(e, 'profile_text', None)) is not None:
+                        error['profile_text'] = text
+                    _print_json({'ok': False, 'error': error})
                     return 1
                 except Exception as e:
                     return _finish_error(e, args.json, target=args.target, log_file=log_file, logger=logger)
@@ -635,8 +638,8 @@ def _cmd_probe(args, _open_target=None) -> int:
                 return 1
             except Exception as e:
                 return _finish_error(e, args.json, target=args.target, log_file=log_file, logger=logger)
-            print(f'wrote {written} ({len(pin_names)} globals pinned for build {_hex(report.target.pe_timestamp)}; '
-                  'offsets stay automatic)')
+            print(f'wrote {written} (pins: {", ".join(pin_names) or "none"}; rva pins hold for build {_hex(report.target.pe_timestamp)}; '
+                  'hints are commented out)')
 
         return 0 if report.ok else 3
 

@@ -7,14 +7,14 @@
 
 [Index](index.md) · 代码：`nylib/ue/pipeline.py`、`nylib/ue/snapshot.py`、`nylib/ue/cli.py`
 
-<!-- dt:section id="probe-and-dump-0" hash="7bcda1d275b9" -->
+<!-- dt:section id="probe-and-dump-0" hash="c810121b7c3d" -->
 ## 探测与导出
 
 ```python
-# needs a running game
+# 需要正在运行的游戏
 from nylib.ue import probe, dump
 
-report = probe('TRIANGLE_STRATEGY-Win64-Shipping.exe')   # finds globals and offsets, writes nothing
+report = probe('TRIANGLE_STRATEGY-Win64-Shipping.exe')   # 查找全局变量和偏移，不写入任何内容
 print(report.ok, report.stem)
 for v in report.values:
     print(v.name, v.value, v.how, 'UNVERIFIED' if v.unverified else '')
@@ -28,8 +28,10 @@ print(result.counts, result.unverified, result.warnings, result.export_paths)
 - `nylib.ue.pipeline.list_targets()` 会列出看起来像 UE 游戏的运行中进程。
 - 输出：`<out>/<GameName>/<YYYYmmdd-HHMMSS>/`。根目录为 `out=`，否则为环境变量 `NYLIB_UE_OUT`，否则为当前目录下的 `.\ue_dumps`。在游戏内部没有默认值：必须传入 `out=` 或设置 `NYLIB_UE_OUT`。
 - Profile：`<out>/profiles/` 下 `[match] exe` 与目标匹配的 TOML 文件会被自动使用（两个匹配的文件会引发 `ProfileError`；传入 `profile=` 以选择）；`nylib.ue.pipeline.write_profile(report)` 会写出一个为该构建固定 GObjects 和 GNames 的 profile。Profile 永远不能启用调用。
-- 写入 profile 从不覆盖已有文件。若文件已存在，`write_profile` 会引发 `FileExistsError`（`e.args[0]` 为路径），其 `e.profile_text` 中是它本会写入的文本；`probe --write-profile` 会打印该文本，并提示手动合并。
+- 当 probe 自行探测到 ProcessEvent 索引和 GWorld rva 时（`how` 以 `auto:` 开头，而非 `profile:` 或 `fallback:`），`write_profile` 也会记录它们，但只作为注释行，位于 "found by this probe; check it before pinning" 之下。取消注释即可使其成为对该 exe 每个构建都生效的固定项（见下文）。随后 `probe --write-profile` 会打印 `wrote <path> (pins: gobjects, gnames; rva pins hold for build 0x...; hints are commented out)`。
+- 写入 profile 从不覆盖已有文件。若文件已存在，`write_profile` 会抛出 `FileExistsError`（`e.args[0]` 为路径），其 `e.profile_text` 中是它本会写入的文本。随后 `probe --write-profile` 会打印该文本，提示手动合并并以退出码 1 结束；使用 `--json` 时，错误文档包含 `path` 和 `profile_text`。若 `<out>/profiles` 是一个文件，`write_profile` 则改为抛出 `NotADirectoryError`，并指明该路径。
 - 只有 `[globals]` 中的 rva 固定项（`gobjects`、`gnames`）会与构建进行核对。`process_event` 以及 `[offsets]` 固定项（包括 `Off.InSDK.World.GWorld` 的 rva）适用于该 exe 的每个构建，并计为已验证，因此游戏更新后，旧 profile 仍会应用它们。
+- 解析 profile 时会检查 `[offsets]` 的键：每个键的拼写必须与 `nylib.ue.engine.offsets.PINNABLE_KEYS` 中一致（`Off.UStruct.Size`，而不是 `UStruct.Size`），否则抛出 `ProfileError: [offsets] unknown key ...`。自动加载会跳过任何解析失败的 profile，并输出 WARNING；只有 `[match] exe` 与目标匹配的 profile 中的这一错误，才会让 probe、dump 或 attach 失败。
 - 在代码中，`nylib.ue.profiles.parse_profile(text)` 和 `load_profile(path)` 会构建一个 `Profile`（`path`、`exe`、`pins`、`offsets`、`hooks`），`profile=` 可像路径一样接受它。内存中的 profile 在消息中显示为 `<string>`，且不能使用 `[hooks]`（`ProfileError`：hooks 需要 profile 文件）。
 - 质量：`result.quality`（以及 `meta.json` 中的 `quality`）会报告一个 `verdict`，即 `complete` 或 `degraded`，并附带 `reasons`、按类别统计的问题 `counts`，以及所应用的 `thresholds`。只要出现任何 `unreadable_type`、`unreadable_fields`、`unreadable_name` 或 `unreadable_interfaces`，或者类型相关行（classes、structs、functions、enums、packages）中的 `index_mismatch` 超过其中的 0.1%，就会判定为 degraded；其他问题类别只报告，从不参与判定（一个未能解析的 `EnumProperty` 枚举属于 `unresolved_reference`）。如果 usmap 导出发现某属性指向缺失的枚举或结构体，`result.warnings` 会新增一条 `usmap: N properties referenced a missing enum or struct (first: ...)` 条目。`strict=True`（命令行：`--strict`）会在发布任何内容之前，把 degraded 判定转为抛出的错误，磁盘上只留下 `.partial` 文件夹；默认（`strict=False`）只报告。
 
@@ -48,7 +50,7 @@ process_event = { index = 76 }
 "Off.InSDK.World.GWorld" = 0x4C7D1A8
 ```
 
-从 `probe --write-profile` 开始，它会写出 `[match]` 以及 `gobjects` / `gnames` 的 rva 固定项。手动编辑时，你可以在任何 `[globals]` 固定项中添加 `note`（字符串），在 `gobjects` 中添加 `elements_per_chunk` 和 `layout`，还可以添加 `[hooks] decrypt_objects = "hooks.py:decrypt_objects"`（位于 profile 旁边的文件；它会在转储进程中以 Python 运行，因此只使用你信任的 profile；不能与 `gobjects` 固定项同用，后者是在未解密的情况下读取的）。`gobjects` / `gnames` 固定项必须恰好包含 `rva` 和 `sig` 之一。
+从 `probe --write-profile` 开始，它会写出 `[match]` 以及 `gobjects` / `gnames` 的 rva 固定项，并附带注释形式的提示（见上文）。手动编辑时，你可以在任何 `[globals]` 固定项中添加 `note`（字符串），在 `gobjects` 中添加 `elements_per_chunk` 和 `layout`，还可以添加 `[hooks] decrypt_objects = "hooks.py:decrypt_objects"`（位于 profile 旁边的文件；它会在转储进程中以 Python 运行，因此只使用你信任的 profile；不能与 `gobjects` 固定项同用，后者是在未解密的情况下读取的）。`gobjects` / `gnames` 固定项必须恰好包含 `rva` 和 `sig` 之一。
 
 <!-- dt:section id="exports-0" hash="41472624ebf8" -->
 ## 导出项（Exports）
@@ -98,7 +100,7 @@ with load_snapshot(r'ue_dumps\TRIANGLE_STRATEGY\20261002-024137') as snap:
 
 该文件夹包含 `meta.json`、`offsets.json`、`objects.jsonl`、`fields.jsonl`、`types.jsonl` 和 `types.idx.json`，以及导出文件。类型在首次使用时才会加载。快照包含类型、布局和对象列表，但不包含属性值，甚至不包含类默认值；属性值需从实时会话中读取（`ue.cdo(...)`、`ue.find(...)`）。
 
-<!-- dt:section id="command-line-0" hash="8f06de2bd6a4" -->
+<!-- dt:section id="command-line-0" hash="1c424681d829" -->
 ## 命令行（Command line）
 
 ```text
@@ -109,7 +111,7 @@ python -m nylib.ue export <snapshot> --format idmap
 python -m nylib.ue info <snapshot>
 ```
 
-`list`、`probe` 和 `dump` 都需要一个正在运行的游戏。`--allow-calls` 不带值表示启用全部三项。`--json`（除 `export` 外的所有命令）会输出机器可读的结果。日志会写入 `<out>/_logs/<command>.log`，除非指定了 `--log-file`。退出码：0 表示成功，1 表示错误，2 表示用法错误，3 表示检测失败，4 表示无法打开目标或目标已退出，130 表示被中断。
+`list`、`probe` 和 `dump` 都需要一个正在运行的游戏。`list` 会打印每个进程匹配的 profile 及其状态：`build matches`、`build differs`、`no rva pins`、`ambiguous (N profiles)` 或 `invalid`（未知的 `[offsets]` 键；日志会指明该键）。`--allow-calls` 不带值表示启用全部三项。`--json`（除 `export` 外的所有命令）会输出机器可读的结果。日志会写入 `<out>/_logs/<command>.log`，除非指定了 `--log-file`。退出码：0 表示成功，1 表示错误，2 表示用法错误，3 表示检测失败，4 表示无法打开目标或目标已退出，130 表示被中断。
 
 <!-- dt:section id="own-memory-backend-0" hash="25e39435de31" -->
 ## 自定义内存后端

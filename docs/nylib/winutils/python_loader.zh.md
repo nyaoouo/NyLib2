@@ -23,7 +23,7 @@ target = Process.from_name('notepad.exe')
 run_script(target, 'my_inject_script.py')
 ```
 
-<!-- dt:section id="build-the-loader-dll-0" hash="4a404f639639" -->
+<!-- dt:section id="build-the-loader-dll-0" hash="7b32d5471910" -->
 ## 构建加载器 DLL
 
 在注入前必须编译 C++ 加载器；在每个开发会话中执行一次。
@@ -38,6 +38,8 @@ dll = ensure_loader_dll()  # returns path, builds on demand
 # Or rebuild explicitly.
 dll = ensure_loader_dll(rebuild=True)
 ```
+
+在冻结应用中，`ensure_loader_dll` 从不编译：缺失的 DLL 会抛出 `FileNotFoundError`，`rebuild=True` 会抛出 `RuntimeError`。在冻结前使用 `build_loader()` 预先编译；PyInstaller 钩子仅在已安装 MSVC 时才会自行编译缺失的 DLL，否则记录一条 WARNING。
 
 <!-- dt:section id="inject-and-run-python-code-0" hash="565193d56210" -->
 ## 注入并运行 Python 代码

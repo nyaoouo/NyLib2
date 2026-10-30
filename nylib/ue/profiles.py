@@ -1,6 +1,8 @@
 """TOML game profiles: parsing, validation, auto-pickup and a minimal writer (I1)."""
+import collections.abc
 import dataclasses
 import datetime
+import errno
 import importlib.util
 import logging
 import os
@@ -24,6 +26,8 @@ _GLOBAL_KEYS = {
 }
 _OFFSET_KEY_RE = re.compile(r'[A-Za-z_]\w*(\.[A-Za-z_]\w*)+')
 _BARE_KEY_RE = re.compile(r'[A-Za-z0-9_-]+')
+_UNKNOWN_OFFSET = '[offsets] unknown key '
+_HINT_LINE = '# found by this probe; check it before pinning (a pin applies to every build of this exe)'
 
 
 def _is_int(x) -> bool:
@@ -147,6 +151,8 @@ def _flatten_offsets(table, prefix, out, p):
 
 
 def _parse_offsets(table, p):
+    from .engine.offsets import PINNABLE_KEYS
+
     flat = {}
     _flatten_offsets(table, '', flat, p)
     out = {}
@@ -156,6 +162,9 @@ def _parse_offsets(table, p):
         if not _is_int(v) or not (0 <= v < 2 ** 31):
             raise ProfileError(p, f'[offsets] {k} must be an int in range 0x0 <= x < 0x80000000')
         out[k] = v
+    for k in out:
+        if k not in PINNABLE_KEYS:
+            raise ProfileError(p, f'{_UNKNOWN_OFFSET}{k!r}')
     return out
 
 
@@ -232,6 +241,16 @@ def load_profile(path) -> Profile:
     return parse_profile(text, path)
 
 
+def _raw_match_exe(path) -> str | None:
+    """The `[match] exe` of a TOML file read without validation, or None when it cannot be read."""
+    try:
+        with open(path, 'rb') as f:
+            exe = tomllib.loads(f.read().decode('utf-8-sig')).get('match', {}).get('exe')
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, AttributeError):
+        return None
+    return exe if isinstance(exe, str) else None
+
+
 def find_profiles(out_root, exe: str) -> list:
     if not isinstance(exe, str):
         raise TypeError(f'exe must be str, got {type(exe).__name__}')
@@ -249,6 +268,8 @@ def find_profiles(out_root, exe: str) -> list:
         try:
             prof = load_profile(path)
         except ProfileError as e:
+            if e.reason.startswith(_UNKNOWN_OFFSET) and (raw := _raw_match_exe(path)) is not None and raw.casefold() == target:
+                raise
             logger.warning('skipping profile %s: %s', e.path, e.reason)
             continue
         if prof.exe is not None and prof.exe.casefold() == target:
@@ -372,7 +393,33 @@ def _pin_table(pin: Pin) -> dict:
     return d
 
 
-def render_profile(exe: str, game_name: str, pins, *, when: datetime.datetime) -> str:
+def _check_hint_int(label: str, v, lo: int, hi: int) -> int:
+    if not _is_int(v):
+        raise TypeError(f'{label} must be int, got {type(v).__name__}')
+    if not lo <= v < hi:
+        raise ValueError(f'{label} must be in range {lo:#x} <= x < {hi:#x}, got {v:#x}')
+    return v
+
+
+def _check_offset_hints(offset_hints) -> dict:
+    from .engine.offsets import PINNABLE_KEYS
+
+    if offset_hints is None:
+        return {}
+    if not isinstance(offset_hints, collections.abc.Mapping):
+        raise TypeError(f'offset_hints must be a mapping, got {type(offset_hints).__name__}')
+    out = {}
+    for k, v in offset_hints.items():
+        if not isinstance(k, str):
+            raise TypeError(f'offset_hints key must be str, got {type(k).__name__}')
+        if k not in PINNABLE_KEYS:
+            raise ValueError(f'offset_hints key {k!r} cannot be pinned')
+        out[k] = _check_hint_int(f'offset_hints[{k!r}]', v, 0, 2 ** 31)
+    return out
+
+
+def render_profile(exe: str, game_name: str, pins, *, when: datetime.datetime, process_event_hint: int | None = None,
+                   offset_hints=None) -> str:
     if not isinstance(exe, str):
         raise TypeError(f'exe must be str, got {type(exe).__name__}')
     if not isinstance(game_name, str):
@@ -386,6 +433,9 @@ def render_profile(exe: str, game_name: str, pins, *, when: datetime.datetime) -
         if pin.name in by_name:
             raise ValueError(f'duplicate pin name {pin.name!r}')
         by_name[pin.name] = pin
+    if process_event_hint is not None:
+        _check_hint_int('process_event_hint', process_event_hint, 0, 0x10000)
+    hints = _check_offset_hints(offset_hints)
 
     lines = [
         f'# nylib.ue profile for {_sanitize_comment_text(game_name)}',
@@ -408,10 +458,15 @@ def render_profile(exe: str, game_name: str, pins, *, when: datetime.datetime) -
     pe_pin = by_name.get('process_event')
     if pe_pin is not None:
         lines.append(f'process_event = {_dump_value(_pin_table(pe_pin))}')
+    elif process_event_hint is not None:
+        lines += [_HINT_LINE, f'# process_event = {_dump_value({"index": process_event_hint})}']
+    lines += ['', '[offsets]']
+    if hints:
+        lines.append(_HINT_LINE)
+        lines += [f'# {_dump_basic_string(k)} = {_dump_value(v)}' for k, v in hints.items()]
+    else:
+        lines.append('# "Off.UStruct.MinAlignment" = 0x5C')
     lines += [
-        '',
-        '[offsets]',
-        '# "Off.UStruct.MinAlignment" = 0x5C',
         '',
         '[hooks]',
         '# FILE beside the profile; the hook runs in the process that runs the dump, which is inside the game in internal mode',
@@ -428,7 +483,10 @@ def write_profile_file(path, text: str) -> str:
     path = os.fspath(path)
     parent = os.path.dirname(path)
     if parent:
-        os.makedirs(parent, exist_ok=True)
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except FileExistsError as e:
+            raise NotADirectoryError(errno.ENOTDIR, 'not a directory', e.filename or parent) from e
     try:
         with open(path, 'x', encoding='utf-8', newline='\n') as f:
             f.write(text)

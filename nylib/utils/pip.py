@@ -1,3 +1,4 @@
+import importlib
 import logging
 import os
 import socket
@@ -27,13 +28,10 @@ def boostrap_pip():
     If pip is not installed, it uses the `ensurepip` module to bootstrap it.
     """
     try:
-        import pip
+        importlib.import_module('pip')
     except ImportError:
-        import ensurepip
-
-        ensurepip.bootstrap()
-
-        import pip
+        importlib.import_module('ensurepip').bootstrap()
+        importlib.import_module('pip')
 
 
 def _test_pip_source(url):
@@ -44,7 +42,7 @@ def _test_pip_source(url):
 
 
 def _set_pip_default_index(url: str):
-    import pip._internal.cli.cmdoptions as cmdoptions
+    cmdoptions = importlib.import_module('pip._internal.cli.cmdoptions')
 
     options: list = cmdoptions.general_group["options"]
 
@@ -97,13 +95,13 @@ def install(*_a):
     """
     boostrap_pip()
 
-    import pip._internal.commands
-    import pip._internal.cli.status_codes
+    commands = importlib.import_module('pip._internal.commands')
+    status_codes = importlib.import_module('pip._internal.cli.status_codes')
 
     set_pip_default_index()
     # pip._internal.commands.install.InstallCommand
     try:
-        if pip._internal.commands.create_command('install').main(list(_a)) == pip._internal.cli.status_codes.SUCCESS:
+        if commands.create_command('install').main(list(_a)) == status_codes.SUCCESS:
             return True
     except SystemExit as e:
         pass

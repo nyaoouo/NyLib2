@@ -131,7 +131,7 @@ class TargetRow:
     engine_hint: str | None  # e.g. '++UE5+Release-5.1'
     note: str  # '' or why the process could not be inspected
     profile: str | None  # file name of the matching profile
-    profile_status: str  # '-' | 'build matches' | 'build differs' | 'no rva pins' | 'ambiguous (<n> profiles)'
+    profile_status: str  # '-' | 'build matches' | 'build differs' | 'no rva pins' | 'ambiguous (<n> profiles)' | 'invalid'
 
 
 @dataclasses.dataclass
@@ -579,8 +579,8 @@ def _report_after_calls(report: ProbeReport) -> ProbeReport:
     )
 
 
-def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, allow_calls=None, log_file=None,
-         cache_bytes=None, progress=None, strict: bool = False, _open_target=None) -> DumpResult:
+def _check_exports(exports) -> tuple[str, ...]:
+    """The distinct export formats of `exports`, in order; raises TypeError or ValueError on a bad value."""
     if not isinstance(exports, (list, tuple)):
         raise TypeError(f'exports must be a list or tuple, got {type(exports).__name__}')
     fmts = []
@@ -591,6 +591,12 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, a
             raise ValueError(f'unknown export format {fmt!r}')
         if fmt not in fmts:
             fmts.append(fmt)
+    return tuple(fmts)
+
+
+def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, allow_calls=None, log_file=None,
+         cache_bytes=None, progress=None, strict: bool = False, _open_target=None) -> DumpResult:
+    fmts = list(_check_exports(exports))
     features = remote_calls.parse_features(allow_calls)  # errors before any root or target access
     if log_file is not None and not isinstance(log_file, (str, os.PathLike)):
         raise TypeError(f'log_file must be str, os.PathLike or None, got {type(log_file).__name__}')
@@ -742,6 +748,12 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, a
 # write_profile / list_targets
 # --------------------------------------------------------------------------------------------
 
+def _auto_int(row, lo: int, hi: int) -> int | None:
+    """The row's value when it is an int in [lo, hi) detected by an `auto:` finder, else None."""
+    v = row.value if row is not None else None
+    return v if row is not None and row.how.startswith('auto:') and isinstance(v, int) and not isinstance(v, bool) and lo <= v < hi else None
+
+
 def write_profile(report: ProbeReport, *, out=None):
     if not isinstance(report, ProbeReport):
         raise TypeError(f'report must be a ProbeReport, got {type(report).__name__}')
@@ -771,8 +783,11 @@ def write_profile(report: ProbeReport, *, out=None):
         if gnames is not None and isinstance(gnames.value, int):
             pins.append(profiles.Pin('gnames', rva=gnames.value, build=info.pe_timestamp, image_size=info.size_of_image))
 
+    pe_hint = _auto_int(rows.get('Off.InSDK.ProcessEvent.PEIndex'), 1, 0x10000)
+    gworld = _auto_int(rows.get('Off.InSDK.World.GWorld'), 1, 2 ** 31)
     name = report.game_name or _exe_stem(info.exe)
-    text = profiles.render_profile(info.exe, name, pins, when=datetime.datetime.now().astimezone())
+    text = profiles.render_profile(info.exe, name, pins, when=datetime.datetime.now().astimezone(), process_event_hint=pe_hint,
+                                   offset_hints={'Off.InSDK.World.GWorld': gworld} if gworld is not None else None)
     try:
         path = profiles.write_profile_file(os.path.join(root, store.PROFILES_DIR, f'{store.safe_dir_name(name)}.toml'), text)
     except FileExistsError as e:
@@ -800,7 +815,11 @@ def _find_engine_hint(source, image) -> str | None:
 
 
 def _profile_status(root: str, exe: str, image):
-    matches = profiles.find_profiles(root, exe)
+    try:
+        matches = profiles.find_profiles(root, exe)
+    except errors.ProfileError as e:
+        logger.warning('skipping profile %s: %s', e.path, e.reason)
+        return os.path.basename(e.path), 'invalid'
     if not matches:
         return None, '-'
     if len(matches) > 1:

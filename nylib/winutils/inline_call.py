@@ -4,10 +4,8 @@ import threading
 import time
 
 from .. import winapi
-from .inline_hook import InlineHook, asm, read_code  # runs the dependency check, so it precedes capstone
+from .inline_hook import InlineHook, PrologueError, _absolute_jump, _allocate_jump, _read_prologue, asm
 from .vtable_hook import VTableHook
-
-import capstone
 
 
 _HEADER_SIZE = 64
@@ -32,10 +30,6 @@ _gil_get_context.restype = ctypes.c_bool
 _gil_exit_code = _gil_kernel32.GetExitCodeThread
 _gil_exit_code.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
 _gil_exit_code.restype = ctypes.c_bool
-
-
-class PrologueError(ValueError):
-    """The target's first instructions cannot be relocated into the hook trampoline."""
 
 
 def is_executable(process, addr: int) -> bool:
@@ -385,26 +379,13 @@ class InlineCallQueue(_CallQueue, InlineHook):
 
     def alloc(self):
         if self.alloc_at: return
-        cs = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
-        cs.detail = True
+        alloc_at, jump = _allocate_jump(self.process, self.addr, protect=0x04)
         try:
-            instructions, size = read_code(self.process, self.addr, min_size=5, cs=cs)
-        except ValueError as exc:
-            raise PrologueError(str(exc)) from exc
-        for insn in instructions:
-            if any(insn.group(group) for group in (capstone.CS_GRP_JUMP, capstone.CS_GRP_CALL, capstone.CS_GRP_RET,
-                                                   capstone.CS_GRP_INT, capstone.CS_GRP_IRET)) or any(
-                    op.type == capstone.x86.X86_OP_MEM and op.mem.base == capstone.x86.X86_REG_RIP for op in insn.operands):
-                raise PrologueError(f'cannot relocate instruction at {insn.address:#x}')
-        if (self.addr & ~0xFFF) != ((self.addr + size - 1) & ~0xFFF):
-            raise PrologueError('hook prologue crosses a page boundary')
-        if len(self.code) + size + 14 > 0x1000: raise ValueError('hook code exceeds one page')
-        alloc_at = self.process.alloc_near(0x1000, self.addr, protect=0x04)
-        try:
+            instructions, size = _read_prologue(self.process, self.addr, len(jump))
             orig_code = b''.join(insn.bytes for insn in instructions)
-            jump = b'\xE9' + struct.pack('<i', alloc_at - self.addr - 5)
-            hook_code = jump + b'\x90' * (size - 5)
-            trampoline = self.code + orig_code + b'\xFF\x25\x00\x00\x00\x00' + struct.pack('<Q', self.addr + size)
+            hook_code = jump + b'\x90' * (size - len(jump))
+            trampoline = self.code + orig_code + _absolute_jump(self.addr + size)
+            if len(trampoline) > 0x1000: raise ValueError('hook code exceeds one page')
             self.process.write(alloc_at, trampoline)
             self.process.virtual_protect(alloc_at, 0x1000, 0x20)
             winapi.FlushInstructionCache(self.process.handle, alloc_at, len(trampoline))

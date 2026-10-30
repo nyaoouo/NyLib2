@@ -68,12 +68,13 @@ with InlineCallQueue(process, trigger_at, thread_id=game_tid) as hook:
     hook.call(func_at, timeout_ms=5000)
 ```
 
-<!-- dt:section id="notes-0" hash="8d16f8be5ed4" -->
+<!-- dt:section id="notes-0" hash="2d072d6924bb" -->
 ## 注意
 
 - 请在 64 位 Python 中使用 64 位目标。原生异常无法穿过生成的分发器进行展开。
 - `capacity` 是 1 到 64 之间的 2 的幂；当有这么多票据尚未释放时，`submit` 会抛出 `BufferError`。
 - 对于热点内联触发点，向 `InlineCallQueue` 传入 `quiescent_patch=True`：它会在安装、移除和代码释放期间挂起目标的其他线程并检查它们的指令指针。
+- 如果 2 GB 范围内没有可用的 trampoline 页，`InlineCallQueue` 会使用 15 字节的绝对跳转，并且需要同样长度的可重定位入口代码。
 - 关闭队列（离开 `with` 时同样如此）会拒绝待处理的票据：请先等待所有票据。
 - 如果目标在调用完成前退出，`ticket.wait` 会抛出 `ProcessLookupError`。
 - 不带队列的普通挂钩见 [index.md](index.md#inline-hook)（`InlineHook`、`VTableHook`）。
