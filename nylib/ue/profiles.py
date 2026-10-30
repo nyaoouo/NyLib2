@@ -2,6 +2,7 @@
 import collections.abc
 import dataclasses
 import datetime
+import errno
 import importlib.util
 import logging
 import os
@@ -482,7 +483,10 @@ def write_profile_file(path, text: str) -> str:
     path = os.fspath(path)
     parent = os.path.dirname(path)
     if parent:
-        os.makedirs(parent, exist_ok=True)
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except FileExistsError as e:
+            raise NotADirectoryError(errno.ENOTDIR, 'not a directory', e.filename or parent) from e
     try:
         with open(path, 'x', encoding='utf-8', newline='\n') as f:
             f.write(text)
