@@ -46,16 +46,20 @@ def create_inline_hook(p: 'Process', a, hook_bytes, entrance_offset=0, skip_orig
         code_start = alloc + entrance_offset
         jump_code = b'\xff\x25\x00\x00\x00\x00' + struct.pack('<Q', code_start)  # jmp qword ptr [rip];dq alloc
 
-    orig_codes, orig_size = read_code(p, a, min_size=len(jump_code), min_line=skip_original)
-    if (pad := orig_size - len(jump_code)) > 0: jump_code += b'\x90' * pad
+    try:
+        orig_codes, orig_size = read_code(p, a, min_size=len(jump_code), min_line=skip_original)
+        if (pad := orig_size - len(jump_code)) > 0: jump_code += b'\x90' * pad
 
-    return_at = a + len(jump_code)
-    hook_bytes_ = hook_bytes
-    for i in orig_codes[skip_original:]:
-        # todo: rebuild relative address
-        hook_bytes_ += i.bytes
-    hook_bytes_ += b'\xff\x25\x00\x00\x00\x00' + struct.pack('<Q', return_at)  # jmp qword ptr [rip];dq return_at
-    p.write(alloc, b'\0' * entrance_offset + hook_bytes_)
+        return_at = a + len(jump_code)
+        hook_bytes_ = hook_bytes
+        for i in orig_codes[skip_original:]:
+            # todo: rebuild relative address
+            hook_bytes_ += i.bytes
+        hook_bytes_ += b'\xff\x25\x00\x00\x00\x00' + struct.pack('<Q', return_at)  # jmp qword ptr [rip];dq return_at
+        p.write(alloc, b'\0' * entrance_offset + hook_bytes_)
+    except BaseException:
+        p.free(alloc)
+        raise
     return alloc, jump_code, b''.join(i.bytes for i in orig_codes)
 
 

@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _CHILD = '''
@@ -40,6 +41,28 @@ class ReadCodeTests(unittest.TestCase):
             self.fail('read_code did not return on undecodable bytes within 60s')
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(done.stdout.strip(), 'ok')
+
+    def test_failed_create_inline_hook_frees_its_page(self):
+        from nylib.process import Process
+        from nylib.winutils.inline_hook import create_inline_hook
+        p = Process.current
+        bad = p.alloc(0x1000)
+        p.write(bad, b'\x06' * 32)
+        freed = []
+        real_free = Process.free
+
+        def spy(process, address, size=0):
+            freed.append(address)
+            return real_free(process, address, size)
+
+        try:
+            with patch.object(Process, 'free', spy):
+                with self.assertRaises(ValueError): create_inline_hook(p, bad, b'\xc3')
+            self.assertEqual(len(freed), 1)
+            self.assertNotEqual(freed[0], bad)
+            self.assertEqual(p.virtual_query(freed[0]).State, 0x10000)  # MEM_FREE
+        finally:
+            real_free(p, bad)
 
 
 if __name__ == '__main__':
