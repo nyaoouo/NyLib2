@@ -189,7 +189,7 @@ import pathlib
 pdb = get_pdb_data(pathlib.Path('cache'), pathlib.Path('pdbutil'), pathlib.Path('debug.pdb'))
 ```
 
-<!-- dt:section id="inline-hook-0" hash="197f0e6bc00e" -->
+<!-- dt:section id="inline-hook-0" hash="2695a39bdb49" -->
 ## 内联挂钩
 
 使用 capstone/keystone 的内联代码挂钩。
@@ -200,6 +200,8 @@ from nylib.winutils.inline_hook import InlineHook
 hook = InlineHook(p, b'\\x90\\x90', addr=0x401000)
 hook.enabled = True
 ```
+
+`InlineHook` 会拒绝无法重定位的入口指令；若 2 GB 范围内没有可用的 trampoline 页，则使用 15 字节的绝对跳转。
 
 <!-- dt:section id="vtable-hook-0" hash="81551d9403a4" -->
 ## 虚表挂钩
