@@ -651,7 +651,7 @@ class Container:
         if self.toc.partition_count > 1:
             part, local = divmod(off, self.toc.partition_size)
             if part >= self.toc.partition_count:
-                raise _corrupt(c, f'the block starts at {off:#x}, in partition {part} of {self.toc.partition_count}', chunk, i)
+                raise _corrupt(c, f'the block at {off:#x} is in partition {part}, but the container has {self.toc.partition_count} partitions', chunk, i)
             if local + raw_len > self.toc.partition_size:
                 raise _corrupt(c, f'the block at {off:#x} crosses the end of partition {part}', chunk, i)
             label = os.path.basename(_ucas_path(self.toc.path, part))
