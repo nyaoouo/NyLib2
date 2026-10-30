@@ -553,8 +553,9 @@ class Unreal:
             unverified, transport = tuple(report.unverified), None
         ectx = EngineContext.from_snapshot(meta, report.context.to_offsets(), opened.source.fresh)
         g = meta['globals']
+        used = report.profile or ('<string>' if report.profile_note == 'explicit' else 'none')
         probe_line = (f'probe: GObjects {g["GObjects"]["rva"]} · GNames {g["GNames"]["rva"]} · {len(report.values)} offsets '
-                      f'({report.seconds:.1f}s)')
+                      f'({report.seconds:.1f}s) · profile {used}')
         del report, meta
         opened.source.refresh()
         return ectx, unverified, probe_line, transport
