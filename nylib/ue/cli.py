@@ -590,8 +590,11 @@ def _cmd_probe(args, _open_target=None) -> int:
                 except FileExistsError as e:  # F7.1 = A
                     logger.debug('%s: %s', type(e).__name__, e, exc_info=True)
                     path = e.args[0] if e.args else str(e)
-                    message = f'{path} exists; merge the lines above by hand, or move it away and run again'
-                    _print_json({'ok': False, 'error': {'type': 'FileExistsError', 'message': message, 'exit': 1}})
+                    error = {'type': 'FileExistsError', 'message': f'{path} exists; merge profile_text by hand, or move it away and run again',
+                             'exit': 1, 'path': path}
+                    if (text := getattr(e, 'profile_text', None)) is not None:
+                        error['profile_text'] = text
+                    _print_json({'ok': False, 'error': error})
                     return 1
                 except Exception as e:
                     return _finish_error(e, args.json, target=args.target, log_file=log_file, logger=logger)
