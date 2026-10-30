@@ -540,7 +540,7 @@ class ApcCaller(RemoteThreadCaller):
 
 
 class HookCaller(Caller):
-    """Run calls from a filtered ProcessEvent detour on the game thread."""
+    """Run calls through ProcessEvent from a thread-filtered detour on the trigger (ProcessEvent unless trigger= is set)."""
     policy = 'game-thread'
 
     def __init__(self, thread_id=None, trigger=None, capacity=16):
