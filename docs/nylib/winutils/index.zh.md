@@ -189,7 +189,7 @@ import pathlib
 pdb = get_pdb_data(pathlib.Path('cache'), pathlib.Path('pdbutil'), pathlib.Path('debug.pdb'))
 ```
 
-<!-- dt:section id="inline-hook-0" hash="2695a39bdb49" -->
+<!-- dt:section id="inline-hook-0" hash="0c38ab47ca3b" -->
 ## 内联挂钩
 
 使用 capstone/keystone 的内联代码挂钩。
@@ -202,6 +202,7 @@ hook.enabled = True
 ```
 
 `InlineHook` 会拒绝无法重定位的入口指令；若 2 GB 范围内没有可用的 trampoline 页，则使用 15 字节的绝对跳转。
+传入 `_jmp_support=1` 可重定位直接的 `jmp` 和 `Jcc` 入口指令。该选项默认关闭；call、间接分支和 RIP 相对内存操作数仍会抛出 `PrologueError`。
 
 <!-- dt:section id="vtable-hook-0" hash="81551d9403a4" -->
 ## 虚表挂钩
