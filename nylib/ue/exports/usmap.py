@@ -3,6 +3,7 @@ of `snapshot.types()`.
 
 Compression 0 only; record order is the snapshot's path order, not Dumper-7's launch order.
 """
+import contextvars
 import logging
 import os
 import re
@@ -13,6 +14,7 @@ from ..model import PropType
 from ..names import make_name_valid, strip_path, valid_file_name
 
 logger = logging.getLogger('nylib.ue.exports.usmap')
+export_warnings: contextvars.ContextVar[list | None] = contextvars.ContextVar('usmap_export_warnings', default=None)  # dump()'s warning list
 
 _MAGIC = 0x30C4
 _VERSION = 4  # ExplicitEnumValues
@@ -180,6 +182,9 @@ def write(snapshot, out_dir) -> str:
     if w.missing_count:
         logger.warning('%d propert%s referenced a missing enum or struct (first: %s)',
                         w.missing_count, 'y' if w.missing_count == 1 else 'ies', w.missing_sample)
+        if (sink := export_warnings.get()) is not None:
+            sink.append('usmap: %d propert%s referenced a missing enum or struct (first: %s)'
+                        % (w.missing_count, 'y' if w.missing_count == 1 else 'ies', w.missing_sample))
 
     payload_len = 12 + len(w.name_buf) + len(enum_buf) + len(struct_buf)
     header = struct.pack('<HBiBII', _MAGIC, _VERSION, 0, 0, payload_len, payload_len)

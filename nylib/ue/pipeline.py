@@ -1,5 +1,4 @@
 """Target detection, pin application and the dump pipeline over stages 4-6 (I3): open_target, probe, dump, list_targets."""
-import contextlib
 import dataclasses
 import datetime
 import hashlib
@@ -20,6 +19,7 @@ from . import remote_calls
 from . import scan
 from . import store
 from .exports import EXPORT_SPECS
+from .exports.usmap import export_warnings
 from ..winutils import process as winutils_process
 from ..winutils.version import get_file_version_info
 
@@ -150,26 +150,6 @@ class _Pins:
 # --------------------------------------------------------------------------------------------
 # shared argument checks
 # --------------------------------------------------------------------------------------------
-
-class _WarningList(logging.Handler):
-    def __init__(self, sink: list):
-        super().__init__(logging.WARNING)
-        self.sink = sink
-
-    def emit(self, record):
-        self.sink.append(record.getMessage())
-
-
-@contextlib.contextmanager
-def _collect_warnings(name: str, sink: list):
-    """Append the WARNING messages the named logger emits inside the block to `sink`."""
-    log, handler = logging.getLogger(name), _WarningList(sink)
-    log.addHandler(handler)
-    try:
-        yield
-    finally:
-        log.removeHandler(handler)
-
 
 def _check_target(target):
     if target is None:
@@ -734,8 +714,11 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, a
 
             image_written = img is not None and img.skipped is None
             written_fmts = tuple(f for f in fmts if f != IMAGE_EXPORT or image_written)
-            with _collect_warnings('nylib.ue.exports.usmap', warning_list):
+            token = export_warnings.set(warning_list)
+            try:
                 paths = store.publish(folder, [f for f in fmts if f != IMAGE_EXPORT])  # (7-c) publish never sees image
+            finally:
+                export_warnings.reset(token)
             paths_iter = iter(paths)
             export_paths = tuple(os.path.join(folder, *img.rel_path.split('/')) if f == IMAGE_EXPORT else next(paths_iter)
                                  for f in written_fmts)
