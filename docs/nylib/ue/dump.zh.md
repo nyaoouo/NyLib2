@@ -7,7 +7,7 @@
 
 [Index](index.md) · 代码：`nylib/ue/pipeline.py`、`nylib/ue/snapshot.py`、`nylib/ue/cli.py`
 
-<!-- dt:section id="probe-and-dump-0" hash="089ac43bea61" -->
+<!-- dt:section id="probe-and-dump-0" hash="7bcda1d275b9" -->
 ## 探测与导出
 
 ```python
@@ -27,8 +27,28 @@ print(result.counts, result.unverified, result.warnings, result.export_paths)
 - 目标：exe 名称（可省略 `.exe`）、PID（`int`），或 `None` 表示当前进程（游戏内部）。两个同名进程会引发 `AmbiguousTargetError`；此时请传入 PID。
 - `nylib.ue.pipeline.list_targets()` 会列出看起来像 UE 游戏的运行中进程。
 - 输出：`<out>/<GameName>/<YYYYmmdd-HHMMSS>/`。根目录为 `out=`，否则为环境变量 `NYLIB_UE_OUT`，否则为当前目录下的 `.\ue_dumps`。在游戏内部没有默认值：必须传入 `out=` 或设置 `NYLIB_UE_OUT`。
-- Profile：`<out>/profiles/` 下 `[match] exe` 匹配目标的 TOML 文件会被自动使用（或传入 `profile=`）；`nylib.ue.pipeline.write_profile(report)` 会为该构建写出一个固定 GObjects 和 GNames 的 profile。Profile 永远不能启用调用。
-- 质量：`result.quality`（以及 `meta.json` 中的 `quality`）会报告一个 `verdict`（`complete` 或 `degraded`），并附带 `reasons`、按类别统计的问题 `counts`，以及所应用的 `thresholds`。只要出现任何 `unreadable_type`、`unreadable_fields`、`unreadable_name` 或 `unreadable_interfaces`，或者 `index_mismatch` 在类型相关行（classes、structs、functions、enums、packages）中的占比超过 0.1%，就会判定为 degraded；其他问题类别只统计上报，不参与判定。`strict=True`（命令行：`--strict`）会把 degraded 的结果变为在发布任何内容之前抛出的错误，磁盘上只留下 `.partial` 文件夹；默认（`strict=False`）只报告，不抛出。
+- Profile：`<out>/profiles/` 下 `[match] exe` 与目标匹配的 TOML 文件会被自动使用（两个匹配的文件会引发 `ProfileError`；传入 `profile=` 以选择）；`nylib.ue.pipeline.write_profile(report)` 会写出一个为该构建固定 GObjects 和 GNames 的 profile。Profile 永远不能启用调用。
+- 写入 profile 从不覆盖已有文件。若文件已存在，`write_profile` 会引发 `FileExistsError`（`e.args[0]` 为路径），其 `e.profile_text` 中是它本会写入的文本；`probe --write-profile` 会打印该文本，并提示手动合并。
+- 只有 `[globals]` 中的 rva 固定项（`gobjects`、`gnames`）会与构建进行核对。`process_event` 以及 `[offsets]` 固定项（包括 `Off.InSDK.World.GWorld` 的 rva）适用于该 exe 的每个构建，并计为已验证，因此游戏更新后，旧 profile 仍会应用它们。
+- 在代码中，`nylib.ue.profiles.parse_profile(text)` 和 `load_profile(path)` 会构建一个 `Profile`（`path`、`exe`、`pins`、`offsets`、`hooks`），`profile=` 可像路径一样接受它。内存中的 profile 在消息中显示为 `<string>`，且不能使用 `[hooks]`（`ProfileError`：hooks 需要 profile 文件）。
+- 质量：`result.quality`（以及 `meta.json` 中的 `quality`）会报告一个 `verdict`，即 `complete` 或 `degraded`，并附带 `reasons`、按类别统计的问题 `counts`，以及所应用的 `thresholds`。只要出现任何 `unreadable_type`、`unreadable_fields`、`unreadable_name` 或 `unreadable_interfaces`，或者类型相关行（classes、structs、functions、enums、packages）中的 `index_mismatch` 超过其中的 0.1%，就会判定为 degraded；其他问题类别只报告，从不参与判定（一个未能解析的 `EnumProperty` 枚举属于 `unresolved_reference`）。如果 usmap 导出发现某属性指向缺失的枚举或结构体，`result.warnings` 会新增一条 `usmap: N properties referenced a missing enum or struct (first: ...)` 条目。`strict=True`（命令行：`--strict`）会在发布任何内容之前，把 degraded 判定转为抛出的错误，磁盘上只留下 `.partial` 文件夹；默认（`strict=False`）只报告。
+
+### Profile 文件
+
+```toml
+[match]
+exe = "TRIANGLE_STRATEGY-Win64-Shipping.exe"
+
+[globals]
+gobjects = { rva = 0x4A2B3C0, build = 0x67890ABC, image_size = 0x6F00000 }   # rva 需要 build
+gnames = { sig = "48 8D 0D ? ? ? ? E8" }                                     # sig 不需要 build；它必须恰好匹配一处
+process_event = { index = 76 }
+
+[offsets]
+"Off.InSDK.World.GWorld" = 0x4C7D1A8
+```
+
+从 `probe --write-profile` 开始，它会写出 `[match]` 以及 `gobjects` / `gnames` 的 rva 固定项。手动编辑时，你可以在任何 `[globals]` 固定项中添加 `note`（字符串），在 `gobjects` 中添加 `elements_per_chunk` 和 `layout`，还可以添加 `[hooks] decrypt_objects = "hooks.py:decrypt_objects"`（位于 profile 旁边的文件；它会在转储进程中以 Python 运行，因此只使用你信任的 profile；不能与 `gobjects` 固定项同用，后者是在未解密的情况下读取的）。`gobjects` / `gnames` 固定项必须恰好包含 `rva` 和 `sig` 之一。
 
 <!-- dt:section id="exports-0" hash="41472624ebf8" -->
 ## 导出项（Exports）
@@ -58,7 +78,7 @@ for r in result.remote_calls:
 - `append-string`:在一组名称样本上,用 `FName::AppendString` 校验名称解码器。
 - 调用在游戏内的一个新线程(在该线程内部:即调用线程)上运行,而不是在游戏线程上,并且可能导致游戏崩溃。只要探测过程留下了未验证的偏移,就不会发起调用(FText 和游戏名称的调用除外)。失败的功能会变为警告;转储会继续进行。实际运行了哪些调用会列在 `meta.json` 中(`remote_calls`)。
 
-<!-- dt:section id="load-a-snapshot-0" hash="635e81ab34b7" -->
+<!-- dt:section id="load-a-snapshot-0" hash="bf8aeb328105" -->
 ## 加载快照
 
 ```python
@@ -76,7 +96,7 @@ with load_snapshot(r'ue_dumps\TRIANGLE_STRATEGY\20261002-024137') as snap:
     print(snap.objects[i], snap.objects.full_name(i))
 ```
 
-该文件夹包含 `meta.json`、`offsets.json`、`objects.jsonl`、`fields.jsonl`、`types.jsonl` 和 `types.idx.json`，以及导出文件。类型在首次使用时才会加载。
+该文件夹包含 `meta.json`、`offsets.json`、`objects.jsonl`、`fields.jsonl`、`types.jsonl` 和 `types.idx.json`，以及导出文件。类型在首次使用时才会加载。快照包含类型、布局和对象列表，但不包含属性值，甚至不包含类默认值；属性值需从实时会话中读取（`ue.cdo(...)`、`ue.find(...)`）。
 
 <!-- dt:section id="command-line-0" hash="8f06de2bd6a4" -->
 ## 命令行（Command line）
