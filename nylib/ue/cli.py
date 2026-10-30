@@ -314,11 +314,11 @@ def _pin_for_step(step: str):
 
 def _detection_fix_lines(e, target) -> list:
     pin = _pin_for_step(e.step)
+    explain = f'  {PROG} probe {target} --explain          (what the finders reported)'
     if pin is None:
-        return [
-            'fix: pin it in a profile written by hand (see docs/nylib/ue/dump.md), then probe again:',
-            f'  {PROG} probe {target} --explain          (what the finders reported)',
-        ]
+        if e.step.startswith('Off::'):
+            return ['fix: pin it in a profile written by hand (see docs/nylib/ue/dump.md), then probe again:', explain]
+        return [explain]
     return [
         'fix: pin it in a profile, then probe again:',
         f'  {PROG} probe {target} --write-profile    (pins the GObjects and GNames found so far; fill in [globals] {pin})',
