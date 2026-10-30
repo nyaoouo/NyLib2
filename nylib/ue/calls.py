@@ -9,7 +9,7 @@ import time
 from typing import Callable, NamedTuple
 
 from ..process import Process
-from .errors import CallError, MemoryReadError
+from .errors import CallError, MemoryReadError, PendingCallsError
 from .flags import EPropertyFlags
 from .memory import MemorySource
 from .model import FunctionRecord, PropertyRecord
@@ -45,6 +45,14 @@ def _align_up(value: int, align: int) -> int:
 
 def _call_error(message: str, *, state: str, refused=None, timed_out=None, exited=None, exception=None, partial=None) -> CallError:
     return CallError(message, refused=refused, timed_out=timed_out, exited=exited, exception=exception, partial=partial, state=state)
+
+
+def _starts_with_jump(code: bytes) -> bool:
+    """Whether code opens with an unconditional near jump (E9, EB, FF /4), allowing bnd and REX prefixes."""
+    i = 0
+    while i < len(code) and (code[i] == 0xF2 or 0x40 <= code[i] <= 0x4F):
+        i += 1
+    return i < len(code) and (code[i] in (0xE9, 0xEB) or code[i] == 0xFF and i + 1 < len(code) and code[i + 1] >> 3 & 7 == 4)
 
 
 def _closed_error() -> CallError:
@@ -532,7 +540,7 @@ class ApcCaller(RemoteThreadCaller):
 
 
 class HookCaller(Caller):
-    """Run calls from a filtered ProcessEvent detour on the game thread."""
+    """Run calls through ProcessEvent from a thread-filtered detour on the trigger (ProcessEvent unless trigger= is set)."""
     policy = 'game-thread'
 
     def __init__(self, thread_id=None, trigger=None, capacity=16):
@@ -546,6 +554,11 @@ class HookCaller(Caller):
     def bind(self, site: CallSite) -> None:
         Caller.bind(self, site)
         try:
+            try:
+                from ..winutils import inline_call  # noqa: F401
+            except Exception as exc:  # the import runs nylib.utils.pip.required, which can fail with any type
+                raise _call_error(f"calls='game-thread' needs keystone-engine and capstone ({type(exc).__name__}: {exc}); install them beforehand (pip install \".[asm]\"); "
+                                  'nylib.utils.pip installs missing packages on first use unless PYTHON_PIP_ALL_REQ_INSTALLED is set', refused='dependencies', state='not started') from exc
             if self.thread_id is None:
                 with site.find_game_thread() as thread:
                     self.thread_id = thread.thread_id
@@ -590,6 +603,14 @@ class HookCaller(Caller):
                 raise
         return self._queue
 
+    def _jump_hint(self) -> str:
+        try:
+            jump = _starts_with_jump(read_target(self.process, self.trigger, 16))
+        except (MemoryReadError, ValueError):
+            return ''
+        return ('; the trigger already starts with a jump (another hook?); if it is a hook left by an earlier nylib session that was not closed, '
+                'only a game restart removes it') if jump else ''
+
     def call(self, function: int, *args: int, timeout: float | None) -> int:
         _check_call_args(function, args, timeout)
         if self.process.process_id == Process.current.process_id and threading.get_native_id() == self.thread_id:
@@ -600,7 +621,7 @@ class HookCaller(Caller):
             try:
                 queue = self._get_queue()
             except ValueError as exc:
-                raise _call_error(f'the hook refused the trigger prologue: {exc}', refused='prologue', state='not started') from exc
+                raise _call_error(f'the hook refused the trigger prologue: {exc}{self._jump_hint()}', refused='prologue', state='not started') from exc
             except (OSError, BufferError, RuntimeError) as exc:
                 raise _call_error(f'the hook could not install: {exc}', state='not started') from exc
             try:
@@ -632,7 +653,7 @@ class HookCaller(Caller):
                         ticket.close()
                         self._tickets.remove(ticket)
                 if self._tickets and self.process.still_alive():
-                    raise RuntimeError('inline calls are still pending; retry close after they finish')
+                    raise PendingCallsError('inline calls are still pending; retry close after they finish', pending=len(self._tickets))
                 self._queue.close()
             super().close()
 

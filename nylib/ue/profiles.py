@@ -182,6 +182,11 @@ def _parse_hooks(table, p):
     return hooks
 
 
+def display_path(profile: Profile) -> str:
+    """The profile's file path, or '<string>' for an in-memory one."""
+    return profile.path or '<string>'
+
+
 def parse_profile(text: str, path=None) -> Profile:
     if not isinstance(text, str):
         raise TypeError(f'text must be str, got {type(text).__name__}')
@@ -391,7 +396,8 @@ def render_profile(exe: str, game_name: str, pins, *, when: datetime.datetime) -
         f'exe = {_dump_value(exe)}',
         '',
         '[globals]',
-        '# An rva is only trusted for the build it was found in; a sig survives game updates.',
+        '# An rva is only used on the build it was found in; a sig survives game updates.',
+        '# process_event and [offsets] pins (the GWorld rva too) apply to every build of this exe.',
     ]
     for name in ('gobjects', 'gnames'):
         pin = by_name.get(name)

@@ -223,7 +223,10 @@ class Reflection:
             t.value = self._nested(prop.cast(UEOptionalProperty).get_value_property(), depth)
         elif kind == 'EnumProperty':
             p = prop.cast(UEEnumProperty)
-            t.enum, t.underlying = self._path(p.get_enum()), self._nested(p.get_underlaying_property(), depth)
+            enum = p.get_enum()
+            t.enum, t.underlying = self._path(enum), self._nested(p.get_underlaying_property(), depth)
+            if t.enum is None:
+                self._report('unresolved_reference', f'EnumProperty {prop.get_name()!r} at {prop.address:#x}: enum {enum.address:#x} does not resolve')
         elif kind == 'ByteProperty':
             t.enum = self._path(prop.cast(UEByteProperty).get_enum())
         elif kind == 'BoolProperty':

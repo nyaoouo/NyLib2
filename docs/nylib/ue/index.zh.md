@@ -18,11 +18,11 @@
 默认情况下，它从游戏外部（另一个进程）工作，也可以从游戏内部（注入的 Python）工作。
 详情在代码及其文档字符串中；这些页面只展示如何使用它。
 
-<!-- dt:section id="prerequisites-0" hash="750d67c0b068" -->
+<!-- dt:section id="prerequisites-0" hash="40c0d95dc4c1" -->
 ## 前置条件
 
 - Windows x64 以及一个 64 位的 UE 4.25+ 或 UE5 游戏。
-- Python 3.11 或更新版本(`pyproject.toml`);nylib.ue 已在 3.12 和 3.14 下测试过。它不需要任何第三方包。
+- Python 3.11 或更新版本(`pyproject.toml`);nylib.ue 已在 3.12 和 3.14 下测试过。除了 `calls='game-thread'` 需要 `keystone-engine` 和 `capstone` 之外,它不需要任何第三方包(`pip install ".[asm]"`;参见 [运行时](runtime.md#call-ufunctions))。
 - 从本仓库安装 nylib:`pip install -e .`(参见 readme)。
 
 <!-- dt:section id="quick-start-0" hash="75b948bf744e" -->
@@ -44,19 +44,19 @@ with Unreal.attach(exe, dump=result.path) as ue:  # read-only session, types fro
 
 快照在没有游戏运行的情况下依然可用：[加载它](dump.md#load-a-snapshot)、将其导入 [IDA](ida.md)，或用它生成 [stubs](stubs.md)。
 
-<!-- dt:section id="safety-0" hash="f327b4efe413" -->
+<!-- dt:section id="safety-0" hash="571dc01c107c" -->
 ## 安全性
 
 - 读取是默认行为。dumper 和默认会话打开游戏时只拥有读取权限,从不在游戏中执行代码。
 - 写入需要在 `Unreal.attach` 上设置 `write=True`。写入会直接作用于游戏的内存。
 - UFunction 调用需要在 `Unreal.attach` 上设置 `calls=`:`'game-thread'` 通过经过过滤的 `ProcessEvent` hook 排队执行,`'remote-thread'` 创建一个线程,`'any-thread'` 在游戏内可用。自定义的 `Caller` 可以使用其他调用机制。dumper 自身的调用需要 `allow_calls=`(CLI 为 `--allow-calls`)。
-- 在新线程或任意线程上调用可能会与游戏线程及其垃圾回收器产生竞争,导致游戏崩溃或状态损坏。game-thread hook 需要一次自然发生的 `ProcessEvent` 入口。
+- 在新线程或任意线程上的调用可能会与游戏线程及其垃圾回收器产生竞争,导致游戏崩溃或状态损坏。game-thread hook 需要一次自然发生的 `ProcessEvent` 入口,并会一直留在游戏中,直到 `close()` 或游戏重启。
 - 潜在函数(接受 `FLatentActionInfo` 的函数)会被拒绝。
-- dumper 无法验证的偏移量会阻止写入和调用;错误信息会列出这些偏移量以及修复方法。
-- Profile 的 hooks 是 dumper 运行的 Python 代码(在内部模式下在游戏内运行):只使用你信任的 profile。
-- 调用可能会在游戏中留下内存:引擎为输出参数分配的内存,以及调用超时或被中断时其自身占用的内存。
-- 在 remote-thread 调用期间按 Ctrl+C 可能导致游戏崩溃。
-- 向已经加载了相同 `python3XY.dll` 的游戏注入 Python 会使其崩溃。缺失的 `python_loader.dll` 会在首次使用时构建,这需要 MSVC,且当 MSVC 缺失时会下载并安装 Visual Studio Build Tools;可以提前用 `python -m nylib.winutils.python_loader build` 构建一次。
+- dumper 无法验证的偏移量会阻止写入和调用,但游戏名称的两个键(以及调用时的两个 FText 键)除外;错误信息会列出这些偏移量以及修复方法。
+- Profile 的 hooks 是 dumper 运行的 Python 代码(在内部模式下于游戏内运行):只使用你信任的 profile。
+- 调用可能会在游戏中留下内存:引擎为输出参数分配的内存,以及调用超时或被中断时调用自身占用的内存。
+- 在 remote-thread 调用期间按 Ctrl+C 可能会导致游戏崩溃。
+- 向已经加载了相同 `python3XY.dll` 的游戏注入 Python 会使其崩溃。缺失的 `python_loader.dll` 会在首次使用时构建,这需要 MSVC;若 MSVC 缺失,还会下载并安装 Visual Studio Build Tools。可以先用 `python -m nylib.winutils.python_loader build` 构建一次。
 
 <!-- dt:section id="tested-with-0" hash="6c36f4c15fd5" -->
 ## 测试环境

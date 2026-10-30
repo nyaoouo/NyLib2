@@ -26,7 +26,7 @@ with open_installation('path/to/MyGame/Content/Paks', engine='5.7',
     print(region.width, region.height, len(region.pixels))
 ```
 
-<!-- dt:section id="opening-0" hash="417f152afd13" -->
+<!-- dt:section id="opening-0" hash="08233ff6b109" -->
 ## 打开
 
 ```python
@@ -39,6 +39,7 @@ print(repr(key))
 - `aes_key=` 接受一个 `AesKey`、原始的 `bytes`/`bytearray`（用零 GUID 包装）、一个 `AesKey` 列表（每个容器 GUID 一个），或 `None` 表示无加密容器的安装。`AesKey` 也可以读取密钥文件（`AesKey.from_file(path)`）或原始/十六进制字节（`AesKey(key_bytes)`）；作为 `aes_key=` 传递的 `str` 会被拒绝，指向 `from_hex()` / `from_file()`，所以密钥永远不会意外地被输入到日志或 repr 中。
 - `usmap=` 是游戏的 `.usmap` 映射文件（v0-v4；压缩选项为 None、Oodle 或 Python 3.14+ 上的 ZStd）。它在打开时被解析一次。
 - `build=` 固定 exe 的 PE `TimeDateStamp`：传递你针对 `.usmap` 验证的 int，不匹配或缺少的 exe 会引发 `BuildMismatchError`。传递 `None` 跳过检查；`Installation.build` 仍然会报告找到的 exe（如果有的话）。
+- `exe=` 指定其 PE 时间戳被 `build=` 检查的游戏 exe。默认情况下，它是 `<paks>/../../Binaries/Win64` 中唯一的 `*-Win64-Shipping.exe`；没有或有多个都视为缺失。如果游戏把 exe 放在其他位置，则需要 `exe=`。
 - `cache_bytes=` 限制共享的解压块缓存；默认 4 MiB（近似的测量时间见注释）。
 - `Installation` 是一个上下文管理器；`close()` 是幂等的和线程安全的，未关闭的实例在被垃圾回收时会关闭自己并发出 `ResourceWarning`。
 
@@ -73,11 +74,11 @@ print(repr(key))
 
 兼容性：在早期版本中，每个普通（非虚拟）纹理都从 `read_region` 无条件地抛出 `UnsupportedAssetError(feature='non-virtual texture')`。现在可读的普通纹理进行解码，没有解码器的像素格式的普通纹理改为抛出 `UnsupportedPixelFormatError` -- 就像不支持的虚拟纹理层格式已经做的那样。两个错误类都派生自 `UnsupportedError`；只在 `read_region` 周围捕获 `UnsupportedAssetError` 的调用者会错过新的异常。普通纹理上的 `texture()` 现在也可能抛出 `CorruptAssetError`，原因是某个 mip 的大小、`.ubulk` 范围或序列化大小（serial size）不一致。另外，学习读取失败的插件内容目录只列出已与其文件夹名称匹配的条目；其余条目被丢弃，仅在 DEBUG 日志中可见。
 
-<!-- dt:section id="exports-and-properties-0" hash="53060b022037" -->
+<!-- dt:section id="exports-and-properties-0" hash="ed6a28c2205c" -->
 ## 导出与属性
 
 ```python
-# needs: an installed UE 5.7 game, its AES key file and a matching .usmap
+# 需要：一个已安装的 UE 5.7 游戏、其 AES 密钥文件和匹配的 .usmap
 from nylib.ue.assets import (
     open_installation, AesKey, Exports, ExportInfo, Export, StructValue, Slot,
     MapValue, EnumValue, TextValue, ObjectRef, SoftObjectRef, DataTable, CurveTable,
@@ -87,39 +88,40 @@ from nylib.ue.assets import (
 key = AesKey.from_file('path/to/game-aes.txt')
 with open_installation('path/to/MyGame/Content/Paks', engine='5.7',
                         usmap='path/to/MyGame.usmap', build=None, aes_key=key) as assets:
-    exp = assets.exports('/Game/Some/DataAsset')             # Exports: the cooked header only, no export data
-    print(exp.package.name, len(exp))                        # a package name and its export count
-    export = exp.read(0)                                     # Export: typed properties of export 0
-    print(export.info.class_name, export.complete, export.exact, export.native_size)
-    props = export.properties                                # StructValue, the export's top-level slots
-    print(props.struct, len(props.slots), props.state(0))     # struct name, slot count, slot 0's state
+    exp = assets.exports('/Game/Some/DataAsset')             # Exports：仅 cooked 包头，无导出数据
+    print(exp.package.name, len(exp))                        # 包名及其导出数量
+    export = exp.read(0)                                     # Export：导出 0 的类型化属性
+    print(export.info.class_name, export.complete, export.exact, export.native_size)   # class_name 可能为 None，见下文 ExportInfo
+    props = export.properties                                # StructValue，导出的顶层槽位
+    print(props.struct, len(props.slots), props.state(0))     # 结构体名、槽位数、槽位 0 的状态
     try:
         props.at(0)
     except AbsentPropertyError as e:
-        print(str(e))                                        # not serialized: the archetype's value is unknown here
+        print(str(e))                                        # 未序列化：此处无法得知原型的值
 ```
 
-- `assets.exports(name, *, cancel=None) -> Exports` 仅读取包的 cooked 包头（不含导出数据），返回一个 `Exports` 句柄：一个 `Sequence[ExportInfo]`，带有 `package`（一个 `PackageInfo`）、`stats`（本次调用的 `ReadStats`）、`find(name) -> ExportInfo`（不涉及 I/O）、`read(which, *, partial=False, cancel=None) -> Export` 以及 `raw(which, *, offset=0, limit, cancel=None) -> bytes`。`which` 可以是索引、名称或子对象路径，也可以是来自该句柄的 `ExportInfo`。直接调用 `Exports(...)` 会引发 `TypeError`;`Exports` 会保持其 `Installation` 处于打开状态，并拒绝被 pickle。调用 `close()` 之后，其 `read()` 和 `raw()` 会引发 `InstallationClosedError`;`len`、索引、迭代以及 `find()` 仍可正常使用。
+- `assets.exports(name, *, cancel=None) -> Exports` 仅读取包的 cooked 包头（不含导出数据），返回一个 `Exports` 句柄：一个 `Sequence[ExportInfo]`，带有 `package`（一个 `PackageInfo`）、`stats`（本次调用的 `ReadStats`）、`find(name) -> ExportInfo`（不涉及 I/O）、`read(which, *, partial=False, cancel=None) -> Export` 以及 `raw(which, *, offset=0, limit, cancel=None) -> bytes`。`which` 可以是索引、名称或子对象路径，也可以是来自该句柄的 `ExportInfo`。直接调用 `Exports(...)` 会引发 `TypeError`；`Exports` 会保持其 `Installation` 处于打开状态，并拒绝被 pickle。调用 `close()` 之后，其 `read()` 和 `raw()` 会引发 `InstallationClosedError`；`len`、索引、迭代以及 `find()` 仍可正常使用。
 - `assets.read(target, *, partial=False, cancel=None) -> Export` 直接读取单个导出：`target` 可以是包路径或对象路径（`str`，包含子对象路径）、`ExportInfo`、`ObjectRef` 或 `SoftObjectRef`（见下文"引用"）。`Export` 持有 `info`（`ExportInfo`）、`properties`（一个 `StructValue`）、`native`（一个 `DataTable`、`CurveTable` 或 `None`）、`native_size`（对象尾部之后的字节数，或者在有表格行时，表格行之后的字节数）、`exact`（即 `complete` 且 `native_size == 0`）、`guid`、`complete` 以及 `problem`（一个 `AssetError`，仅在部分读取结果上设置；见下文"部分读取"）。
-- 对于简单类型（`bool`、`int`、`float`、`str`），每个属性会读取为一个普通的 Python 值，或读取为上述记录之一：引用对应 `ObjectRef` / `SoftObjectRef`，枚举对应 `EnumValue`,`FText` 对应 `TextValue`，数组或集合对应 `tuple`（字节数组则为 `bytes`），映射对应 `MapValue`，可选值对应其自身值或 `None`，结构体对应嵌套的 `StructValue` —— 可能是反射的（通过 `.usmap` 映射解码）或原生的（下文列出的内置布局之一）。
-- `StructValue` 是一个只读的 `Mapping[str, object]`，带有 `struct`（其类名或结构体名）、`native`（`bool`）和 `slots`（一个 `Slot` 元组）；`sv[name]`、`sv.at(index)` 和 `sv.state(key)` 可按名称或按模式索引读取。槽位的状态可能是 `'serialized'`（其字节已被存储）、`'zero'`（包头将其标记为未设置；读取为该类型的零值）、`'absent'`（包头从未列出它 —— 真正的值来自类的原型（archetype），而这些数据并未包含该值，因此 `sv[name]` 会引发 `AbsentPropertyError`），或 `'unread'`（仅出现在部分读取结果中）。如果某个名称在类链中被多个属性共用，`sv[name]` 会引发 `AmbiguousNameError`；此时应改用 `sv.at(index)`。
+- `ExportInfo`（来自 `Exports`、`find()` 或 `resolve()`）持有 `package`、`name`、`path`、`index`、`class_name`、`class_ref`、`super_ref`、`template_ref`（后三者为 `ObjectRef`）、`outer`（导出索引或 `None`）、`flags`、`size` 和 `container`。只有当 `class_ref.kind` 为 `'script'`（引擎类）或 `'export'`（同一包中的类）时才会设置 `class_name`；对于从其他包导入的类（蓝图的 `..._C` 类通常以此形式出现），它为 `None`，此时可用 `assets.resolve(info.class_ref).name` 获取类名。
+- 对于简单类型（`bool`、`int`、`float`、`str`），每个属性会读取为一个普通的 Python 值，或读取为上述记录之一：引用对应 `ObjectRef` / `SoftObjectRef`，枚举对应 `EnumValue`，`FText` 对应 `TextValue`，数组或集合对应 `tuple`（字节数组则为 `bytes`），映射对应 `MapValue`，可选值对应其自身值或 `None`，结构体对应嵌套的 `StructValue` —— 可能是反射的（通过 `.usmap` 映射解码）或原生的（下文列出的内置布局之一）。
+- `StructValue` 是一个只读的 `Mapping[str, object]`，带有 `struct`（其类名或结构体名）、`native`（`bool`）和 `slots`（一个 `Slot` 元组）；`sv[name]`、`sv.at(index)` 和 `sv.state(key)` 可按名称或按架构索引读取。槽位的状态可能是 `'serialized'`（其字节已被存储）、`'zero'`（包头将其标记为未设置；读取为该类型的零值）、`'absent'`（包头从未列出它 —— 真正的值来自类的原型（archetype），而这些数据并未包含该值，因此 `sv[name]` 会引发 `AbsentPropertyError`），或 `'unread'`（仅出现在部分读取结果中）。如果某个名称在类链中被多个属性共用，`sv[name]` 会引发 `AmbiguousNameError`；此时应改用 `sv.at(index)`。
 - `StructValue.to_python()` 返回一个仅由列表、字典以及 `str`/`int`/`float`/`bool`/`None` 构成的普通 `dict` —— 可安全用于 `json.dumps(..., allow_nan=False)`；其中的浮点数可能是 NaN 或无穷大，普通的 `json.dumps` 会将其写成非标准 JSON。如果该值的任何槽位为 `'unread'`，它会引发 `problem`。其形状是固定的：
 
   | 值 | 普通形式 |
   | --- | --- |
   | 一个名称未被共用、所有槽位均为 serialized 或 zero 的属性 | 一个键:其值 |
-  | 被多个属性共用的名称 | 共用该名称的每个属性各占一个键,`name#index`(`index` 为基础模式索引) |
-  | 静态数组,没有缺失(absent)元素 | 一个 `list` |
-  | 静态数组,存在部分缺失(absent)元素 | 每个存在的元素各占一个键,`name[element]`(若名称同时被共用,则为 `name#index[element]`) |
-  | `MapValue` | 一个由 `[key, value]` 对组成的列表,包含重复的键 |
-  | 原生结构体 | 其字段,按相同规则处理 |
-  | `ObjectRef` | 一个包含 `kind`、`package`、`name`、`path` 的字典;`'import'` 引用的 `name` 和 `path` 均为 `None`,因此单凭它无法确定目标 —— 若目标很重要,需先调用 `resolve()` |
+  | 一个被多个属性共用的名称 | 每个共用该名称的属性一个键，`name#index`（`index` 为基础架构索引） |
+  | 一个静态数组，没有缺失元素 | 一个 `list` |
+  | 一个有部分缺失元素的静态数组 | 每个存在的元素一个键，`name[element]`（名称也被共用时为 `name#index[element]`） |
+  | `MapValue` | 一个由 `[key, value]` 对组成的列表，包括重复的键 |
+  | 原生结构体 | 其字段，遵循相同的规则 |
+  | `ObjectRef` | 一个包含 `kind`、`package`、`name`、`path` 的字典；`'import'` 引用的 `name` 和 `path` 为 `None`，因此它本身无法标识其目标 —— 当目标很重要时，请先调用 `resolve()` |
   | `SoftObjectRef` | 一个包含 `package`、`asset`、`subpath`、`path` 的字典 |
   | `EnumValue` | 一个包含 `enum`、`name`、`value` 的字典 |
   | `TextValue` | 一个包含 `history`、`string`、`namespace`、`key`、`table`、`data` 的字典 |
 
-  缺失（absent）的属性会被省略。关于这样的读取在内存上可能产生的开销，以及不受信任的 `.usmap` 映射带来的风险，见下文"说明"。
-- 除了映射所描述的反射形状之外，还有 121 种内置（"原生"）结构体布局会被直接识别：简单的固定大小数学类型（`Vector`、`Color`、`Guid`、`Matrix`、`Quat` 及类似类型），以及一小部分可变长度的引擎类型（`GameplayTagContainer`、`InstancedStruct` 及其容器/数组形式、property-bag 类型、`Spline`、`MovieScene*` 通道与求值树类型、`Niagara*` 变量类型、`PCGPointArray` 等）。每种类型都会解码为一个 `native=True` 的 `StructValue`，每个字段对应一个 `Slot`，其命名和类型方式与其他任何属性相同；`slots` 和 `to_python()` 会针对给定的值列出它们。有四个例外的读取方式不同：`InstancedStruct` 会直接解码为其载荷值（payload）（类型为空时为 `None`），而不是一个 `StructValue`;`InstancedStructContainer` 和 `InstancedStructArray` 会解码为一个由载荷组成的 `tuple`；软路径（soft-path）家族（`SoftObjectPath`、`SoftClassPath`、`StringAssetReference`、`StringClassReference`）会解码为一个 `SoftObjectRef`；而 `InstancedPropertyBag` 和 `RigVMPropertyBag` 会解码为一个 `native=False` 的 `StructValue`，其槽位可以像任何反射结构体一样是 serialized、zero 或 absent。不在原生集合内的结构体名称仍会像任何反射结构体一样通过 `.usmap` 映射读取 —— 见下文"支持的原生类型"。
+  缺失的属性会被省略。关于此类读取可能占用的内存，以及不受信任的 `.usmap` 映射的风险，见下文注释。
+- 除了映射所描述的反射形状外，还直接识别 121 个内置（"原生"）结构体布局：简单的固定大小数学类型（`Vector`、`Color`、`Guid`、`Matrix`、`Quat` 等），以及一小部分可变长度的引擎类型（`GameplayTagContainer`、`InstancedStruct` 及其容器/数组形式、属性包类型、`Spline`、`MovieScene*` 通道和求值树类型、`Niagara*` 变量类型、`PCGPointArray` 等）。每个都解码为 `native=True` 的 `StructValue`，每个字段一个 `Slot`，其命名和类型与任何其他属性相同；`slots` 和 `to_python()` 会为给定值列出它们。四种例外的读取方式不同：`InstancedStruct` 直接解码为其载荷值（空类型时为 `None`），而不是 `StructValue`；`InstancedStructContainer` 和 `InstancedStructArray` 解码为载荷的 `tuple`；软路径系列（`SoftObjectPath`、`SoftClassPath`、`StringAssetReference`、`StringClassReference`）解码为 `SoftObjectRef`；`InstancedPropertyBag` 和 `RigVMPropertyBag` 解码为 `native=False` 的 `StructValue`，其槽位可以像任何反射结构体一样是 serialized、zero 或 absent。原生集合之外的结构体名称仍会像任何反射结构体一样通过 `.usmap` 映射读取 —— 见下文"支持的原生结构体"。
 
 <!-- dt:section id="references-0" hash="8d9561004695" -->
 ## 引用
@@ -187,18 +189,18 @@ UeError
 - 读取某个导出的属性时发现的失败 -- 从属性块、对象尾部、表行或原生结构体内部抛出的 `InvalidMappingError` 或 `UnsupportedAssetError` -- 携带 `property_path`：从导出的类到失败位置的步骤，例如 `WDWeaponStatsData#1.WDWeaponStats#36`，数组索引写作 `[3]`，映射的键或值写作 `[key 0]` / `[value 0]`，表行写作 `[row 2]`。`class_name`、`property_index`、`property_name` 和 `property_type` 描述最后那一步；`position` 是失败的读取开始的位置；`struct_name` 在涉及原生结构体时命名该结构体；`row` 在失败发生在表行内部时命名该行。消息本身仍然永远不会重复属性或行名称 -- 它们只存在于属性中。
 - 消息是一行英文；永远不包含超过基名的路径、关键材料、解密/解码字节、映射文件内容或属性名称。
 
-<!-- dt:section id="supported-profile-0" hash="30f6ad9154c6" -->
-## 支持的配置文件
+<!-- dt:section id="supported-profile-0" hash="e1055da50272" -->
+## 支持的范围
 
-| 图层 | 该版本中支持 | 超出范围 |
+| 层 | 本版本支持 | 超出部分 |
 |---|---|---|
-| 容器 | IoStore TOC v8；AES-256-ECB；Oodle (Kraken) 及存储块；压缩块为 2 的幂，范围从 4 KiB 至 16 MiB | `UnsupportedContainerError`；`.pak` 文件列在 `containers` 中但永不被挂载 |
-| 映射 | `.usmap` v0-v4；压缩 None、Oodle、ZStd (需要 Python 3.14+) | `InvalidMappingError` |
-| 包 | zen 包、无版本属性 | `InvalidMappingError`、`CorruptAssetError` |
-| 导出和类型化属性 | 每种属性类型和引用（`exports()`、`read()`、`raw()`、`resolve()`）；121 个内置原生结构体布局；任何其他结构体名称通过 `.usmap` 映射 | 该版本不读取的原生结构体（列于上文「支持的原生结构体」下）：`UnsupportedAssetError` |
-| 纹理元数据 | 每个 `Texture2D` 导出、虚拟和普通 | 另一类：`UnsupportedAssetError` |
-| 虚拟纹理区域读取 | `RawGPU` 编解码器、一个图层、`PF_DXT1`、非遗留瓦片布局 | `UnsupportedAssetError` / `UnsupportedPixelFormatError`；`info.readable` 为 False 且说明原因 |
-| 普通纹理区域读取 | `PF_B8G8R8A8` mips 内联在导出中，或在包的默认 `.ubulk` 中（cooked index 0） | `UnsupportedPixelFormatError` 用于其他像素格式；`UnsupportedAssetError` 用于没有序列化的 mips、mip 数据未与纹理一同序列化、压缩的 bulk data、可选的 bulk data (`.uptnl`)、内存映射的 bulk data (`.m.ubulk`)、其他 cooked index 下的 bulk data 或任何其他放置；`info.readable` 为 False 且说明原因 |
+| 容器 | IoStore TOC v8，每个容器一个分区；AES-256-ECB；Oodle（Kraken）和存储块；压缩块为 2 的幂，范围从 4 KiB 到 16 MiB | `UnsupportedContainerError`（多个分区：`feature='multiple partitions'`；一个这样的容器会使整个安装的 `open_installation` 失败）；`.pak` 会列在 `containers` 中，但从不挂载 |
+| 映射 | `.usmap` v0-v4；压缩方式为 None、Oodle、ZStd（需要 Python 3.14+） | `InvalidMappingError` |
+| 包 | zen 包，未版本化属性 | `InvalidMappingError`、`CorruptAssetError` |
+| 导出与类型化属性 | 每种属性类型和引用（`exports()`、`read()`、`raw()`、`resolve()`）；121 个内置原生结构体布局；其他任何结构体名称通过 `.usmap` 映射 | 本版本不读取的原生结构体（见上文"支持的原生结构体"）：`UnsupportedAssetError` |
+| 纹理元数据 | 每个 `Texture2D` 导出，虚拟和普通纹理 | 其他类：`UnsupportedAssetError` |
+| 虚拟纹理区域读取 | `RawGPU` 编解码器、一层、`PF_DXT1`、非旧版瓦片布局 | `UnsupportedAssetError` / `UnsupportedPixelFormatError`；`info.readable` 为 False 并说明原因 |
+| 普通纹理区域读取 | 位于导出内部，或位于包的默认 `.ubulk`（cooked 索引 0）中的 `PF_B8G8R8A8` mip | 其他像素格式：`UnsupportedPixelFormatError`；没有序列化 mip、mip 数据未与纹理一同序列化、压缩的批量数据、可选批量数据（`.uptnl`）、内存映射批量数据（`.m.ubulk`）、位于其他 cooked 索引下的批量数据，或任何其他位置：`UnsupportedAssetError`；`info.readable` 为 False 并说明原因 |
 
 <!-- dt:section id="notes-0" hash="61f551e425ba" -->
 ## 说明

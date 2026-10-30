@@ -3,11 +3,11 @@ import struct
 import threading
 import time
 
-import capstone
-
 from .. import winapi
-from .inline_hook import InlineHook, asm, read_code
+from .inline_hook import InlineHook, asm, read_code  # runs the dependency check, so it precedes capstone
 from .vtable_hook import VTableHook
+
+import capstone
 
 
 _HEADER_SIZE = 64

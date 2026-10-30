@@ -225,6 +225,30 @@ class ProcessCallTests(unittest.TestCase):
             with self.assertRaises(OSError): list(self.process.iter_threads())
             close.assert_called_once()
 
+    def test_thread_scan_skips_threads_that_exit_after_the_snapshot(self):
+        stop = threading.Event()
+        helpers = [threading.Thread(target=stop.wait) for _ in range(8)]
+        for helper in helpers: helper.start()
+        threads = []
+        try:
+            iterator = Process.current.iter_threads(da=0x0800)  # THREAD_QUERY_LIMITED_INFORMATION
+            first = next(iterator)  # the snapshot is taken here and lists the helpers
+            threads.append(first)
+            stop.set()
+            for helper in helpers: helper.join(5)
+            threads.extend(iterator)
+            self.assertIn(threading.get_native_id(), {thread.thread_id for thread in threads})
+        finally:
+            stop.set()
+            for thread in threads: thread.close()
+
+    def test_thread_scan_skips_reused_thread_ids_but_raises_other_errors(self):
+        with patch.object(winapi, 'GetProcessIdOfThread', return_value=0):
+            self.assertEqual(list(Process.current.iter_threads(da=0x0800)), [])
+        with patch.object(winapi, 'OpenThread', side_effect=ctypes.WinError(5)):
+            with self.assertRaises(OSError) as raised: list(Process.current.iter_threads(da=0x0800))
+            self.assertEqual(raised.exception.winerror, 5)
+
     def test_current_process_apc_uses_selected_thread(self):
         stop = threading.Event()
         ready = threading.Event()

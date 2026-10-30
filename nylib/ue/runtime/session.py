@@ -36,8 +36,8 @@ _orphaned_callers = []  # Keep an installed hook and its process handle alive if
 
 _SUPER_STEPS = 256
 _TEXT_KEYS = ('Off.InSDK.Text.TextDatOffset', 'Off.InSDK.Text.InTextDataStringOffset')
-CALL_EXEMPT = ('Off.InSDK.Text.TextDatOffset', 'Off.InSDK.Text.InTextDataStringOffset',
-               'Settings.Generator.GameName', 'Settings.Generator.GameVersion')
+WRITE_EXEMPT = ('Settings.Generator.GameName', 'Settings.Generator.GameVersion')  # they only name the output folder
+CALL_EXEMPT = _TEXT_KEYS + WRITE_EXEMPT
 _KNOWN_LABELS = ('auto:', 'profile:')
 _PYTHON_EXE_RE = re.compile(r'pythonw?[0-9.]*\.exe', re.IGNORECASE)
 
@@ -179,7 +179,7 @@ class RuntimeContext:
 
 def unverified_gate(keys: Iterable[str], *, write: bool, allow_unverified: bool, source: str = 'probe',
                     target: str = '<exe>', calls: str | None = None, text_call: str | None = None) -> tuple[str, ...]:
-    """D13 ([93] = D: CALL_EXEMPT keys do not gate calls): refuse unverified offsets unless allow_unverified; returns the keys.
+    """D13 ([93] = D: CALL_EXEMPT keys do not gate calls, WRITE_EXEMPT keys do not gate writes): refuse unverified offsets unless allow_unverified; returns the keys.
     text_call: why the attach-time Conv_StringToText call left the FText offsets unresolved, when it was made."""
     if not isinstance(source, str) or not isinstance(target, str):
         raise TypeError('source and target must be str')
@@ -194,7 +194,7 @@ def unverified_gate(keys: Iterable[str], *, write: bool, allow_unverified: bool,
     if not all(isinstance(k, str) for k in all_keys):
         raise TypeError('keys must be an iterable of str')
     if write:
-        gating = all_keys
+        gating = tuple(k for k in all_keys if k not in WRITE_EXEMPT)
     elif calls is not None:
         gating = tuple(k for k in all_keys if k not in CALL_EXEMPT)
     else:
@@ -335,7 +335,7 @@ def _hexs_or_unknown(value) -> str:
 
 def _profile_label(profile) -> str:
     if isinstance(profile, profiles.Profile):
-        return profile.path or '<string>'
+        return profiles.display_path(profile)
     return os.path.abspath(os.fspath(profile))
 
 
@@ -553,8 +553,9 @@ class Unreal:
             unverified, transport = tuple(report.unverified), None
         ectx = EngineContext.from_snapshot(meta, report.context.to_offsets(), opened.source.fresh)
         g = meta['globals']
+        used = report.profile or ('<string>' if report.profile_note == 'explicit' else 'none')
         probe_line = (f'probe: GObjects {g["GObjects"]["rva"]} · GNames {g["GNames"]["rva"]} · {len(report.values)} offsets '
-                      f'({report.seconds:.1f}s)')
+                      f'({report.seconds:.1f}s) · profile {used}')
         del report, meta
         opened.source.refresh()
         return ectx, unverified, probe_line, transport
