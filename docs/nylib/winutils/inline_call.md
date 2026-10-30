@@ -65,6 +65,7 @@ with InlineCallQueue(process, trigger_at, thread_id=game_tid) as hook:
 - `capacity` is a power of two from 1 to 64; `submit` raises `BufferError` while that many tickets are unreleased.
 - For a hot inline trigger, pass `quiescent_patch=True` to `InlineCallQueue`: it suspends the other target threads and checks their instruction pointers during installation, removal and code release.
 - If no trampoline page is available within 2 GB, `InlineCallQueue` uses a 15-byte absolute jump and needs that much relocatable entry code.
+- Pass `_jmp_support=1` to relocate direct `jmp` and `Jcc` entry instructions; the default still rejects them.
 - Closing the queue (also on leaving `with`) refuses pending tickets: wait for every ticket first.
 - `ticket.wait` raises `ProcessLookupError` if the target exits before the call completes.
 - The plain hooks without a queue are in [index.md](index.md#inline-hook) (`InlineHook`, `VTableHook`).

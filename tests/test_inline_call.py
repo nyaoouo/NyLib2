@@ -121,6 +121,129 @@ class InlineCallTests(unittest.TestCase):
         finally:
             hook.free()
 
+    def test_opt_in_relocates_internal_short_jump_with_far_entry(self):
+        code = b'\xEB\x02\x90\x90\xB8\x2A\x00\x00\x00' + b'\x90' * 12 + b'\xC3'
+        self.process.write(self.addr, code)
+        winapi.FlushInstructionCache(self.process.handle, self.addr, len(code))
+        with patch.object(self.process, 'alloc_near', side_effect=ValueError('No suitable memory region')):
+            hook = InlineHook(self.process, b'\x90', self.addr, _jmp_support=1)
+            try:
+                hook.enabled = True
+                self.assertEqual(self.target(), 42)
+            finally:
+                hook.free()
+        self.assertEqual(self.process.read(self.addr, len(code)), code)
+
+    def test_opt_in_expands_external_short_jump(self):
+        code = b'\xEB\x2E' + b'\x90' * (0x30 - 2) + b'\xB8\x2A\x00\x00\x00\xC3'
+        self.process.write(self.addr, code)
+        winapi.FlushInstructionCache(self.process.handle, self.addr, len(code))
+        hook = InlineHook(self.process, b'\x90', self.addr, _jmp_support=1)
+        try:
+            hook.enabled = True
+            self.assertEqual(self.process.read(hook.alloc_at + 1, 6), b'\xFF\x25\x00\x00\x00\x00')
+            self.assertEqual(self.target(), 42)
+        finally:
+            hook.free()
+
+    def test_opt_in_relocates_external_rel32_jump_and_drains_queue(self):
+        get_tid = self.process.get_proc_address('kernel32.dll', 'GetCurrentThreadId')
+        code = b'\xE9' + struct.pack('<i', 0x30 - 5) + b'\x90' * (0x30 - 5) + b'\xB8\x2A\x00\x00\x00\xC3'
+        self.process.write(self.addr, code)
+        winapi.FlushInstructionCache(self.process.handle, self.addr, len(code))
+        with patch.object(self.process, 'alloc_near', side_effect=ValueError('No suitable memory region')):
+            with InlineCallQueue(self.process, self.addr, _jmp_support=1) as hook:
+                ticket = hook.submit(get_tid)
+                self.assertEqual(self.target(), 42)
+                self.assertEqual(ticket.wait(1000), winapi.GetCurrentThreadId())
+        self.assertEqual(self.process.read(self.addr, len(code)), code)
+
+    def test_opt_in_accepts_int3_padding_after_jump(self):
+        code = b'\xE9' + struct.pack('<i', 0x30 - 5) + b'\xCC' * (0x30 - 5) + b'\xB8\x2A\x00\x00\x00\xC3'
+        self.process.write(self.addr, code)
+        winapi.FlushInstructionCache(self.process.handle, self.addr, len(code))
+        with patch.object(self.process, 'alloc_near', side_effect=ValueError('No suitable memory region')):
+            hook = InlineHook(self.process, b'\x90', self.addr, _jmp_support=1)
+            try:
+                hook.enabled = True
+                self.assertEqual(self.target(), 42)
+            finally:
+                hook.free()
+
+    def test_opt_in_relocates_internal_jz_after_branch_growth(self):
+        code = (b'\x48\x85\xC9\x74\x07\xB8\x07\x00\x00\x00\xEB\x05\xB8\x2A\x00\x00\x00'
+                + b'\x90' * (0x20 - 17) + b'\xC3')
+        self.process.write(self.addr, code)
+        winapi.FlushInstructionCache(self.process.handle, self.addr, len(code))
+        target = ctypes.CFUNCTYPE(ctypes.c_uint64, ctypes.c_uint64)(self.addr)
+        with patch.object(self.process, 'alloc_near', side_effect=ValueError('No suitable memory region')):
+            hook = InlineHook(self.process, b'\x90', self.addr, _jmp_support=1)
+            try:
+                hook.enabled = True
+                self.assertEqual(target(0), 42)
+                self.assertEqual(target(1), 7)
+            finally:
+                hook.free()
+
+    def test_opt_in_preserves_all_external_jcc_conditions(self):
+        target = ctypes.CFUNCTYPE(ctypes.c_uint64, ctypes.c_uint64)(self.addr)
+        for condition in range(16):
+            for wide in (False, True):
+                with self.subTest(condition=condition, wide=wide):
+                    branch = (b'\x0F' + bytes((0x80 | condition,)) + struct.pack('<i', 0x30 - 10) if wide
+                              else bytes((0x70 | condition, 0x30 - 6)))
+                    code = (b'\x48\x83\xF9\x05' + branch + b'\xB8\x07\x00\x00\x00'
+                            + b'\x90' * (0x20 - 9 - len(branch)) + b'\xC3' + b'\x90' * (0x30 - 0x21) + b'\xB8\x2A\x00\x00\x00\xC3')
+                    self.process.write(self.addr, code)
+                    winapi.FlushInstructionCache(self.process.handle, self.addr, len(code))
+                    expected = [target(value) for value in (4, 5, 6)]
+                    with patch.object(self.process, 'alloc_near', side_effect=ValueError('No suitable memory region')):
+                        hook = InlineHook(self.process, b'\x90', self.addr, _jmp_support=1)
+                        try:
+                            hook.enabled = True
+                            self.assertEqual([target(value) for value in (4, 5, 6)], expected)
+                        finally:
+                            hook.free()
+
+    def test_opt_in_rejects_branch_into_instruction_and_default_rejects_jcc(self):
+        self.process.write(self.addr, b'\x74\x05' + b'\x90' * 20)
+        default = InlineHook(self.process, b'\x90', self.addr)
+        try:
+            with self.assertRaisesRegex(PrologueError, 'cannot relocate'):
+                default.enabled = True
+        finally:
+            default.free()
+        queue = InlineCallQueue(self.process, self.addr)
+        try:
+            with self.assertRaisesRegex(PrologueError, 'cannot relocate'):
+                queue.enabled = True
+        finally:
+            queue.close()
+        self.process.write(self.addr, b'\xEB\x01\xB8\x2A\x00\x00\x00' + b'\x90' * 16)
+        opt_in = InlineHook(self.process, b'\x90', self.addr, _jmp_support=1)
+        try:
+            with self.assertRaisesRegex(PrologueError, 'enters an instruction'):
+                opt_in.enabled = True
+        finally:
+            opt_in.free()
+
+    def test_jmp_support_only_accepts_zero_or_one(self):
+        with self.assertRaisesRegex(ValueError, '_jmp_support'):
+            InlineHook(self.process, b'\x90', self.addr, _jmp_support=2)
+        with self.assertRaisesRegex(ValueError, '_jmp_support'):
+            InlineCallQueue(self.process, self.addr, _jmp_support=2)
+
+    def test_opt_in_still_rejects_call_and_rip_indirect_jump(self):
+        for code in (b'\xE8\x00\x00\x00\x00', b'\xFF\x25\x00\x00\x00\x00'):
+            with self.subTest(code=code):
+                self.process.write(self.addr, code + b'\x90' * 16)
+                hook = InlineHook(self.process, b'\x90', self.addr, _jmp_support=1)
+                try:
+                    with self.assertRaisesRegex(PrologueError, 'cannot relocate'):
+                        hook.enabled = True
+                finally:
+                    hook.free()
+
     def test_timeout_capacity_and_reuse(self):
         get_tid = self.process.get_proc_address('kernel32.dll', 'GetCurrentThreadId')
         with InlineCallQueue(self.process, self.addr, capacity=2) as hook:
@@ -547,6 +670,35 @@ class VTableCallTests(unittest.TestCase):
 
 
 class RemoteInlineCallTests(unittest.TestCase):
+    def test_remote_opt_in_far_jump_drains_queue(self):
+        child = subprocess.Popen([sys.executable, '-B', '-u', '-c', _CHILD], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        process = hook = None
+        try:
+            pid, addr, tid, _ = map(int, child.stdout.readline().split())
+            process = Process(pid)
+            code = b'\xE9' + struct.pack('<i', 0x30 - 5) + b'\x90' * (0x30 - 5) + b'\xB8\x2A\x00\x00\x00\xC3'
+            process.write(addr, code)
+            winapi.FlushInstructionCache(process.handle, addr, len(code))
+            with patch.object(process, 'alloc_near', side_effect=ValueError('No suitable memory region')):
+                hook = InlineCallQueue(process, addr, _jmp_support=1)
+                hook.enabled = True
+            ticket = hook.submit(process.get_proc_address('kernel32.dll', 'GetCurrentThreadId'))
+            child.stdin.write('hit\n')
+            child.stdin.flush()
+            self.assertEqual(child.stdout.readline().strip(), '42')
+            self.assertEqual(ticket.wait(5000), tid)
+            hook.close()
+            hook = None
+            self.assertEqual(process.read(addr, len(code)), code)
+        finally:
+            if process is not None and process.still_alive(): winapi.TerminateProcess(process.handle, 0)
+            if hook is not None and not hook._tickets: hook.close()
+            if process is not None: process.close()
+            if child.poll() is None: child.terminate()
+            child.wait(5)
+            child.stdin.close()
+            child.stdout.close()
+
     def test_remote_batch_float_returns_and_cleanup(self):
         child = subprocess.Popen([sys.executable, '-B', '-u', '-c', _CHILD], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         process = hook = None

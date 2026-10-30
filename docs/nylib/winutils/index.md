@@ -184,6 +184,7 @@ hook.enabled = True
 ```
 
 `InlineHook` rejects entry instructions it cannot relocate and uses a 15-byte absolute jump if no trampoline page is available within 2 GB.
+Pass `_jmp_support=1` to relocate direct `jmp` and `Jcc` entry instructions. It is off by default; calls, indirect branches and RIP-relative memory operands still raise `PrologueError`.
 
 ## VTable Hook
 
