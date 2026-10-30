@@ -182,6 +182,11 @@ def _parse_hooks(table, p):
     return hooks
 
 
+def display_path(profile: Profile) -> str:
+    """The profile's file path, or '<string>' for an in-memory one."""
+    return profile.path or '<string>'
+
+
 def parse_profile(text: str, path=None) -> Profile:
     if not isinstance(text, str):
         raise TypeError(f'text must be str, got {type(text).__name__}')

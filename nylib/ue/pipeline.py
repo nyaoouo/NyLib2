@@ -319,13 +319,13 @@ def open_target(target=None, *, write: bool = False, remote_calls: bool = False,
 def _rva_pin(prof, name: str, pin, info: TargetInfo, warnings: list):
     if pin.build != info.pe_timestamp or (pin.image_size is not None and pin.image_size != info.size_of_image):
         built = f'{pin.build:#x}' + (f' / {pin.image_size:#x}' if pin.image_size is not None else '')
-        msg = (f'profile {prof.path}: [globals] {name} is pinned for build {built}; '
+        msg = (f'profile {profiles.display_path(prof)}: [globals] {name} is pinned for build {built}; '
                f'the target is {info.pe_timestamp:#x} / {info.size_of_image:#x}; ignored')
         warnings.append(msg)
         logger.warning(msg)
         return None
     if pin.rva >= info.size_of_image:
-        raise errors.ProfileError(prof.path, f'[globals] {name} rva {pin.rva:#x} lies outside the image '
+        raise errors.ProfileError(profiles.display_path(prof), f'[globals] {name} rva {pin.rva:#x} lies outside the image '
                                               f'(SizeOfImage {info.size_of_image:#x})')
     return pin.rva
 
@@ -333,16 +333,16 @@ def _rva_pin(prof, name: str, pin, info: TargetInfo, warnings: list):
 def _sig_pin(prof, name: str, pin, source, image):
     found = scan.Scanner(source, image).find_pattern(pin.sig, executable=True)
     if len(found) != 1:
-        raise errors.ProfileError(prof.path, f'[globals] {name} sig matches {len(found)} sites; it must match exactly one')
+        raise errors.ProfileError(profiles.display_path(prof), f'[globals] {name} sig matches {len(found)} sites; it must match exactly one')
     addr, stored = found[0]
     if stored:
         value = stored[0]
         if not isinstance(value, int):
-            raise errors.ProfileError(prof.path, f'[globals] {name} sig: its first stored value is not a reference')
+            raise errors.ProfileError(profiles.display_path(prof), f'[globals] {name} sig: its first stored value is not a reference')
     else:
         value = addr
     if not (image.base <= value < image.base + image.size):
-        raise errors.ProfileError(prof.path, f'[globals] {name} sig resolves outside the main module')
+        raise errors.ProfileError(profiles.display_path(prof), f'[globals] {name} sig resolves outside the main module')
     return value - image.base
 
 
@@ -367,7 +367,7 @@ def _resolve_pins(prof, info: TargetInfo, opened: OpenedTarget, warnings: list) 
     offsets_pins = {}
     for key, value in prof.offsets.items():
         if key not in PINNABLE_KEYS:
-            raise errors.ProfileError(prof.path, f'[offsets] unknown key {key!r}')
+            raise errors.ProfileError(profiles.display_path(prof), f'[offsets] unknown key {key!r}')
         offsets_pins[key] = value
 
     pe_pin = prof.pins.get('process_event')
@@ -398,10 +398,10 @@ def _run_bootstrap(e, prof, pins: '_Pins | None', steps: list):
             e.objects.init_chunked(pins.gobjects_rva, pin.elements_per_chunk or 0x10000, layout)
             num, maxn = e.objects.num(), e.objects.max()
         except errors.MemoryReadError as err:
-            raise errors.DetectionError('ObjectArray::Init', f'the GObjects value pinned by {prof.path} cannot be read: {err}',
+            raise errors.DetectionError('ObjectArray::Init', f'the GObjects value pinned by {profiles.display_path(prof)} cannot be read: {err}',
                                         tuple(e.messages)) from err
         if not (0 < num <= maxn):
-            raise errors.DetectionError('ObjectArray::Init', f'the GObjects value pinned by {prof.path} does not hold an object '
+            raise errors.DetectionError('ObjectArray::Init', f'the GObjects value pinned by {profiles.display_path(prof)} does not hold an object '
                                         f'array (Num {num}, Max {maxn})', tuple(e.messages))
         e.provenance['Off.InSDK.ObjArray.GObjects'] = pins.gobjects_label
         if pin.elements_per_chunk is not None:
@@ -416,7 +416,7 @@ def _run_bootstrap(e, prof, pins: '_Pins | None', steps: list):
         try:
             e.fname.init_override(pins.gnames_rva, 'GNames', True)
         except errors.DetectionError as err:
-            raise errors.DetectionError('FName::Init', f'the GNames value pinned by {prof.path} could not be initialised',
+            raise errors.DetectionError('FName::Init', f'the GNames value pinned by {profiles.display_path(prof)} could not be initialised',
                                         tuple(e.messages)) from err
         e.provenance['Off.InSDK.NameArray.GNames'] = pins.gnames_label
     else:
@@ -475,7 +475,7 @@ def probe_opened(opened: OpenedTarget, *, profile=None, out_root=None) -> ProbeR
     if prof is not None:
         note = 'explicit'
         if prof.exe is not None and prof.exe.casefold() != info.exe.casefold():
-            msg = f'profile {prof.path} is for {prof.exe}; the target is {info.exe}'
+            msg = f'profile {profiles.display_path(prof)} is for {prof.exe}; the target is {info.exe}'
             warnings.append(msg)
             logger.warning(msg)
     elif out_root is not None:

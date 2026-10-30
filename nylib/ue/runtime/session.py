@@ -335,7 +335,7 @@ def _hexs_or_unknown(value) -> str:
 
 def _profile_label(profile) -> str:
     if isinstance(profile, profiles.Profile):
-        return profile.path or '<string>'
+        return profiles.display_path(profile)
     return os.path.abspath(os.fspath(profile))
 
 
