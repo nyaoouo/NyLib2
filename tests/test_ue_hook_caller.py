@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -15,6 +16,7 @@ from nylib.ue.errors import CallError, PendingCallsError
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _HAS_HOOK_DEPS = all(importlib.util.find_spec(name) for name in ('capstone', 'keystone'))
 _NEEDS_DEPS = unittest.skipUnless(_HAS_HOOK_DEPS, 'HookCaller binds a real inline hook: needs capstone and keystone')
+_READ_TIMEOUT = 60.0  # seconds to wait for a line from the child
 _CODE_SIZE = 22  # mov eax, 42; 16 x nop; ret
 _CHILD = '''
 import ctypes
@@ -75,9 +77,11 @@ class _ChildCase(unittest.TestCase):
         env = dict(os.environ, PYTHON_PIP_ALL_REQ_INSTALLED='1')
         self.child = subprocess.Popen([sys.executable, '-B', '-u', '-c', _CHILD], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
                                       cwd=_ROOT, env=env)
+        self.lines = queue.Queue()
+        self.reader = threading.Thread(target=self._read_lines, daemon=True)
+        self.reader.start()
         self.addCleanup(self._reap)
-        line = self.child.stdout.readline()
-        self.assertTrue(line, 'the child exited before printing its addresses')
+        line = self.next_line('its addresses')
         pid, addr, tid, slot, root = line.split(None, 4)
         self.assertEqual(os.path.normcase(root.strip()), os.path.normcase(_ROOT), 'the child imported another nylib')
         self.pid, self.addr, self.tid, self.slot = int(pid), int(addr), int(tid), int(slot)
@@ -85,10 +89,25 @@ class _ChildCase(unittest.TestCase):
         self.addCleanup(self.process.close)
         self.original = self.code_at(self.addr)
 
+    def _read_lines(self):
+        for line in self.child.stdout:
+            self.lines.put(line)
+        self.lines.put(None)
+
+    def next_line(self, what: str) -> str:
+        try:
+            line = self.lines.get(timeout=_READ_TIMEOUT)
+        except queue.Empty:
+            self.fail(f'the child printed nothing for {what} within {_READ_TIMEOUT:g} s')
+        if line is None:
+            self.fail(f'the child exited before printing {what}')
+        return line
+
     def _reap(self):
         if self.child.poll() is None:
             self.child.terminate()
         self.child.wait(10)
+        self.reader.join(10)
         self.child.stdin.close()
         self.child.stdout.close()
 
@@ -98,7 +117,7 @@ class _ChildCase(unittest.TestCase):
     def hit(self):
         self.child.stdin.write('hit\n')
         self.child.stdin.flush()
-        self.assertEqual(self.child.stdout.readline().strip(), '42')
+        self.assertEqual(self.next_line('the result of the hit').strip(), '42')
 
     def site(self, find_game_thread=None):
         find = find_game_thread or (lambda: self.process.get_thread(self.tid))
