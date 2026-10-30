@@ -29,6 +29,9 @@ _gil_resume.restype = ctypes.c_ulong
 _gil_get_context = _gil_kernel32.GetThreadContext
 _gil_get_context.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
 _gil_get_context.restype = ctypes.c_bool
+_gil_exit_code = _gil_kernel32.GetExitCodeThread
+_gil_exit_code.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+_gil_exit_code.restype = ctypes.c_bool
 
 
 class PrologueError(ValueError):
@@ -45,6 +48,11 @@ def _thread_call(func, handle):
     result = func(handle)
     if result == 0xFFFFFFFF: raise ctypes.WinError()
     return result
+
+
+def _thread_exited(handle):
+    code = ctypes.c_ulong()
+    return bool(_gil_exit_code(handle, ctypes.byref(code))) and code.value != 259  # STILL_ACTIVE
 
 
 class _AtomicWord:
@@ -457,7 +465,11 @@ class InlineCallQueue(_CallQueue, InlineHook):
             try:
                 for thread in threads:
                     if thread.thread_id == own_tid: continue
-                    _thread_call(_gil_suspend, thread.handle)
+                    try:
+                        _thread_call(_gil_suspend, thread.handle)
+                    except OSError:
+                        if _thread_exited(thread.handle): continue
+                        raise
                     suspended.append(thread)
                 for thread in suspended:
                     context.ContextFlags = winapi.CONTEXT_CONTROL

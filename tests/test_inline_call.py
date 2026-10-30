@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from nylib import winapi
 from nylib.process import Process
+from nylib.winutils import inline_call
 from nylib.winutils.inline_call import InlineCallQueue, PrologueError, VTableCallQueue
 from nylib.winutils.vtable_hook import VTableHook
 
@@ -170,6 +171,56 @@ class InlineCallTests(unittest.TestCase):
             self.assertEqual(len(tickets), 50)
             self.assertEqual(self.target(), 42)
             self.assertEqual([ticket.wait(1000) for ticket in tickets], [winapi.GetCurrentThreadId()] * 50)
+
+    def _patch_while_helpers_exit(self, patch_action):
+        stop = threading.Event()
+        ready = threading.Barrier(3)
+        tids = []
+
+        def helper():
+            tids.append(winapi.GetCurrentThreadId())
+            ready.wait(5)
+            stop.wait(30)
+
+        helpers = [threading.Thread(target=helper) for _ in range(2)]
+        for thread in helpers: thread.start()
+        ready.wait(5)
+        waiters = [winapi.OpenThread(0x100000, False, tid) for tid in tids]  # SYNCHRONIZE
+        real_iter_threads = Process.iter_threads
+
+        def iter_threads(process, da=0x1FFFFF):
+            yield from real_iter_threads(process, da=da)
+            stop.set()
+            for thread in helpers: thread.join(5)
+            for waiter in waiters: self.assertEqual(winapi.WaitForSingleObject(waiter, 10000), 0)
+
+        try:
+            with patch.object(Process, 'iter_threads', iter_threads):
+                patch_action()
+        finally:
+            stop.set()
+            for thread in helpers: thread.join(5)
+            for waiter in waiters: winapi.CloseHandle(waiter)
+
+    def test_quiescent_patch_skips_thread_exiting_before_suspend(self):
+        get_tid = self.process.get_proc_address('kernel32.dll', 'GetCurrentThreadId')
+        hook = InlineCallQueue(self.process, self.addr, quiescent_patch=True)
+        try:
+            ticket = hook.submit(get_tid)
+            self._patch_while_helpers_exit(lambda: setattr(hook, 'enabled', True))
+            self.assertTrue(hook.enabled)
+            self.assertEqual(self.target(), 42)
+            self.assertEqual(ticket.wait(1000), winapi.GetCurrentThreadId())
+            hook.enabled = False
+            with patch.object(inline_call, '_gil_exit_code', return_value=False) as query:
+                with self.assertRaises(OSError) as raised:
+                    self._patch_while_helpers_exit(lambda: setattr(hook, 'enabled', True))
+            self.assertTrue(query.called)
+            self.assertIsNotNone(raised.exception.winerror)
+            self.assertFalse(hook.enabled)
+            self.assertEqual(self.process.read(self.addr, len(hook.orig_code)), hook.orig_code)
+        finally:
+            hook.close()
 
     def test_rejects_relative_target_prologue(self):
         self.process.write(self.addr, b'\xE8\x00\x00\x00\x00' + b'\x90' * 16)
