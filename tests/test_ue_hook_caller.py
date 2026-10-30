@@ -38,6 +38,7 @@ for line in sys.stdin:
 '''
 _NO_CAPSTONE = '''
 import json
+import os
 import sys
 from unittest import mock
 sys.modules['capstone'] = None
@@ -56,7 +57,7 @@ with mock.patch.object(Process, 'alloc') as alloc:
     else:
         out = {'bound': True}
     out['allocs'] = alloc.call_count
-out['root'] = __import__('os').path.dirname(__import__('os').path.dirname(__import__('os').path.abspath(nylib.__file__)))
+out['root'] = os.path.dirname(os.path.dirname(os.path.abspath(nylib.__file__)))
 print(json.dumps(out))
 '''
 
