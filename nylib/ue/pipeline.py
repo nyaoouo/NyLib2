@@ -742,6 +742,12 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, a
 # write_profile / list_targets
 # --------------------------------------------------------------------------------------------
 
+def _auto_int(row, lo: int, hi: int) -> int | None:
+    """The row's value when it is an int in [lo, hi) detected by an `auto:` finder, else None."""
+    v = row.value if row is not None else None
+    return v if row is not None and row.how.startswith('auto:') and isinstance(v, int) and not isinstance(v, bool) and lo <= v < hi else None
+
+
 def write_profile(report: ProbeReport, *, out=None):
     if not isinstance(report, ProbeReport):
         raise TypeError(f'report must be a ProbeReport, got {type(report).__name__}')
@@ -771,8 +777,11 @@ def write_profile(report: ProbeReport, *, out=None):
         if gnames is not None and isinstance(gnames.value, int):
             pins.append(profiles.Pin('gnames', rva=gnames.value, build=info.pe_timestamp, image_size=info.size_of_image))
 
+    pe_hint = _auto_int(rows.get('Off.InSDK.ProcessEvent.PEIndex'), 1, 0x10000)
+    gworld = _auto_int(rows.get('Off.InSDK.World.GWorld'), 1, 2 ** 31)
     name = report.game_name or _exe_stem(info.exe)
-    text = profiles.render_profile(info.exe, name, pins, when=datetime.datetime.now().astimezone())
+    text = profiles.render_profile(info.exe, name, pins, when=datetime.datetime.now().astimezone(), process_event_hint=pe_hint,
+                                   offset_hints={'Off.InSDK.World.GWorld': gworld} if gworld is not None else None)
     try:
         path = profiles.write_profile_file(os.path.join(root, store.PROFILES_DIR, f'{store.safe_dir_name(name)}.toml'), text)
     except FileExistsError as e:

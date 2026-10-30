@@ -105,7 +105,7 @@ def _build_parser() -> argparse.ArgumentParser:
     common(pl)
     pl.set_defaults(func=_cmd_list)
 
-    pp = sub.add_parser('probe', help='detect globals, layouts and offsets only; --write-profile pins GObjects and GNames')
+    pp = sub.add_parser('probe', help='detect globals, layouts and offsets only; --write-profile pins GObjects and GNames and notes other found values as comments')
     pp.add_argument('target', type=_nonempty)
     pp.add_argument('--profile', dest='profile', default=None, help='game profile (TOML) with pinned values')
     pp.add_argument('--out', dest='out', default=None, type=_nonempty,
@@ -635,8 +635,8 @@ def _cmd_probe(args, _open_target=None) -> int:
                 return 1
             except Exception as e:
                 return _finish_error(e, args.json, target=args.target, log_file=log_file, logger=logger)
-            print(f'wrote {written} ({len(pin_names)} globals pinned for build {_hex(report.target.pe_timestamp)}; '
-                  'offsets stay automatic)')
+            print(f'wrote {written} (pins: {", ".join(pin_names) or "none"}; rva pins hold for build {_hex(report.target.pe_timestamp)}; '
+                  'hints are commented out)')
 
         return 0 if report.ok else 3
 
