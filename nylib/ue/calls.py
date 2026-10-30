@@ -555,7 +555,7 @@ class HookCaller(Caller):
         Caller.bind(self, site)
         try:
             try:
-                from ..winutils import inline_call  # noqa: F401
+                from ..winutils import inline_call
             except Exception as exc:  # the import runs nylib.utils.pip.required, which can fail with any type
                 raise _call_error(f"calls='game-thread' needs keystone-engine and capstone ({type(exc).__name__}: {exc}); install them beforehand (pip install \".[asm]\"); "
                                   'nylib.utils.pip installs missing packages on first use unless PYTHON_PIP_ALL_REQ_INSTALLED is set', refused='dependencies', state='not started') from exc
@@ -574,6 +574,12 @@ class HookCaller(Caller):
                 self.trigger = site.process_event_address
             if not _is_int(self.trigger) or self.trigger <= 0:
                 raise ValueError('trigger must be a nonzero executable address')
+            try:
+                code = inline_call.is_executable(site.process, self.trigger)
+            except OSError:
+                code = False
+            if not code:
+                raise ValueError(f'trigger {self.trigger:#x} is not in committed executable memory')
             if not _is_int(self.capacity) or self.capacity < 1 or self.capacity > 64 or self.capacity & (self.capacity - 1):
                 raise ValueError('capacity must be a power of two from 1 to 64')
         except BaseException:
@@ -618,11 +624,12 @@ class HookCaller(Caller):
         with self._lock:
             if self.closed:
                 raise _closed_error()
+            from ..winutils.inline_call import PrologueError
             try:
                 queue = self._get_queue()
-            except ValueError as exc:
+            except PrologueError as exc:
                 raise _call_error(f'the hook refused the trigger prologue: {exc}{self._jump_hint()}', refused='prologue', state='not started') from exc
-            except (OSError, BufferError, RuntimeError) as exc:
+            except (ValueError, OSError, BufferError, RuntimeError) as exc:
                 raise _call_error(f'the hook could not install: {exc}', state='not started') from exc
             try:
                 ticket = queue.submit(function, *args)

@@ -31,6 +31,16 @@ _gil_get_context.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
 _gil_get_context.restype = ctypes.c_bool
 
 
+class PrologueError(ValueError):
+    """The target's first instructions cannot be relocated into the hook trampoline."""
+
+
+def is_executable(process, addr: int) -> bool:
+    """Whether addr lies in committed, executable, non-guard memory of the process."""
+    mbi = process.virtual_query(addr)
+    return mbi.State == 0x1000 and bool(mbi.Protect & 0xF0) and not mbi.Protect & 0x100
+
+
 def _thread_call(func, handle):
     result = func(handle)
     if result == 0xFFFFFFFF: raise ctypes.WinError()
@@ -360,8 +370,7 @@ class InlineCallQueue(_CallQueue, InlineHook):
     """Call functions on the next entry to a chosen x64 function."""
 
     def __init__(self, process, addr: int, capacity=16, thread_id=None, *, quiescent_patch=False):
-        mbi = process.virtual_query(addr)
-        if mbi.State != 0x1000 or not mbi.Protect & 0xF0 or mbi.Protect & 0x100:
+        if not is_executable(process, addr):
             raise ValueError(f'target address {addr:#x} is not executable')
         super().__init__(process, addr, capacity, thread_id)
         self.quiescent_patch = bool(quiescent_patch)
@@ -370,14 +379,17 @@ class InlineCallQueue(_CallQueue, InlineHook):
         if self.alloc_at: return
         cs = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
         cs.detail = True
-        instructions, size = read_code(self.process, self.addr, min_size=5, cs=cs)
+        try:
+            instructions, size = read_code(self.process, self.addr, min_size=5, cs=cs)
+        except ValueError as exc:
+            raise PrologueError(str(exc)) from exc
         for insn in instructions:
             if any(insn.group(group) for group in (capstone.CS_GRP_JUMP, capstone.CS_GRP_CALL, capstone.CS_GRP_RET,
                                                    capstone.CS_GRP_INT, capstone.CS_GRP_IRET)) or any(
                     op.type == capstone.x86.X86_OP_MEM and op.mem.base == capstone.x86.X86_REG_RIP for op in insn.operands):
-                raise ValueError(f'cannot relocate instruction at {insn.address:#x}')
+                raise PrologueError(f'cannot relocate instruction at {insn.address:#x}')
         if (self.addr & ~0xFFF) != ((self.addr + size - 1) & ~0xFFF):
-            raise ValueError('hook prologue crosses a page boundary')
+            raise PrologueError('hook prologue crosses a page boundary')
         if len(self.code) + size + 14 > 0x1000: raise ValueError('hook code exceeds one page')
         alloc_at = self.process.alloc_near(0x1000, self.addr, protect=0x04)
         try:
