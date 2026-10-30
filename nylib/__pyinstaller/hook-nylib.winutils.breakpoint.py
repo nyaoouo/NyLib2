@@ -34,7 +34,8 @@ def _msvc_installed() -> bool:
     try:
         from nylib.winutils.msvc import msvc14_find_vc2017
         return msvc14_find_vc2017()[1] is not None
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("hook-nylib.winutils.breakpoint: MSVC detection failed (%s); treating it as absent", exc)
         return False
 
 

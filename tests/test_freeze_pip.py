@@ -56,7 +56,8 @@ class FreezePipTests(unittest.TestCase):
         from nylib.utils import pip as nypip
         for code, ok in ((0, True), (1, False)):
             mods, calls = _fake_pip(code)
-            with mock.patch.dict(sys.modules, mods), mock.patch.object(nypip, 'set_pip_default_index', lambda *a, **k: True):
+            with mock.patch.dict(sys.modules, mods), mock.patch.dict(os.environ, {'PIP_NO_INDEX': '1'}), \
+                    mock.patch.object(nypip, 'set_pip_default_index', lambda *a, **k: True):
                 if ok:
                     self.assertTrue(nypip.install('x'))
                 else:

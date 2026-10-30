@@ -75,6 +75,13 @@ class PyInstallerHookTests(unittest.TestCase):
                         self.assertTrue(any('nylib.winutils.breakpoint.veh.build_backend()' in w for w in warnings))
                         self.assertTrue(any('nylib.winutils.breakpoint.debugger.build_backend()' in w for w in warnings))
 
+    def test_finder_error_is_logged_at_debug(self):
+        for key in _CASES:
+            with self.subTest(hook=key):
+                with mock.patch.object(pyi_hooks.logger, 'debug') as debug:
+                    self.run_hook(key, OSError('boom'))
+                self.assertTrue(any('boom' in str(c.args) for c in debug.call_args_list))
+
     def test_present_msvc_builds_each_missing_dll_once(self):
         for key, (fname, pkg, cpps, builds) in _CASES.items():
             with self.subTest(hook=key):
