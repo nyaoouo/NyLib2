@@ -194,7 +194,7 @@ UeError
 
 | 层 | 本版本支持 | 超出部分 |
 |---|---|---|
-| 容器 | IoStore TOC v8，每个容器一个分区；AES-256-ECB；Oodle（Kraken）和存储块；压缩块为 2 的幂，范围从 4 KiB 到 16 MiB | `UnsupportedContainerError`（多个分区：`feature='multiple partitions'`；一个这样的容器会使整个安装的 `open_installation` 失败）；`.pak` 会列在 `containers` 中，但从不挂载 |
+| 容器 | IoStore TOC v8，一个或多个分区（分区 `p >= 1` 从 `<base>_s<p>.ucas` 读取）；AES-256-ECB；Oodle（Kraken）和存储块；压缩块为 2 的幂，范围从 4 KiB 到 16 MiB | `UnsupportedContainerError`（分区数为 0：`feature='zero partitions'`；一个这样的容器会使整个安装的 `open_installation` 失败）；缺少分区文件或块跨越分区末尾：`CorruptAssetError`；`.pak` 会列在 `containers` 中，但从不挂载 |
 | 映射 | `.usmap` v0-v4；压缩方式为 None、Oodle、ZStd（需要 Python 3.14+） | `InvalidMappingError` |
 | 包 | zen 包，未版本化属性 | `InvalidMappingError`、`CorruptAssetError` |
 | 导出与类型化属性 | 每种属性类型和引用（`exports()`、`read()`、`raw()`、`resolve()`）；121 个内置原生结构体布局；其他任何结构体名称通过 `.usmap` 映射 | 本版本不读取的原生结构体（见上文"支持的原生结构体"）：`UnsupportedAssetError` |
