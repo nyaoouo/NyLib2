@@ -4,7 +4,7 @@ import threading
 import time
 
 from .. import winapi
-from .inline_hook import InlineHook, PrologueError, _absolute_jump, _allocate_jump, _read_prologue, asm
+from .inline_hook import InlineHook, PrologueError, _absolute_jump, _allocate_jump, _read_prologue, _relocate_prologue, asm
 from .vtable_hook import VTableHook
 
 
@@ -371,20 +371,23 @@ class _CallQueue:
 class InlineCallQueue(_CallQueue, InlineHook):
     """Call functions on the next entry to a chosen x64 function."""
 
-    def __init__(self, process, addr: int, capacity=16, thread_id=None, *, quiescent_patch=False):
+    def __init__(self, process, addr: int, capacity=16, thread_id=None, *, quiescent_patch=False, _jmp_support=0):
+        if _jmp_support not in (0, 1): raise ValueError('_jmp_support must be 0 or 1')
         if not is_executable(process, addr):
             raise ValueError(f'target address {addr:#x} is not executable')
         super().__init__(process, addr, capacity, thread_id)
         self.quiescent_patch = bool(quiescent_patch)
+        self._jmp_support = _jmp_support
 
     def alloc(self):
         if self.alloc_at: return
         alloc_at, jump = _allocate_jump(self.process, self.addr, protect=0x04)
         try:
-            instructions, size = _read_prologue(self.process, self.addr, len(jump))
+            instructions, size = _read_prologue(self.process, self.addr, len(jump), _jmp_support=self._jmp_support)
             orig_code = b''.join(insn.bytes for insn in instructions)
             hook_code = jump + b'\x90' * (size - len(jump))
-            trampoline = self.code + orig_code + _absolute_jump(self.addr + size)
+            relocated = _relocate_prologue(instructions, self.addr, size, alloc_at + len(self.code), _jmp_support=self._jmp_support)
+            trampoline = self.code + relocated + _absolute_jump(self.addr + size)
             if len(trampoline) > 0x1000: raise ValueError('hook code exceeds one page')
             self.process.write(alloc_at, trampoline)
             self.process.virtual_protect(alloc_at, 0x1000, 0x20)
