@@ -22,8 +22,10 @@ print(result.counts, result.unverified, result.warnings, result.export_paths)
 - `nylib.ue.pipeline.list_targets()` lists the running processes that look like UE games.
 - Output: `<out>/<GameName>/<YYYYmmdd-HHMMSS>/`. The root is `out=`, else the environment variable `NYLIB_UE_OUT`, else `.\ue_dumps` under the current directory. Inside the game there is no default: pass `out=` or set `NYLIB_UE_OUT`.
 - Profiles: a TOML file in `<out>/profiles/` whose `[match] exe` is the target is used automatically (two matching files raise `ProfileError`; pass `profile=` to choose); `nylib.ue.pipeline.write_profile(report)` writes one that pins GObjects and GNames for this build. A profile can never enable calls.
-- Writing a profile never overwrites one. If the file exists, `write_profile` raises `FileExistsError` (`e.args[0]` is the path) with the text it would have written in `e.profile_text`; `probe --write-profile` prints that text and says to merge it by hand.
+- `write_profile` also notes the probe's ProcessEvent index and GWorld rva when the probe detected them itself (a `how` starting `auto:`, not `profile:` or `fallback:`), but only as commented lines under "found by this probe; check it before pinning". Uncommenting one makes it a pin that applies to every build of the exe (see below). `probe --write-profile` then prints `wrote <path> (pins: gobjects, gnames; rva pins hold for build 0x...; hints are commented out)`.
+- Writing a profile never overwrites one. If the file exists, `write_profile` raises `FileExistsError` (`e.args[0]` is the path) with the text it would have written in `e.profile_text`. `probe --write-profile` then prints that text, says to merge it by hand and exits 1; with `--json`, the error document carries `path` and `profile_text`. If `<out>/profiles` is a file, `write_profile` raises `NotADirectoryError` naming it instead.
 - Only `[globals]` rva pins (`gobjects`, `gnames`) are checked against the build. `process_event` and `[offsets]` pins, including the `Off.InSDK.World.GWorld` rva, apply to every build of that exe and count as verified, so after a game update an old profile still applies them.
+- `[offsets]` keys are checked when the profile is parsed: each must be spelled as in `nylib.ue.engine.offsets.PINNABLE_KEYS` (`Off.UStruct.Size`, not `UStruct.Size`), else `ProfileError: [offsets] unknown key ...`. The automatic pickup skips any profile that fails to parse, with a WARNING; only this error, in a profile whose `[match] exe` is the target, fails the probe, dump or attach instead.
 - In code, `nylib.ue.profiles.parse_profile(text)` and `load_profile(path)` build a `Profile` (`path`, `exe`, `pins`, `offsets`, `hooks`), which `profile=` accepts like a path. An in-memory profile shows as `<string>` in messages and cannot use `[hooks]` (`ProfileError`: hooks need a profile file).
 - Quality: `result.quality` (and `meta.json`'s `quality`) reports a `verdict` of `complete` or `degraded` with the `reasons`, the per-kind issue `counts`, and the `thresholds` applied. It degrades on any `unreadable_type`, `unreadable_fields`, `unreadable_name` or `unreadable_interfaces`, or when `index_mismatch` over type-relevant rows (classes, structs, functions, enums, packages) exceeds 0.1% of them; other issue kinds are reported but never gate it (an `EnumProperty` whose enum does not resolve is an `unresolved_reference`). If the usmap export finds a property that names a missing enum or struct, `result.warnings` gets a `usmap: N properties referenced a missing enum or struct (first: ...)` entry. `strict=True` (CLI: `--strict`) turns a degraded verdict into a raised error before anything is published, leaving only the `.partial` folder on disk; the default (`strict=False`) only reports it.
 
@@ -42,7 +44,7 @@ process_event = { index = 76 }
 "Off.InSDK.World.GWorld" = 0x4C7D1A8
 ```
 
-Start from `probe --write-profile`, which writes `[match]` and the `gobjects` / `gnames` rva pins. By hand you can add `note` (a string) to any `[globals]` pin, `elements_per_chunk` and `layout` to `gobjects`, and `[hooks] decrypt_objects = "hooks.py:decrypt_objects"` (a file beside the profile; it runs as Python in the dumping process, so use only profiles you trust; not with a `gobjects` pin, which is read without decryption). A `gobjects` / `gnames` pin needs exactly one of `rva` and `sig`.
+Start from `probe --write-profile`, which writes `[match]` and the `gobjects` / `gnames` rva pins, plus commented hints (above). By hand you can add `note` (a string) to any `[globals]` pin, `elements_per_chunk` and `layout` to `gobjects`, and `[hooks] decrypt_objects = "hooks.py:decrypt_objects"` (a file beside the profile; it runs as Python in the dumping process, so use only profiles you trust; not with a `gobjects` pin, which is read without decryption). A `gobjects` / `gnames` pin needs exactly one of `rva` and `sig`.
 
 ## Exports
 
@@ -99,7 +101,7 @@ python -m nylib.ue export <snapshot> --format idmap
 python -m nylib.ue info <snapshot>
 ```
 
-`list`, `probe` and `dump` need a running game. `--allow-calls` without a value means all three. `--json` (all but `export`) prints machine-readable output. Logs go to `<out>/_logs/<command>.log` unless `--log-file` is given. Exit codes: 0 ok, 1 error, 2 usage, 3 detection failed, 4 cannot open the target or it exited, 130 interrupted.
+`list`, `probe` and `dump` need a running game. `list` prints each process's matching profile and its status: `build matches`, `build differs`, `no rva pins`, `ambiguous (N profiles)` or `invalid` (an unknown `[offsets]` key; the log names it). `--allow-calls` without a value means all three. `--json` (all but `export`) prints machine-readable output. Logs go to `<out>/_logs/<command>.log` unless `--log-file` is given. Exit codes: 0 ok, 1 error, 2 usage, 3 detection failed, 4 cannot open the target or it exited, 130 interrupted.
 
 ## Own memory backend
 
