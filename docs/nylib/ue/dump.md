@@ -22,7 +22,10 @@ print(result.counts, result.unverified, result.warnings, result.export_paths)
 - `nylib.ue.pipeline.list_targets()` lists the running processes that look like UE games.
 - Output: `<out>/<GameName>/<YYYYmmdd-HHMMSS>/`. The root is `out=`, else the environment variable `NYLIB_UE_OUT`, else `.\ue_dumps` under the current directory. Inside the game there is no default: pass `out=` or set `NYLIB_UE_OUT`.
 - Profiles: a TOML file in `<out>/profiles/` whose `[match] exe` is the target is used automatically (or pass `profile=`); `nylib.ue.pipeline.write_profile(report)` writes one that pins GObjects and GNames for this build. A profile can never enable calls.
-- Quality: `result.quality` (and `meta.json`'s `quality`) reports a `verdict` of `complete` or `degraded` with the `reasons`, the per-kind issue `counts`, and the `thresholds` applied. It degrades on any `unreadable_type`, `unreadable_fields`, `unreadable_name` or `unreadable_interfaces`, or when `index_mismatch` over type-relevant rows (classes, structs, functions, enums, packages) exceeds 0.1% of them; other issue kinds are reported but never gate it. `strict=True` (CLI: `--strict`) turns a degraded verdict into a raised error before anything is published, leaving only the `.partial` folder on disk; the default (`strict=False`) only reports it.
+- Writing a profile never overwrites one. If the file exists, `write_profile` raises `FileExistsError` (its first argument is the path) with the text it would have written in `e.profile_text`; `probe --write-profile` prints that text and says to merge it by hand.
+- Only `[globals]` rva pins (`gobjects`, `gnames`) are checked against the build. `process_event` and `[offsets]` pins, including the `Off.InSDK.World.GWorld` rva, apply to every build of that exe, so after a game update an old profile still applies them.
+- In code, `nylib.ue.profiles.parse_profile(text)` and `load_profile(path)` build a `Profile` (`path`, `exe`, `pins`, `offsets`, `hooks`), which `profile=` accepts like a path. An in-memory profile shows as `<string>` in messages.
+- Quality: `result.quality` (and `meta.json`'s `quality`) reports a `verdict` of `complete` or `degraded` with the `reasons`, the per-kind issue `counts`, and the `thresholds` applied. It degrades on any `unreadable_type`, `unreadable_fields`, `unreadable_name` or `unreadable_interfaces`, or when `index_mismatch` over type-relevant rows (classes, structs, functions, enums, packages) exceeds 0.1% of them; other issue kinds are reported but never gate it (an `EnumProperty` whose enum does not resolve is an `unresolved_reference`). If the usmap export finds a property that names a missing enum or struct, `result.warnings` gets a `usmap: N properties referenced a missing enum or struct (first: ...)` entry. `strict=True` (CLI: `--strict`) turns a degraded verdict into a raised error before anything is published, leaving only the `.partial` folder on disk; the default (`strict=False`) only reports it.
 
 ## Exports
 
@@ -67,7 +70,7 @@ with load_snapshot(r'ue_dumps\TRIANGLE_STRATEGY\20261002-024137') as snap:
     print(snap.objects[i], snap.objects.full_name(i))
 ```
 
-The folder holds `meta.json`, `offsets.json`, `objects.jsonl`, `fields.jsonl`, `types.jsonl` and `types.idx.json`, plus the exports. Types load on first use.
+The folder holds `meta.json`, `offsets.json`, `objects.jsonl`, `fields.jsonl`, `types.jsonl` and `types.idx.json`, plus the exports. Types load on first use. A snapshot holds types, layouts and the object list, but no property values, not even class defaults; read values from a live session (`ue.cdo(...)`, `ue.find(...)`).
 
 ## Command line
 
