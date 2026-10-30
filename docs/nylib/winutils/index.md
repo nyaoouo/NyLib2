@@ -203,7 +203,7 @@ For batched calls on either hook type, see [inline_call.md](inline_call.md).
 
 - `iter_processes()` enumerates local processes via ToolHelp32 API.
 - `enable_privilege()` tries to enable `SeDebugPrivilege`; silently succeeds or fails.
-- `run_admin()` re-launches via `ShellExecuteW("runas")` if not already admin, then raises. The relaunch repeats the original arguments, quoted, and the working directory, for a script, `-m` or a frozen app alike.
+- `run_admin()` re-launches via `ShellExecuteW("runas")` if not already admin, then raises. The relaunch repeats the original arguments, quoted, and the working directory, for a script, `-m` or a frozen app alike; outside a frozen app it uses the original command line (`sys.orig_argv`), so changes made to `sys.argv` are not carried over.
 - `read_exports(base)` reads only this process and never raises; use `Process.enum_exports(dll)` instead.
 - `ExportTable(process, base)` works on any process via `ReadProcessMemory`.
 - Named pipes are local per-machine only.

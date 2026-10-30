@@ -55,6 +55,7 @@ def _collect() -> None:
     for entry in sorted(package_dir.iterdir()):
         if entry.is_file() and entry.suffix.lower() == '.pyd':
             if not _is_native_ext(entry.name):
+                logger.info('hook-pyimgui: skipping %s, built for another Python ABI', entry.name)
                 continue
             binaries.append((str(entry), dest))
             stem = entry.name.split('.', 1)[0]

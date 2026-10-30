@@ -549,7 +549,7 @@ def check_hook_dependencies():
         if getattr(sys, 'frozen', False):
             text = (f"calls='game-thread' needs keystone-engine and capstone ({cause}); this bundle lacks the packages or their DLLs (keystone.dll, capstone.dll); "
                     'freeze with the nylib PyInstaller hooks (nylib/__pyinstaller: hook-keystone.py, hook-capstone.py), as the pyinstaller40 entry point or '
-                    'through --additional-hooks-dir, and do not exclude these packages')
+                    'through --additional-hooks-dir, with both packages installed in the build environment (pip install ".[asm]") and not excluded')
         else:
             text = (f"calls='game-thread' needs keystone-engine and capstone ({cause}); install them beforehand (pip install \".[asm]\"); "
                     'nylib.utils.pip installs missing packages on first use unless PYTHON_PIP_ALL_REQ_INSTALLED is set')
