@@ -556,9 +556,9 @@ class HookCaller(Caller):
         try:
             try:
                 from ..winutils import inline_call  # noqa: F401
-            except ImportError as exc:
-                raise _call_error(f"calls='game-thread' needs keystone-engine and capstone ({exc}); install them beforehand (pip install \".[asm]\"), "
-                                  'since nylib installs them on first use only while PYTHON_PIP_ALL_REQ_INSTALLED is unset', refused='dependencies', state='not started') from exc
+            except Exception as exc:  # the import runs nylib.utils.pip.required, which can fail with any type
+                raise _call_error(f"calls='game-thread' needs keystone-engine and capstone ({type(exc).__name__}: {exc}); install them beforehand (pip install \".[asm]\"); "
+                                  'nylib.utils.pip installs missing packages on first use unless PYTHON_PIP_ALL_REQ_INSTALLED is set', refused='dependencies', state='not started') from exc
             if self.thread_id is None:
                 with site.find_game_thread() as thread:
                     self.thread_id = thread.thread_id
@@ -608,8 +608,8 @@ class HookCaller(Caller):
             jump = _starts_with_jump(read_target(self.process, self.trigger, 16))
         except (MemoryReadError, ValueError):
             return ''
-        return ('; the trigger already starts with a jump (another hook, possibly an earlier nylib session that was not closed); '
-                'restarting the game removes it') if jump else ''
+        return ('; the trigger already starts with a jump (another hook?); if it is a hook left by an earlier nylib session that was not closed, '
+                'only a game restart removes it') if jump else ''
 
     def call(self, function: int, *args: int, timeout: float | None) -> int:
         _check_call_args(function, args, timeout)
