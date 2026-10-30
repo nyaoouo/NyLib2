@@ -14,6 +14,7 @@ extensions at the bundle root's ``pyimgui/`` directory.
 
 from __future__ import annotations
 
+import importlib.machinery
 import os
 import pathlib
 
@@ -25,6 +26,13 @@ from PyInstaller.utils.hooks import (  # type: ignore[import-not-found]
 binaries: list[tuple[str, str]] = []
 datas: list[tuple[str, str]] = []
 hiddenimports: list[str] = []
+
+_EXT_SUFFIXES = tuple(importlib.machinery.EXTENSION_SUFFIXES)
+
+
+def _is_native_ext(name: str) -> bool:
+    """True when the file's ABI tag is accepted by the interpreter being frozen."""
+    return '.' + name.lower().partition('.')[2] in _EXT_SUFFIXES
 
 
 def _collect() -> None:
@@ -46,9 +54,13 @@ def _collect() -> None:
 
     for entry in sorted(package_dir.iterdir()):
         if entry.is_file() and entry.suffix.lower() == '.pyd':
+            if not _is_native_ext(entry.name):
+                continue
             binaries.append((str(entry), dest))
             stem = entry.name.split('.', 1)[0]
             hiddenimports.append(f'pyimgui.{stem}')
+        elif entry.is_file() and entry.suffix.lower() == '.py':
+            datas.append((str(entry), dest))
         elif entry.is_file() and entry.suffix.lower() == '.pyi':
             datas.append((str(entry), dest))
         elif entry.is_dir():

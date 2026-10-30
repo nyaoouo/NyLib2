@@ -31,6 +31,7 @@ using the package's own ``__name__`` at runtime — which is
 
 from __future__ import annotations
 
+import importlib.machinery
 import os
 import pathlib
 
@@ -42,6 +43,13 @@ from PyInstaller.utils.hooks import (  # type: ignore[import-not-found]
 binaries: list[tuple[str, str]] = []
 datas: list[tuple[str, str]] = []
 hiddenimports: list[str] = []
+
+_EXT_SUFFIXES = tuple(importlib.machinery.EXTENSION_SUFFIXES)
+
+
+def _is_native_ext(name: str) -> bool:
+    """True when the file's ABI tag is accepted by the interpreter being frozen."""
+    return '.' + name.lower().partition('.')[2] in _EXT_SUFFIXES
 
 
 def _collect() -> None:
@@ -66,11 +74,16 @@ def _collect() -> None:
 
     for entry in sorted(package_dir.iterdir()):
         if entry.is_file() and entry.suffix.lower() == '.pyd':
+            if not _is_native_ext(entry.name):
+                continue
             binaries.append((str(entry), dest))
             # ``dx9.cp313-win_amd64.pyd`` -> ``dx9``
             stem = entry.name.split('.', 1)[0]
             hiddenimports.append(f'nylib.pyimgui.{stem}')
             hiddenimports.append(f'pyimgui.{stem}')
+        elif entry.is_file() and entry.suffix.lower() == '.py':
+            # Pure-Python modules (``esp.py``) are not analysed; bundle them as plain files.
+            datas.append((str(entry), dest))
         elif entry.is_file() and entry.suffix.lower() in {'.pyi'}:
             # Stubs are only useful at type-check time, but PyInstaller users
             # occasionally ship them for IDE-friendly bundles; keep them as
