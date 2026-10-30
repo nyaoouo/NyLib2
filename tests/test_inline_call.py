@@ -1,4 +1,5 @@
 import ctypes
+import queue
 import subprocess
 import sys
 import threading
@@ -272,6 +273,106 @@ class InlineCallTests(unittest.TestCase):
             self.assertEqual(self.process.virtual_query(local_at).State, 0x10000)
             self.assertEqual(self.process.virtual_query(remote_at).State, 0x10000)
         self.assertEqual(count(), before)
+
+
+class InlineCallThreadTests(unittest.TestCase):
+    def setUp(self):
+        self.process = Process.current
+        self.addr = self.process.alloc(0x1000)
+        self.process.write(self.addr, _TARGET_CODE)
+        winapi.FlushInstructionCache(self.process.handle, self.addr, len(_TARGET_CODE))
+        self.target = ctypes.CFUNCTYPE(ctypes.c_uint64)(self.addr)
+
+    def tearDown(self):
+        self.process.free(self.addr)
+
+    def test_thread_filter_runs_calls_only_on_the_chosen_thread(self):
+        get_tid = self.process.get_proc_address('kernel32.dll', 'GetCurrentThreadId')
+        commands = queue.Queue()
+        results = queue.Queue()
+        tids = []
+        ready = threading.Event()
+
+        def worker():
+            tids.append(winapi.GetCurrentThreadId())
+            ready.set()
+            while commands.get() == 'hit': results.put(self.target())
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        hook = ticket = None
+        try:
+            self.assertTrue(ready.wait(5))
+            hook = InlineCallQueue(self.process, self.addr, thread_id=tids[0])
+            hook.enabled = True
+            ticket = hook.submit(get_tid)
+            self.assertEqual(self.target(), 42)
+            self.assertFalse(ticket.done)
+            with self.assertRaises(TimeoutError): ticket.wait(50)
+            commands.put('hit')
+            self.assertEqual(results.get(timeout=10), 42)
+            self.assertEqual(ticket.wait(5000), tids[0])
+            self.assertNotEqual(tids[0], winapi.GetCurrentThreadId())
+            self.assertEqual(self.target(), 42)
+        finally:
+            commands.put('hit')
+            commands.put('stop')
+            thread.join(10)
+            if hook is not None:
+                for pending in list(hook._tickets.values()): pending.wait(5000)
+                hook.close()
+        self.assertFalse(thread.is_alive())
+
+    def test_quiescent_patch_suspends_a_worker_that_keeps_entering(self):
+        get_tid = self.process.get_proc_address('kernel32.dll', 'GetCurrentThreadId')
+        stop = threading.Event()
+        ready = threading.Event()
+        tids = []
+        wrong = []
+        count = 0
+
+        def worker():
+            nonlocal count
+            tids.append(winapi.GetCurrentThreadId())
+            ready.set()
+            while not stop.is_set():
+                if (value := self.target()) != 42: wrong.append(value)
+                count += 1
+                time.sleep(0.0001)
+
+        def advance():
+            start = count
+            deadline = time.monotonic() + 20
+            while count < start + 20 and time.monotonic() < deadline: time.sleep(0.001)
+            self.assertGreaterEqual(count, start + 20)
+
+        suspended = []
+        real_suspend = inline_call._gil_suspend
+
+        def spy(handle):
+            suspended.append(winapi.GetThreadId(handle))
+            return real_suspend(handle)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        hook = InlineCallQueue(self.process, self.addr, quiescent_patch=True)
+        try:
+            self.assertTrue(ready.wait(5))
+            with patch.object(inline_call, '_gil_suspend', spy):
+                hook.enabled = True
+                advance()
+                self.assertEqual(hook.submit(get_tid).wait(10000), tids[0])
+                hook.enabled = False
+                advance()
+                hook.enabled = True
+                advance()
+        finally:
+            stop.set()
+            thread.join(10)
+            hook.close()
+        self.assertEqual(wrong, [])
+        self.assertIn(tids[0], suspended)
+        self.assertFalse(thread.is_alive())
 
 
 class VTableCallTests(unittest.TestCase):
