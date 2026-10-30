@@ -1,3 +1,4 @@
+import contextlib
 import ctypes
 import queue
 import subprocess
@@ -11,10 +12,24 @@ from nylib import winapi
 from nylib.process import Process
 from nylib.winutils import inline_call
 from nylib.winutils.inline_call import InlineCallQueue, PrologueError, VTableCallQueue
+from nylib.winutils.inline_hook import ks_
 from nylib.winutils.vtable_hook import VTableHook
 
 
 _TARGET_CODE = b'\xB8\x2A\x00\x00\x00' + b'\x90' * 16 + b'\xC3'  # mov eax, 42; ret
+_WORKER_LOOP = ('push rbx; sub rsp, 0x20; mov rbx, rcx; top: call qword ptr [rbx+0x18]; cmp rax, 42; je ok; lock inc qword ptr [rbx+0x10]; '
+                'ok: lock inc qword ptr [rbx+8]; pause; cmp qword ptr [rbx], 0; je top; add rsp, 0x20; pop rbx; xor eax, eax; ret')  # native thread: no GIL
+_kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+_kernel32.CreateThread.restype = ctypes.c_void_p
+_kernel32.CreateThread.argtypes = (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_ulong))
+_kernel32.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_ulong)
+_kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+
+
+class _WorkerControl(ctypes.Structure):
+    _fields_ = [('stop', ctypes.c_uint64), ('count', ctypes.c_uint64), ('wrong', ctypes.c_uint64), ('target', ctypes.c_uint64)]
+
+
 _CHILD = '''
 import ctypes
 import os
@@ -325,27 +340,11 @@ class InlineCallThreadTests(unittest.TestCase):
 
     def test_quiescent_patch_suspends_a_worker_that_keeps_entering(self):
         get_tid = self.process.get_proc_address('kernel32.dll', 'GetCurrentThreadId')
-        stop = threading.Event()
-        ready = threading.Event()
-        tids = []
-        wrong = []
-        count = 0
-
-        def worker():
-            nonlocal count
-            tids.append(winapi.GetCurrentThreadId())
-            ready.set()
-            while not stop.is_set():
-                if (value := self.target()) != 42: wrong.append(value)
-                count += 1
-                time.sleep(0.0001)
-
-        def advance():
-            start = count
-            deadline = time.monotonic() + 20
-            while count < start + 20 and time.monotonic() < deadline: time.sleep(0.001)
-            self.assertGreaterEqual(count, start + 20)
-
+        code_at = self.process.alloc(0x1000)
+        self.process.write(code_at, bytes(ks_.asm(_WORKER_LOOP, code_at, True)[0]))
+        winapi.FlushInstructionCache(self.process.handle, code_at, 0x1000)
+        control = _WorkerControl(0, 0, 0, self.addr)
+        tid = ctypes.c_ulong()
         suspended = []
         real_suspend = inline_call._gil_suspend
 
@@ -353,26 +352,47 @@ class InlineCallThreadTests(unittest.TestCase):
             suspended.append(winapi.GetThreadId(handle))
             return real_suspend(handle)
 
-        thread = threading.Thread(target=worker)
-        thread.start()
-        hook = InlineCallQueue(self.process, self.addr, quiescent_patch=True)
-        try:
-            self.assertTrue(ready.wait(5))
+        def advance():
+            start = control.count
+            deadline = time.monotonic() + 20
+            while control.count < start + 20 and time.monotonic() < deadline: time.sleep(0.001)
+            self.assertGreaterEqual(control.count, start + 20)
+
+        with contextlib.ExitStack() as cleanup:
+            hook = InlineCallQueue(self.process, self.addr, quiescent_patch=True)
+            handle = _kernel32.CreateThread(None, 0, code_at, ctypes.addressof(control), 0, ctypes.byref(tid))
+            if not handle: raise ctypes.WinError(ctypes.get_last_error())
+
+            def stop_worker():
+                control.stop = 1
+                try:
+                    waited = _kernel32.WaitForSingleObject(handle, 10000)
+                finally:
+                    _kernel32.CloseHandle(handle)
+                if waited != 0: raise AssertionError('native worker did not stop')  # its code page stays allocated
+                self.process.free(code_at)
+
+            def close_hook():
+                try:
+                    for pending in list(hook._tickets.values()): pending.wait(5000)
+                finally:
+                    hook.close()
+
+            cleanup.callback(stop_worker)
+            cleanup.callback(close_hook)
+            advance()
             with patch.object(inline_call, '_gil_suspend', spy):
                 hook.enabled = True
                 advance()
-                self.assertEqual(hook.submit(get_tid).wait(10000), tids[0])
+                self.assertEqual(hook.submit(get_tid).wait(10000), tid.value)
                 hook.enabled = False
                 advance()
                 hook.enabled = True
                 advance()
-        finally:
-            stop.set()
-            thread.join(10)
-            hook.close()
-        self.assertEqual(wrong, [])
-        self.assertIn(tids[0], suspended)
-        self.assertFalse(thread.is_alive())
+                hook.close()
+                advance()
+        self.assertEqual(control.wrong, 0)
+        self.assertIn(tid.value, suspended)
 
 
 class VTableCallTests(unittest.TestCase):
