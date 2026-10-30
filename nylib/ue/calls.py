@@ -657,8 +657,9 @@ class HookCaller(Caller):
             jump = _starts_with_jump(read_target(self.process, self.trigger, 16))
         except (MemoryReadError, ValueError):
             return ''
-        return ('; the trigger already starts with a jump (another hook?); if it is a hook left by another nylib process that did not exit cleanly, '
-                'only a game restart removes it (one this process left for pending calls is retried at the next calls-enabled attach and at exit)') if jump else ''
+        return ('; the trigger already starts with a jump (another hook?); if it is a hook left by another nylib process that exited without removing it '
+                '(killed, crashed, or calls still pending), only a game restart removes it; one this process still holds goes with a close() of its '
+                'session once its calls finish and is retried at exit, and one a failed attach parked is also retried at the next calls-enabled attach') if jump else ''
 
     def call(self, function: int, *args: int, timeout: float | None) -> int:
         _check_call_args(function, args, timeout)
