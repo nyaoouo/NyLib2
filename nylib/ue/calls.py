@@ -9,7 +9,7 @@ import time
 from typing import Callable, NamedTuple
 
 from ..process import Process
-from .errors import CallError, MemoryReadError
+from .errors import CallError, MemoryReadError, PendingCallsError
 from .flags import EPropertyFlags
 from .memory import MemorySource
 from .model import FunctionRecord, PropertyRecord
@@ -637,7 +637,7 @@ class HookCaller(Caller):
                         ticket.close()
                         self._tickets.remove(ticket)
                 if self._tickets and self.process.still_alive():
-                    raise RuntimeError('inline calls are still pending; retry close after they finish')
+                    raise PendingCallsError('inline calls are still pending; retry close after they finish', pending=len(self._tickets))
                 self._queue.close()
             super().close()
 
