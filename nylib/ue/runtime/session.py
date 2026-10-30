@@ -615,6 +615,29 @@ class Unreal:
         a = ctx.index.find(path)
         return ctx.proxy(a) if a is not None else None
 
+    def object_at(self, address: int) -> UObjectProxy | None:
+        """The object GObjects lists at `address`, typed by its runtime class, or None.
+
+        None for an unreadable, unlisted or freed address; a MemoryReadError reading GObjects itself propagates."""
+        ctx = self._live()
+        if not _is_int(address):
+            raise TypeError(f'address must be an int, got {type(address).__name__}')
+        if not 0 <= address <= 0xFFFF_FFFF_FFFF_FFFF:
+            raise ValueError(f'address must be in 0..0xFFFFFFFFFFFFFFFF, got {address:#x}')
+        if address == 0:
+            return None
+        e = ctx.e
+        try:
+            i = e.mem.i32(address + e.off.UObject.Index)
+        except MemoryReadError:
+            return None
+        if not 0 <= i < e.objects.num() or e.objects.get_by_index(i).get_address() != address:
+            return None
+        try:
+            return ctx.proxy(address)
+        except MemoryReadError:
+            return None
+
     def find_class(self, name: str) -> UObjectProxy | None:
         ctx = self._live()
         if not isinstance(name, str):
