@@ -1,5 +1,6 @@
 """UFunction call plumbing (C10): parameter roles and layout, call memory, ProcessEvent callers, strict target reads."""
 import abc
+import atexit
 import bisect
 import logging
 import math
@@ -631,12 +632,14 @@ class HookCaller(Caller):
             from ..winutils.inline_call import InlineCallQueue
             queue = InlineCallQueue(self.process, self.trigger, self.capacity, self.thread_id, quiescent_patch=True)
             self._queue = queue
+            _track(self)
             try:
                 queue.enabled = True
             except BaseException:
                 try:
                     queue.close()
                     self._queue = None
+                    _untrack(self)
                 except Exception:
                     self._broken = True
                 raise
@@ -686,17 +689,67 @@ class HookCaller(Caller):
 
     def close(self) -> None:
         with self._lock:
-            if self.closed:
-                return
-            if self._queue is not None:
-                for ticket in tuple(self._tickets):
-                    if ticket.done:
-                        ticket.close()
-                        self._tickets.remove(ticket)
-                if self._tickets and self.process.still_alive():
-                    raise PendingCallsError('inline calls are still pending; retry close after they finish', pending=len(self._tickets))
-                self._queue.close()
-            super().close()
+            self._close_locked()
+
+    def _close_locked(self) -> None:
+        if self.closed:
+            return
+        if self._queue is not None:
+            for ticket in tuple(self._tickets):
+                if ticket.done:
+                    ticket.close()
+                    self._tickets.remove(ticket)
+            if self._tickets and self.process.still_alive():
+                raise PendingCallsError('inline calls are still pending; retry close after they finish', pending=len(self._tickets))
+            self._queue.close()
+            _untrack(self)
+        super().close()
+
+
+_hook_callers = set()  # HookCallers holding an installed queue; the exit handler removes their hooks
+_hook_callers_lock = threading.Lock()
+
+
+def _track(caller: HookCaller) -> None:
+    with _hook_callers_lock:
+        _hook_callers.add(caller)
+
+
+def _untrack(caller: HookCaller) -> None:
+    with _hook_callers_lock:
+        _hook_callers.discard(caller)
+
+
+def _hook_where(caller: HookCaller) -> str:
+    trigger = getattr(caller, 'trigger', None)
+    pid = getattr(getattr(getattr(caller, '_site', None), 'process', None), 'process_id', None)
+    trigger = trigger if _is_int(trigger) else 0
+    return f'the game-thread hook at {trigger:#x} in process {pid}'
+
+
+def _close_hooks_at_exit() -> None:
+    """Remove the hooks of the HookCallers still holding one; never waits for pending calls and never raises."""
+    try:
+        with _hook_callers_lock:
+            callers = tuple(_hook_callers)
+        for caller in callers:
+            try:
+                if not caller._lock.acquire(timeout=1):
+                    logger.warning('at exit: %s stays installed: it is in use', _hook_where(caller))
+                    continue
+                try:
+                    caller._close_locked()
+                finally:
+                    caller._lock.release()
+            except PendingCallsError as exc:
+                logger.warning('at exit: %s stays installed: %s calls pending', _hook_where(caller), exc.pending)
+            except Exception as exc:
+                logger.warning('at exit: %s could not be removed: %s', _hook_where(caller), exc)
+    except Exception:
+        logger.exception('at exit: removing the game-thread hooks failed')
+
+
+atexit.register(_close_hooks_at_exit)
 
 
 def resolve_caller(value) -> Caller | None:
