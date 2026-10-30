@@ -14,7 +14,7 @@ from ..engine.accessor import view
 from ..engine.context import EngineContext
 from ..engine.unreal import UEClass
 from ..errors import AmbiguousNameError, CallsDisabledError, DetectionError, DumpMismatchError, MemoryReadError, OutputRootError, \
-    ReadOnlySessionError, SessionError, UnverifiedOffsetsError
+    PendingCallsError, ReadOnlySessionError, SessionError, UnverifiedOffsetsError
 from ..exports import EXPORT_SPECS
 from ..memory import ProcessSource, current_process
 from ..model import ClassRecord, EnumRecord, FunctionRecord, StructRecord, hexs, unhex
@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger('nylib.ue.runtime.session')
 _info = logging.getLogger('nylib.ue.runtime')
 _orphaned_callers = []  # Keep an installed hook and its process handle alive if an attach-time call remains pending.
+_orphaned_lock = threading.Lock()  # guards _orphaned_callers; taken before any HookCaller._lock
 
 _SUPER_STEPS = 256
 _TEXT_KEYS = ('Off.InSDK.Text.TextDatOffset', 'Off.InSDK.Text.InTextDataStringOffset')
@@ -49,6 +50,29 @@ def _is_int(x) -> bool:
 
 def _closed_error() -> SessionError:
     return SessionError('the session is closed')
+
+
+def _retry_parked(pid: int) -> None:
+    """Retry closing the parked callers of process `pid`; a close that succeeds also closes the parked target. Never raises."""
+    with _orphaned_lock:
+        for entry in tuple(_orphaned_callers):
+            caller, parked = entry
+            if parked.info.pid != pid:
+                continue
+            where = f'parked game-thread hook at {getattr(caller, "trigger", None) or 0:#x} in process {pid}'
+            try:
+                caller.close()
+            except PendingCallsError as exc:
+                logger.warning('%s stays installed: %s calls pending', where, exc.pending)
+                continue
+            except Exception as exc:
+                logger.warning('%s could not be removed: %s', where, exc)
+                continue
+            _orphaned_callers.remove(entry)
+            try:
+                parked.close()
+            except Exception as exc:
+                logger.warning('%s was removed, but its target could not be closed: %s', where, exc)
 
 
 def _check_timeout(timeout) -> None:
@@ -429,6 +453,8 @@ class Unreal:
             opened = (open_target or pipeline.open_target)(target, write=write,
                                                             remote_calls=(calls is not None and target is not None), cache_bytes=None)
             info = opened.info
+            if calls is not None:
+                _retry_parked(info.pid)
             ctx = None
             if dump is not None:
                 snap, ectx, dumped, attempt = cls._snapshot_engine(target, root, dump, snap, profile, opened, write, calls, allow_unverified,
@@ -492,7 +518,8 @@ class Unreal:
                     caller.close()
                 except Exception as exc:
                     if opened is not None:
-                        _orphaned_callers.append((caller, opened))
+                        with _orphaned_lock:
+                            _orphaned_callers.append((caller, opened))
                     logger.warning('attach left a pending call in the target; caller resources remain live: %s', exc)
                     opened = None
             if snap is not None:
