@@ -4,6 +4,7 @@ import bisect
 import logging
 import math
 import struct
+import sys
 import threading
 import time
 from typing import Callable, NamedTuple
@@ -539,6 +540,23 @@ class ApcCaller(RemoteThreadCaller):
             self._owned_thread = None
 
 
+def check_hook_dependencies():
+    """Import nylib.winutils.inline_call (keystone-engine, capstone) and return it, or raise CallError(refused='dependencies')."""
+    try:
+        from ..winutils import inline_call
+    except Exception as exc:  # the import runs nylib.utils.pip.required, which can fail with any type
+        cause = f'{type(exc).__name__}: {exc}'
+        if getattr(sys, 'frozen', False):
+            text = (f"calls='game-thread' needs keystone-engine and capstone ({cause}); this bundle lacks the packages or their DLLs (keystone.dll, capstone.dll); "
+                    'freeze with the nylib PyInstaller hooks (nylib/__pyinstaller: hook-keystone.py, hook-capstone.py), as the pyinstaller40 entry point or '
+                    'through --additional-hooks-dir, and do not exclude these packages')
+        else:
+            text = (f"calls='game-thread' needs keystone-engine and capstone ({cause}); install them beforehand (pip install \".[asm]\"); "
+                    'nylib.utils.pip installs missing packages on first use unless PYTHON_PIP_ALL_REQ_INSTALLED is set')
+        raise _call_error(text, refused='dependencies', state='not started') from exc
+    return inline_call
+
+
 class HookCaller(Caller):
     """Run calls through ProcessEvent from a thread-filtered detour on the trigger (ProcessEvent unless trigger= is set)."""
     policy = 'game-thread'
@@ -554,11 +572,7 @@ class HookCaller(Caller):
     def bind(self, site: CallSite) -> None:
         Caller.bind(self, site)
         try:
-            try:
-                from ..winutils import inline_call
-            except Exception as exc:  # the import runs nylib.utils.pip.required, which can fail with any type
-                raise _call_error(f"calls='game-thread' needs keystone-engine and capstone ({type(exc).__name__}: {exc}); install them beforehand (pip install \".[asm]\"); "
-                                  'nylib.utils.pip installs missing packages on first use unless PYTHON_PIP_ALL_REQ_INSTALLED is set', refused='dependencies', state='not started') from exc
+            inline_call = check_hook_dependencies()
             if self.thread_id is None:
                 with site.find_game_thread() as thread:
                     self.thread_id = thread.thread_id
