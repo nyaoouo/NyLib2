@@ -12,11 +12,10 @@ Behaviour
 ---------
 1. Locate ``nylib.winutils.python_loader``'s on-disk directory.
 2. If ``python_loader.dll`` is missing, build it via
-   :func:`nylib.winutils.python_loader.build_loader`. That requires MSVC
-   on the build machine; the build is performed at *freeze* time only.
-   If the build fails the hook logs the error and continues without the
-   DLL - the frozen app can still call ``build_loader`` at runtime if a
-   compiler happens to be available.
+   :func:`nylib.winutils.python_loader.build_loader`, at *freeze* time and
+   only when MSVC is already installed; otherwise the hook warns and
+   continues without the DLL. If the build fails the hook logs the error
+   and continues without the DLL.
 3. Add the DLL and the ``.cpp`` source as data files under
    ``nylib/winutils/python_loader/`` inside the bundle so the package's
    ``__file__``-relative lookups keep working.
@@ -37,6 +36,14 @@ binaries: list[tuple[str, str]] = []
 hiddenimports: list[str] = []
 
 
+def _msvc_installed() -> bool:
+    try:
+        from nylib.winutils.msvc import msvc14_find_vc2017
+        return msvc14_find_vc2017()[1] is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _collect() -> None:
     try:
         init_py = pathlib.Path(get_module_file_attribute('nylib.winutils.python_loader'))
@@ -54,7 +61,14 @@ def _collect() -> None:
         datas.append((str(cpp), dest))
 
     dll = pkg_dir / 'python_loader.dll'
-    if not dll.is_file():
+    if not dll.is_file() and not _msvc_installed():
+        logger.warning(
+            'hook-nylib.winutils.python_loader: %s is missing and MSVC is not installed; '
+            'not building it (prebuild it with nylib.winutils.python_loader.build_loader()); '
+            'a frozen app that injects Python fails',
+            dll,
+        )
+    elif not dll.is_file():
         try:
             from nylib.winutils.python_loader import build_loader
 
