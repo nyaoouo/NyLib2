@@ -25,6 +25,7 @@ _GLOBAL_KEYS = {
 }
 _OFFSET_KEY_RE = re.compile(r'[A-Za-z_]\w*(\.[A-Za-z_]\w*)+')
 _BARE_KEY_RE = re.compile(r'[A-Za-z0-9_-]+')
+_UNKNOWN_OFFSET = '[offsets] unknown key '
 _HINT_LINE = '# found by this probe; check it before pinning (a pin applies to every build of this exe)'
 
 
@@ -149,6 +150,8 @@ def _flatten_offsets(table, prefix, out, p):
 
 
 def _parse_offsets(table, p):
+    from .engine.offsets import PINNABLE_KEYS
+
     flat = {}
     _flatten_offsets(table, '', flat, p)
     out = {}
@@ -158,6 +161,9 @@ def _parse_offsets(table, p):
         if not _is_int(v) or not (0 <= v < 2 ** 31):
             raise ProfileError(p, f'[offsets] {k} must be an int in range 0x0 <= x < 0x80000000')
         out[k] = v
+    for k in out:
+        if k not in PINNABLE_KEYS:
+            raise ProfileError(p, f'{_UNKNOWN_OFFSET}{k!r}')
     return out
 
 
@@ -234,6 +240,16 @@ def load_profile(path) -> Profile:
     return parse_profile(text, path)
 
 
+def _raw_match_exe(path) -> str | None:
+    """The `[match] exe` of a TOML file read without validation, or None when it cannot be read."""
+    try:
+        with open(path, 'rb') as f:
+            exe = tomllib.loads(f.read().decode('utf-8-sig')).get('match', {}).get('exe')
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, AttributeError):
+        return None
+    return exe if isinstance(exe, str) else None
+
+
 def find_profiles(out_root, exe: str) -> list:
     if not isinstance(exe, str):
         raise TypeError(f'exe must be str, got {type(exe).__name__}')
@@ -251,6 +267,8 @@ def find_profiles(out_root, exe: str) -> list:
         try:
             prof = load_profile(path)
         except ProfileError as e:
+            if e.reason.startswith(_UNKNOWN_OFFSET) and (raw := _raw_match_exe(path)) is not None and raw.casefold() == target:
+                raise
             logger.warning('skipping profile %s: %s', e.path, e.reason)
             continue
         if prof.exe is not None and prof.exe.casefold() == target:
