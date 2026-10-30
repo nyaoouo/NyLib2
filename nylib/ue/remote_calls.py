@@ -168,8 +168,9 @@ class _CallReader:
 class _Calls:
     """One feature's call memory and the state of its calls, released by the stage-10 rule."""
 
-    def __init__(self, feature: str, transport, timeout):
+    def __init__(self, feature: str, transport, timeout, label: str | None = None):
         self.feature, self.transport, self.timeout = feature, transport, timeout
+        self.label = label or f'--allow-calls {feature}'
         self.arena = None
         self.made = 0  # calls that reached the game, returned or not
         self.keep = None  # why the arena may not be freed
@@ -233,16 +234,17 @@ class _Calls:
             arena.free()
             return
         n = arena.leak()
-        logger.warning('--allow-calls %s: %#x bytes of call memory stay in the game: %s', self.feature, n, keep)
+        logger.warning('%s: %#x bytes of call memory stay in the game: %s', self.label, n, keep)
 
 
-def _finish(feature: str, ran: bool, ok: bool, detail: str, t0: float, c: _Calls | None = None) -> FeatureResult:
+def _finish(feature: str, ran: bool, ok: bool, detail: str, t0: float, c: _Calls | None = None, *, label: str | None = None) -> FeatureResult:
     seconds = time.perf_counter() - t0
+    label = label or (c.label if c is not None else f'--allow-calls {feature}')
     did = c.did() if c is not None else ''
     if did:
-        logger.info('--allow-calls %s: %s: %s', feature, did, detail)
+        logger.info('%s: %s: %s', label, did, detail)
     if not ok:
-        logger.warning('--allow-calls %s: %s', feature, detail)
+        logger.warning('%s: %s', label, detail)
     return FeatureResult(feature, ran, ok, detail, seconds)
 
 
@@ -279,7 +281,8 @@ def _failure(exc, made: int) -> tuple[bool, str]:
     return made > 0, f'{type(exc).__name__}: {exc}'
 
 
-def resolve_text_offsets(e, transport, *, function=None, timeout=calls.DEFAULT_TIMEOUT) -> FeatureResult:
+def resolve_text_offsets(e, transport, *, function=None, timeout=calls.DEFAULT_TIMEOUT, label: str = '--allow-calls text',
+                         raise_refused: bool = False) -> FeatureResult:
     """Off::InSDK::Text::InitTextOffsets @ ea0dab3 from its ProcessEvent call on: sets TextDatOffset and InTextDataStringOffset.
     function: the Conv_StringToText address, or None to find it by name (only on an engine whose name index is warm)."""
     if function is not None:
@@ -287,15 +290,25 @@ def resolve_text_offsets(e, transport, *, function=None, timeout=calls.DEFAULT_T
             raise TypeError(f'function must be None or an int, got {type(function).__name__}')
         if function < 0:
             raise ValueError(f'function must be >= 0, got {function}')
+    if not isinstance(label, str):
+        raise TypeError(f'label must be a str, got {type(label).__name__}')
+    if not label:
+        raise ValueError('label must not be empty')
+    if not isinstance(raise_refused, bool):
+        raise TypeError(f'raise_refused must be a bool, got {type(raise_refused).__name__}')
     _check_timeout(timeout)
     t0 = time.perf_counter()
+
+    def finish(ran, ok, detail, t0, c=None):
+        return _finish('text', ran, ok, detail, t0, c, label=label)
+
     if all(e.provenance.get(k, '').startswith(_KNOWN_LABELS) for k in TEXT_KEYS):
-        logger.info('--allow-calls text: already resolved')
+        logger.info('%s: already resolved', label)
         return FeatureResult('text', False, True, 'already resolved', 0.0)
     pe_index = e.off.InSDK.ProcessEvent.PEIndex
     if pe_index <= 0:
-        return _finish('text', False, False, 'ProcessEvent was not found, so Conv_StringToText cannot be called', t0)
-    c = _Calls('text', transport, timeout)
+        return finish(False, False, 'ProcessEvent was not found, so Conv_StringToText cannot be called', t0)
+    c = _Calls('text', transport, timeout, label)
     try:
         try:
             if function is None:
@@ -303,7 +316,7 @@ def resolve_text_offsets(e, transport, *, function=None, timeout=calls.DEFAULT_T
             else:
                 fn = UEFunction(e, function)
             if (fn_address := fn.get_address()) == 0:
-                return _finish('text', False, False, 'Conv_StringToText was not found', t0)
+                return finish(False, False, 'Conv_StringToText was not found', t0)
             ret = fn.get_return_property()
             inp = None
             for prop in fn.get_properties():
@@ -312,7 +325,7 @@ def resolve_text_offsets(e, transport, *, function=None, timeout=calls.DEFAULT_T
             struct_size = max(fn.get_struct_size(), 1)
             if (ret.get_address() == 0 or inp is None or inp.get_address() == 0 or (ftext_size := ret.get_size()) < 8
                     or not _fits(ret, struct_size, ftext_size) or not _fits(inp, struct_size, inp.get_size())):
-                return _finish('text', False, False, 'Conv_StringToText has an unexpected signature', t0)
+                return finish(False, False, 'Conv_StringToText has an unexpected signature', t0)
             arena = c.open()
             params = arena.alloc(struct_size, align=16)
             arena.write(params + inp.get_offset(), arena.fstring(PROBE_TEXT))
@@ -323,15 +336,15 @@ def resolve_text_offsets(e, transport, *, function=None, timeout=calls.DEFAULT_T
             c.process_event('Conv_StringToText', obj0, fn_address, pe, params)
             raw = arena.read(params + ret.get_offset(), ftext_size)
             if (found := _search_text_offsets(raw, _CallReader(e, transport), ftext_size)) is None:
-                return _finish('text', True, False, 'Conv_StringToText ran, but no TextData pointer holding the probe string was found', t0, c)
+                return finish(True, False, 'Conv_StringToText ran, but no TextData pointer holding the probe string was found', t0, c)
         except CallError as exc:
-            if getattr(exc, 'exited', None):
+            if getattr(exc, 'exited', None) or (raise_refused and getattr(exc, 'refused', None)):
                 raise
             ran, detail = _failure(exc, c.made)
-            return _finish('text', ran, False, detail, t0, c)
+            return finish(ran, False, detail, t0, c)
         except (MemoryReadError, ValueError) as exc:
             ran, detail = _failure(exc, c.made)
-            return _finish('text', ran, False, detail, t0, c)
+            return finish(ran, False, detail, t0, c)
     finally:
         c.release()
     dat, inner = found
@@ -339,7 +352,7 @@ def resolve_text_offsets(e, transport, *, function=None, timeout=calls.DEFAULT_T
     text.TextDatOffset, text.InTextDataStringOffset = dat, inner
     for key in TEXT_KEYS:
         e.provenance[key] = LABEL_TEXT
-    return _finish('text', True, True, f'TextDatOffset {dat:#x}, InTextDataStringOffset {inner:#x}', t0, c)
+    return finish(True, True, f'TextDatOffset {dat:#x}, InTextDataStringOffset {inner:#x}', t0, c)
 
 
 def _fstring_to_string(header: bytes, reader) -> str:

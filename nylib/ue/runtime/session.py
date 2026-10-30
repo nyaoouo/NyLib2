@@ -14,12 +14,13 @@ from ..engine.accessor import view
 from ..engine.context import EngineContext
 from ..engine.unreal import UEClass
 from ..errors import AmbiguousNameError, CallsDisabledError, DetectionError, DumpMismatchError, MemoryReadError, OutputRootError, \
-    ReadOnlySessionError, SessionError, UnverifiedOffsetsError
+    PendingCallsError, ReadOnlySessionError, SessionError, UnverifiedOffsetsError
+from ..exports import EXPORT_SPECS
 from ..memory import ProcessSource, current_process
 from ..model import ClassRecord, EnumRecord, FunctionRecord, StructRecord, hexs, unhex
 from ..snapshot import SCHEMA_MAJOR, Snapshot
 from .accessor import RuntimeAccessor
-from .gamethread import THREAD_QUERY_LIMITED, find_game_thread_id
+from .gamethread import open_game_thread
 from .index import ObjectIndex
 from .invoke import Invoker
 from .names import FNameValue, NameDecoder
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger('nylib.ue.runtime.session')
 _info = logging.getLogger('nylib.ue.runtime')
 _orphaned_callers = []  # Keep an installed hook and its process handle alive if an attach-time call remains pending.
+_orphaned_lock = threading.Lock()  # guards _orphaned_callers; taken before any HookCaller._lock
 
 _SUPER_STEPS = 256
 _TEXT_KEYS = ('Off.InSDK.Text.TextDatOffset', 'Off.InSDK.Text.InTextDataStringOffset')
@@ -48,6 +50,30 @@ def _is_int(x) -> bool:
 
 def _closed_error() -> SessionError:
     return SessionError('the session is closed')
+
+
+def _retry_parked(pid: int) -> None:
+    """Retry closing the parked callers of process `pid`; a close that succeeds also closes the parked target. Never raises."""
+    with _orphaned_lock:
+        for entry in tuple(_orphaned_callers):
+            caller, parked = entry
+            if parked.info.pid != pid:
+                continue
+            trigger = getattr(caller, 'trigger', None)
+            where = f'parked game-thread hook at {trigger if _is_int(trigger) else 0:#x} in process {pid}'
+            try:
+                caller.close()
+            except PendingCallsError as exc:
+                logger.warning('%s stays installed: %s calls pending', where, getattr(exc, 'pending', '?'))
+                continue
+            except Exception as exc:
+                logger.warning('%s could not be removed: %s', where, exc)
+                continue
+            _orphaned_callers.remove(entry)
+            try:
+                parked.close()
+            except Exception as exc:
+                logger.warning('%s was removed, but its target could not be closed: %s', where, exc)
 
 
 def _check_timeout(timeout) -> None:
@@ -266,7 +292,7 @@ def _policy_warning(calls: str) -> None:
         _info.warning('calls=%r: a custom Caller can run code in the target; ensure its thread and lifetime are safe', calls)
 
 
-def _bind_caller(caller: _calls.Caller, engine, opened) -> _calls.Caller:
+def _bind_caller(caller: _calls.Caller, engine, opened, timeout=_calls.DEFAULT_TIMEOUT) -> _calls.Caller:
     index = engine.off.InSDK.ProcessEvent.PEIndex
     needs_address = (isinstance(caller, _calls.HookCaller) and caller.trigger is None or
                      type(caller) not in (_calls.RemoteThreadCaller, _calls.AnyThreadCaller, _calls.ApcCaller, _calls.HookCaller))
@@ -275,23 +301,26 @@ def _bind_caller(caller: _calls.Caller, engine, opened) -> _calls.Caller:
         obj = engine.objects.get_by_index(0).get_address()
         address = _calls.process_event_address(opened.process, engine.mem, obj, index)
     site = _calls.CallSite(opened.process, engine.mem, index, address,
-                           lambda: opened.process.get_thread(find_game_thread_id(opened.process, mem=engine.mem).thread_id),
-                           _calls.DEFAULT_TIMEOUT, opened.info.mode)
+                           lambda: open_game_thread(opened.process, mem=engine.mem, da=0x1FFFFF),
+                           timeout, opened.info.mode)
     caller.bind(site)
     return caller
 
 
-def _text_call(keys, engine, opened, *, function, write, calls, caller, allow_unverified, source, target) -> tuple:
-    """Resolve the FText offsets with one Conv_StringToText call, then gate the keys still unverified; returns (keys, transport)."""
-    transport = text_call = None
+def _text_call(keys, engine, opened, *, function, write, calls, caller, allow_unverified, source, target, timeout) -> tuple:
+    """Resolve the FText offsets with one Conv_StringToText call, then gate the keys still unverified; returns (keys, transport, result).
+    result is the call's FeatureResult, None when no call was attempted; a refused call raises its CallError."""
+    transport = text_call = result = None
     if engine.off.InSDK.ProcessEvent.PEIndex > 0:
-        transport = _bind_caller(caller, engine, opened)
+        transport = _bind_caller(caller, engine, opened, timeout)
         _policy_warning(calls)
-        r = _remote_calls.resolve_text_offsets(engine, transport, function=function)
+        r = _remote_calls.resolve_text_offsets(engine, transport, function=function, timeout=timeout,
+                                               label='attach FText call', raise_refused=True)
         text_call = None if r.ok else r.detail
+        result = None if r.ok and not r.ran else r  # ok without a run: the offsets were already known
     after = tuple(k for k in keys if not (k in _TEXT_KEYS and engine.provenance.get(k, '').startswith(_KNOWN_LABELS)))
     return unverified_gate(after, write=write, allow_unverified=allow_unverified, source=source, target=target, calls=calls,
-                           text_call=text_call), transport
+                           text_call=text_call), transport, result
 
 
 def _check_path_arg(value, name: str) -> str:
@@ -311,6 +340,23 @@ def _check_dump_profile(dump, profile):
     if profile is not None and not isinstance(profile, (str, os.PathLike, profiles.Profile)):
         raise TypeError(f'profile must be None, str, os.PathLike or Profile, got {type(profile).__name__}')
     return dump
+
+
+def _check_dump_exports(exports) -> tuple[str, ...] | None:
+    """None, or the distinct export formats of `exports` in order, by the rules pipeline.dump applies."""
+    if exports is None:
+        return None
+    if not isinstance(exports, (list, tuple)):
+        raise TypeError(f'exports must be a list or tuple, got {type(exports).__name__}')
+    fmts = []
+    for fmt in exports:
+        if not isinstance(fmt, str):
+            raise TypeError(f'export format must be a str, got {type(fmt).__name__}')
+        if fmt not in EXPORT_SPECS and fmt != pipeline.IMAGE_EXPORT:
+            raise ValueError(f'unknown export format {fmt!r}')
+        if fmt not in fmts:
+            fmts.append(fmt)
+    return tuple(fmts)
 
 
 def _check_tail(out, open_target):
@@ -347,7 +393,8 @@ class Unreal:
 
     @classmethod
     def attach(cls, target: int | str, *, dump=None, profile=None, write: bool = False, calls: str | _calls.Caller | None = None,
-               allow_unverified: bool = False, out=None, _open_target=None) -> 'Unreal':
+               allow_unverified: bool = False, out=None, call_timeout: float | None = _calls.DEFAULT_TIMEOUT,
+               dump_exports: list[str] | tuple[str, ...] | None = None, _open_target=None) -> 'Unreal':
         """Attach to a running game from outside (external) or to a capture through `_open_target`."""
         if target is None:
             raise TypeError('Unreal.attach needs a target; inside the game use Unreal.attach_current()')
@@ -356,6 +403,8 @@ class Unreal:
         if target == '':
             raise ValueError('target must not be empty')
         dump = _check_dump_profile(dump, profile)
+        exports = _check_dump_exports(dump_exports)
+        _check_timeout(call_timeout)
         caller = _calls.resolve_caller(calls)
         if isinstance(calls, str) and calls == 'any-thread':
             raise ValueError("calls='any-thread' runs ProcessEvent on the calling thread, which exists only inside the game: "
@@ -364,13 +413,16 @@ class Unreal:
         root = store.resolve_out_root(out)
         return cls._attach(target, root, dump=dump, profile=profile, write=write, calls=caller.policy if caller else None,
                            caller=caller, allow_unverified=allow_unverified,
-                           open_target=_open_target)
+                           call_timeout=call_timeout, dump_exports=exports, open_target=_open_target)
 
     @classmethod
     def attach_current(cls, *, dump=None, profile=None, write: bool = False, calls: str | _calls.Caller | None = None,
-                       allow_unverified: bool = False, out=None, _open_target=None) -> 'Unreal':
+                       allow_unverified: bool = False, out=None, call_timeout: float | None = _calls.DEFAULT_TIMEOUT,
+                       dump_exports: list[str] | tuple[str, ...] | None = None, _open_target=None) -> 'Unreal':
         """Attach to the game this code runs inside (injected)."""
         dump = _check_dump_profile(dump, profile)
+        exports = _check_dump_exports(dump_exports)
+        _check_timeout(call_timeout)
         caller = _calls.resolve_caller(calls)
         if isinstance(calls, str) and calls == 'remote-thread':
             raise ValueError("calls='remote-thread' starts a thread in another process; inside the game use calls='any-thread'")
@@ -384,13 +436,14 @@ class Unreal:
                 root = None
         return cls._attach(None, root, dump=dump, profile=profile, write=write, calls=caller.policy if caller else None,
                            caller=caller, allow_unverified=allow_unverified,
-                           open_target=_open_target)
+                           call_timeout=call_timeout, dump_exports=exports, open_target=_open_target)
 
     @classmethod
-    def _attach(cls, target, root, *, dump, profile, write, calls, caller, allow_unverified, open_target) -> 'Unreal':
+    def _attach(cls, target, root, *, dump, profile, write, calls, caller, allow_unverified, call_timeout, dump_exports, open_target) -> 'Unreal':
         write = bool(write)
         snap = opened = None
         dumped = False
+        attach_call = None
         try:
             if isinstance(caller, _calls.HookCaller):
                 _calls.check_hook_dependencies()  # before the target is opened and probed
@@ -401,9 +454,12 @@ class Unreal:
             opened = (open_target or pipeline.open_target)(target, write=write,
                                                             remote_calls=(calls is not None and target is not None), cache_bytes=None)
             info = opened.info
+            if calls is not None:
+                _retry_parked(info.pid)
             ctx = None
             if dump is not None:
-                snap, ectx, dumped, attempt = cls._snapshot_engine(target, root, dump, snap, profile, opened, write, calls, allow_unverified)
+                snap, ectx, dumped, attempt = cls._snapshot_engine(target, root, dump, snap, profile, opened, write, calls, allow_unverified,
+                                                                       dump_exports)
                 keys = tuple(ectx.unverified())
                 if not dumped:
                     attempt = _pre_gate(keys, write=write, calls=calls, allow_unverified=allow_unverified, source='snapshot', target=info.exe)
@@ -412,13 +468,14 @@ class Unreal:
                     ctx.names = NameDecoder(ctx.e, ctx.lock)
                     ctx.index = ObjectIndex(ctx.e, ctx.names.decode, ctx.lock)
                     function = ctx.index.find(_remote_calls.CONV_STRING_TO_TEXT) or 0
-                    unverified, transport = _text_call(keys, ectx.engine, opened, function=function, write=write, calls=calls, caller=caller,
-                                                       allow_unverified=allow_unverified, source='dump' if dumped else 'snapshot',
-                                                       target=info.exe)
+                    unverified, transport, attach_call = _text_call(
+                        keys, ectx.engine, opened, function=function, write=write, calls=calls, caller=caller, allow_unverified=allow_unverified,
+                        source='dump' if dumped else 'snapshot', target=info.exe, timeout=call_timeout)
                 else:
                     unverified, transport = keys, None
             else:
-                ectx, unverified, probe_line, transport = cls._live_engine(opened, profile, root, write, calls, caller, allow_unverified)
+                ectx, unverified, probe_line, transport, attach_call = cls._live_engine(
+                    opened, profile, root, write, calls, caller, allow_unverified, call_timeout)
 
             if calls is not None and ectx.engine.off.InSDK.ProcessEvent.PEIndex <= 0:
                 raise DetectionError('Off::InSDK::ProcessEvent::InitPE',
@@ -429,6 +486,7 @@ class Unreal:
                 ctx = RuntimeContext(ectx.engine, write=write, calls=calls, mode=info.mode)
                 ctx.names = NameDecoder(ctx.e, ctx.lock)
                 ctx.index = ObjectIndex(ctx.e, ctx.names.decode, ctx.lock)
+            ctx.call_timeout = call_timeout
             e, lock, index = ctx.e, ctx.lock, ctx.index
             live = LiveTypeSource(e, index.find, lambda name: next(iter(index.classes_named(name)), None), lock)
             ctx.types = SnapshotTypeSource(snap, live, lock) if snap is not None else live
@@ -437,7 +495,7 @@ class Unreal:
             ctx.factory = ClassFactory(ctx)
 
             if calls is not None:
-                ctx.invoker = Invoker(ctx, transport or _bind_caller(caller, ectx.engine, opened))
+                ctx.invoker = Invoker(ctx, transport or _bind_caller(caller, ectx.engine, opened, call_timeout))
                 if transport is None:  # else _text_call logged it before the attach-time call
                     _policy_warning(calls)
 
@@ -461,7 +519,8 @@ class Unreal:
                     caller.close()
                 except Exception as exc:
                     if opened is not None:
-                        _orphaned_callers.append((caller, opened))
+                        with _orphaned_lock:
+                            _orphaned_callers.append((caller, opened))
                     logger.warning('attach left a pending call in the target; caller resources remain live: %s', exc)
                     opened = None
             if snap is not None:
@@ -477,10 +536,11 @@ class Unreal:
         self.snapshot = os.path.abspath(snap.path) if snap is not None else None
         self.write, self.calls = write, calls
         self.unverified = tuple(unverified)
+        self.attach_call = attach_call
         return self
 
     @staticmethod
-    def _snapshot_engine(target, root, dump, snap, profile, opened, write, calls, allow_unverified):
+    def _snapshot_engine(target, root, dump, snap, profile, opened, write, calls, allow_unverified, dump_exports=None):
         info = opened.info
         exe, ts, size = info.exe, info.pe_timestamp, info.size_of_image
         out_part = f' --out {root}' if root is not None else ''
@@ -504,7 +564,8 @@ class Unreal:
             else:
                 _info.info('no snapshot for build %s; running the dumper (%s)', hexs(ts), info.mode)
                 shared = pipeline.OpenedTarget(opened.source, opened.info, opened.process, opened.check_alive, None)
-                res = pipeline.dump(target, profile=profile, out=root, _open_target=lambda *a, **k: shared)
+                options = {} if dump_exports is None else {'exports': dump_exports}
+                res = pipeline.dump(target, profile=profile, out=root, **options, _open_target=lambda *a, **k: shared)
                 attempt = _pre_gate(res.unverified, write=write, calls=calls, allow_unverified=allow_unverified, source='dump', target=exe)
                 snap = loaded = Snapshot.load(res.path)
                 _warn_degraded_quality(res.quality, res.path)
@@ -537,7 +598,7 @@ class Unreal:
         return snap, ectx, dumped, attempt
 
     @staticmethod
-    def _live_engine(opened, profile, root, write, calls, caller, allow_unverified):
+    def _live_engine(opened, profile, root, write, calls, caller, allow_unverified, call_timeout):
         report = pipeline.probe_opened(opened, profile=profile, out_root=root)
         if not report.ok:
             raise report.error
@@ -548,11 +609,11 @@ class Unreal:
                                                   f'dump the game instead')
         exe = opened.info.exe
         if _pre_gate(report.unverified, write=write, calls=calls, allow_unverified=allow_unverified, source='probe', target=exe):
-            unverified, transport = _text_call(report.unverified, report.context.engine, opened, function=None, write=write, calls=calls,
-                                               caller=caller,
-                                               allow_unverified=allow_unverified, source='probe', target=exe)
+            unverified, transport, attach_call = _text_call(
+                report.unverified, report.context.engine, opened, function=None, write=write, calls=calls, caller=caller,
+                allow_unverified=allow_unverified, source='probe', target=exe, timeout=call_timeout)
         else:
-            unverified, transport = tuple(report.unverified), None
+            unverified, transport, attach_call = tuple(report.unverified), None, None
         ectx = EngineContext.from_snapshot(meta, report.context.to_offsets(), opened.source.fresh)
         g = meta['globals']
         used = report.profile or ('<string>' if report.profile_note == 'explicit' else 'none')
@@ -560,7 +621,7 @@ class Unreal:
                       f'({report.seconds:.1f}s) · profile {used}')
         del report, meta
         opened.source.refresh()
-        return ectx, unverified, probe_line, transport
+        return ectx, unverified, probe_line, transport, attach_call
 
     @staticmethod
     def injected() -> bool:
@@ -614,6 +675,29 @@ class Unreal:
             raise TypeError(f'path must be a str, got {type(path).__name__}')
         a = ctx.index.find(path)
         return ctx.proxy(a) if a is not None else None
+
+    def object_at(self, address: int) -> UObjectProxy | None:
+        """The object GObjects lists at `address`, typed by its runtime class, or None.
+
+        None for an unreadable, unlisted or freed address; a MemoryReadError reading GObjects itself propagates."""
+        ctx = self._live()
+        if not _is_int(address):
+            raise TypeError(f'address must be an int, got {type(address).__name__}')
+        if not 0 <= address <= 0xFFFF_FFFF_FFFF_FFFF:
+            raise ValueError(f'address must be in 0..0xFFFFFFFFFFFFFFFF, got {address:#x}')
+        if address == 0:
+            return None
+        e = ctx.e
+        try:
+            i = e.mem.i32(address + e.off.UObject.Index)
+        except MemoryReadError:
+            return None
+        if not 0 <= i < e.objects.num() or e.objects.get_by_index(i).get_address() != address:
+            return None
+        try:
+            return ctx.proxy(address)
+        except MemoryReadError:
+            return None
 
     def find_class(self, name: str) -> UObjectProxy | None:
         ctx = self._live()
@@ -682,13 +766,19 @@ class Unreal:
         return player._get_('PlayerController')
 
     def game_thread(self) -> 'Thread':
-        """Open and return the target's game thread (see find_game_thread_id); the caller owns it: close it or use `with`.
+        """Open and return the target's game thread (see open_game_thread); the caller owns it: close it or use `with`.
 
-        Raises SessionError on a closed or capture session, DetectionError when no thread qualifies."""
+        Raises SessionError on a closed or capture session, DetectionError when no thread qualifies or it cannot be opened."""
         ctx = self._live()
         if (process := self._opened.process) is None:
             raise SessionError('this session has no live process')
-        return process.get_thread(find_game_thread_id(process, mem=ctx.e.mem).thread_id, da=THREAD_QUERY_LIMITED)
+        return open_game_thread(process, mem=ctx.e.mem)
+
+    @property
+    def pending_calls(self) -> int:
+        """Game-thread calls that keep close() from finishing (the caller's `pending`); 0 without calls or once closed."""
+        ctx = self._ctx
+        return 0 if ctx.closed or ctx.invoker is None else ctx.invoker.transport.pending
 
     def enum(self, path: str) -> type[enum.IntEnum] | None:
         return self._live().enum_class(path)
