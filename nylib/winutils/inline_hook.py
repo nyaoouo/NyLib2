@@ -24,7 +24,7 @@ def read_code(p: 'Process', a, min_size=1, min_line=0, cs=None) -> tuple[list[ca
     while proceed < min_size or len(ret) < min_line:
         if (i := next(disasm, None)) is None:
             disasm = cs.disasm(p.read(a + proceed, 0x100), a + proceed)
-            continue
+            if (i := next(disasm, None)) is None: raise ValueError(f'cannot decode the instruction at {a + proceed:#x}')
         if not out_of_code:
             if i.mnemonic == 'int3':
                 out_of_code = True
@@ -46,16 +46,20 @@ def create_inline_hook(p: 'Process', a, hook_bytes, entrance_offset=0, skip_orig
         code_start = alloc + entrance_offset
         jump_code = b'\xff\x25\x00\x00\x00\x00' + struct.pack('<Q', code_start)  # jmp qword ptr [rip];dq alloc
 
-    orig_codes, orig_size = read_code(p, a, min_size=len(jump_code), min_line=skip_original)
-    if (pad := orig_size - len(jump_code)) > 0: jump_code += b'\x90' * pad
+    try:
+        orig_codes, orig_size = read_code(p, a, min_size=len(jump_code), min_line=skip_original)
+        if (pad := orig_size - len(jump_code)) > 0: jump_code += b'\x90' * pad
 
-    return_at = a + len(jump_code)
-    hook_bytes_ = hook_bytes
-    for i in orig_codes[skip_original:]:
-        # todo: rebuild relative address
-        hook_bytes_ += i.bytes
-    hook_bytes_ += b'\xff\x25\x00\x00\x00\x00' + struct.pack('<Q', return_at)  # jmp qword ptr [rip];dq return_at
-    p.write(alloc, b'\0' * entrance_offset + hook_bytes_)
+        return_at = a + len(jump_code)
+        hook_bytes_ = hook_bytes
+        for i in orig_codes[skip_original:]:
+            # todo: rebuild relative address
+            hook_bytes_ += i.bytes
+        hook_bytes_ += b'\xff\x25\x00\x00\x00\x00' + struct.pack('<Q', return_at)  # jmp qword ptr [rip];dq return_at
+        p.write(alloc, b'\0' * entrance_offset + hook_bytes_)
+    except BaseException:
+        p.free(alloc)
+        raise
     return alloc, jump_code, b''.join(i.bytes for i in orig_codes)
 
 
