@@ -453,6 +453,11 @@ class Caller(abc.ABC):
             raise ValueError(_NO_PROCESS)
         self._site = site
 
+    @property
+    def pending(self) -> int:
+        """Calls that keep close() from finishing; 0 for a caller that tracks none."""
+        return 0
+
     @abc.abstractmethod
     def arena(self) -> CallArena: ...
 
@@ -600,10 +605,24 @@ class HookCaller(Caller):
             self.close()
             raise
 
+    @property
+    def pending(self) -> int:
+        with self._lock:
+            return sum(1 for ticket in self._tickets if not ticket.done)
+
     def arena(self) -> CallArena:
         if self.closed:
             raise _closed_error()
         return CallArena(self.process)
+
+    def _sweep_done_tickets(self) -> None:
+        for ticket in tuple(self._tickets):
+            if ticket.done:
+                self._tickets.remove(ticket)
+                try:
+                    ticket.close()
+                except (OSError, RuntimeError):  # a ticket the dead target failed keeps its error; its slot is gone with the target
+                    pass
 
     def _get_queue(self):
         if self._broken:
@@ -645,6 +664,7 @@ class HookCaller(Caller):
                 raise _call_error(f'the hook refused the trigger prologue: {exc}{self._jump_hint()}', refused='prologue', state='not started') from exc
             except (ValueError, OSError, BufferError, RuntimeError) as exc:
                 raise _call_error(f'the hook could not install: {exc}', state='not started') from exc
+            self._sweep_done_tickets()
             try:
                 ticket = queue.submit(function, *args)
             except (ValueError, OSError, BufferError, RuntimeError) as exc:

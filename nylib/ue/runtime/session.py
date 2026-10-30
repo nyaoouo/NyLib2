@@ -737,6 +737,12 @@ class Unreal:
             raise SessionError('this session has no live process')
         return open_game_thread(process, mem=ctx.e.mem)
 
+    @property
+    def pending_calls(self) -> int:
+        """Game-thread calls that keep close() from finishing (the caller's `pending`); 0 without calls or once closed."""
+        ctx = self._ctx
+        return 0 if ctx.closed or ctx.invoker is None else ctx.invoker.transport.pending
+
     def enum(self, path: str) -> type[enum.IntEnum] | None:
         return self._live().enum_class(path)
 
