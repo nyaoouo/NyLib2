@@ -36,8 +36,8 @@ _orphaned_callers = []  # Keep an installed hook and its process handle alive if
 
 _SUPER_STEPS = 256
 _TEXT_KEYS = ('Off.InSDK.Text.TextDatOffset', 'Off.InSDK.Text.InTextDataStringOffset')
-CALL_EXEMPT = ('Off.InSDK.Text.TextDatOffset', 'Off.InSDK.Text.InTextDataStringOffset',
-               'Settings.Generator.GameName', 'Settings.Generator.GameVersion')
+WRITE_EXEMPT = ('Settings.Generator.GameName', 'Settings.Generator.GameVersion')  # they only name the output folder
+CALL_EXEMPT = _TEXT_KEYS + WRITE_EXEMPT
 _KNOWN_LABELS = ('auto:', 'profile:')
 _PYTHON_EXE_RE = re.compile(r'pythonw?[0-9.]*\.exe', re.IGNORECASE)
 
@@ -194,7 +194,7 @@ def unverified_gate(keys: Iterable[str], *, write: bool, allow_unverified: bool,
     if not all(isinstance(k, str) for k in all_keys):
         raise TypeError('keys must be an iterable of str')
     if write:
-        gating = all_keys
+        gating = tuple(k for k in all_keys if k not in WRITE_EXEMPT)
     elif calls is not None:
         gating = tuple(k for k in all_keys if k not in CALL_EXEMPT)
     else:
