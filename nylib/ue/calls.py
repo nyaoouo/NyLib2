@@ -546,6 +546,11 @@ class HookCaller(Caller):
     def bind(self, site: CallSite) -> None:
         Caller.bind(self, site)
         try:
+            try:
+                from ..winutils import inline_call  # noqa: F401
+            except ImportError as exc:
+                raise _call_error(f"calls='game-thread' needs keystone-engine and capstone ({exc}); install them beforehand (pip install \".[asm]\"), "
+                                  'since nylib installs them on first use only while PYTHON_PIP_ALL_REQ_INSTALLED is unset', refused='dependencies', state='not started') from exc
             if self.thread_id is None:
                 with site.find_game_thread() as thread:
                     self.thread_id = thread.thread_id
