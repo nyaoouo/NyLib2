@@ -1,8 +1,11 @@
 """Game-thread finder: the thread named 'GameThread', else the process's earliest-created thread."""
 import logging
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 from ..errors import DetectionError
+
+if TYPE_CHECKING:
+    from ...process.thread import Thread
 
 logger = logging.getLogger('nylib.ue.runtime.gamethread')
 
@@ -44,3 +47,18 @@ def find_game_thread_id(process, *, mem=None) -> GameThreadId:
     if first is None:
         raise DetectionError('game thread', f'no queryable thread in process {process.process_id}')
     return GameThreadId(first, 'earliest')
+
+
+def open_game_thread(process, *, mem=None, da: int = THREAD_QUERY_LIMITED) -> 'Thread':
+    """Open the thread find_game_thread_id names; the caller owns it.
+
+    Raises DetectionError when no thread qualifies, the thread exited before the open, or the open is refused."""
+    tid = find_game_thread_id(process, mem=mem).thread_id
+    try:
+        return process.get_thread(tid, da=da)
+    except ValueError as exc:
+        raise DetectionError('game thread', f'thread {tid} of process {process.process_id} exited before it could be opened: {exc}') from exc
+    except OSError as exc:
+        if getattr(exc, 'winerror', None) == 87:  # ERROR_INVALID_PARAMETER: no such thread
+            raise DetectionError('game thread', f'thread {tid} of process {process.process_id} exited before it could be opened: {exc}') from exc
+        raise DetectionError('game thread', f'cannot open thread {tid} of process {process.process_id} with access {da:#x}: {exc}') from exc

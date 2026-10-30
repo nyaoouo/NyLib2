@@ -19,7 +19,7 @@ from ..memory import ProcessSource, current_process
 from ..model import ClassRecord, EnumRecord, FunctionRecord, StructRecord, hexs, unhex
 from ..snapshot import SCHEMA_MAJOR, Snapshot
 from .accessor import RuntimeAccessor
-from .gamethread import THREAD_QUERY_LIMITED, find_game_thread_id
+from .gamethread import open_game_thread
 from .index import ObjectIndex
 from .invoke import Invoker
 from .names import FNameValue, NameDecoder
@@ -275,7 +275,7 @@ def _bind_caller(caller: _calls.Caller, engine, opened) -> _calls.Caller:
         obj = engine.objects.get_by_index(0).get_address()
         address = _calls.process_event_address(opened.process, engine.mem, obj, index)
     site = _calls.CallSite(opened.process, engine.mem, index, address,
-                           lambda: opened.process.get_thread(find_game_thread_id(opened.process, mem=engine.mem).thread_id),
+                           lambda: open_game_thread(opened.process, mem=engine.mem, da=0x1FFFFF),
                            _calls.DEFAULT_TIMEOUT, opened.info.mode)
     caller.bind(site)
     return caller
@@ -682,13 +682,13 @@ class Unreal:
         return player._get_('PlayerController')
 
     def game_thread(self) -> 'Thread':
-        """Open and return the target's game thread (see find_game_thread_id); the caller owns it: close it or use `with`.
+        """Open and return the target's game thread (see open_game_thread); the caller owns it: close it or use `with`.
 
-        Raises SessionError on a closed or capture session, DetectionError when no thread qualifies."""
+        Raises SessionError on a closed or capture session, DetectionError when no thread qualifies or it cannot be opened."""
         ctx = self._live()
         if (process := self._opened.process) is None:
             raise SessionError('this session has no live process')
-        return process.get_thread(find_game_thread_id(process, mem=ctx.e.mem).thread_id, da=THREAD_QUERY_LIMITED)
+        return open_game_thread(process, mem=ctx.e.mem)
 
     def enum(self, path: str) -> type[enum.IntEnum] | None:
         return self._live().enum_class(path)
