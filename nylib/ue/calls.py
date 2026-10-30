@@ -608,8 +608,15 @@ class HookCaller(Caller):
 
     @property
     def pending(self) -> int:
+        """Calls that keep close() from finishing; 0 once the target process is gone."""
         with self._lock:
-            return sum(1 for ticket in self._tickets if not ticket.done)
+            count = sum(1 for ticket in self._tickets if not ticket.done)
+            if count:
+                try:
+                    return count if self.process.still_alive() else 0
+                except OSError:
+                    return 0
+            return 0
 
     def arena(self) -> CallArena:
         if self.closed:
