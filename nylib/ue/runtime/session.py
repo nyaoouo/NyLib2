@@ -59,11 +59,12 @@ def _retry_parked(pid: int) -> None:
             caller, parked = entry
             if parked.info.pid != pid:
                 continue
-            where = f'parked game-thread hook at {getattr(caller, "trigger", None) or 0:#x} in process {pid}'
+            trigger = getattr(caller, 'trigger', None)
+            where = f'parked game-thread hook at {trigger if _is_int(trigger) else 0:#x} in process {pid}'
             try:
                 caller.close()
             except PendingCallsError as exc:
-                logger.warning('%s stays installed: %s calls pending', where, exc.pending)
+                logger.warning('%s stays installed: %s calls pending', where, getattr(exc, 'pending', '?'))
                 continue
             except Exception as exc:
                 logger.warning('%s could not be removed: %s', where, exc)

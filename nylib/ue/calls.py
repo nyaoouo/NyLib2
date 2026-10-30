@@ -742,7 +742,7 @@ def _close_hooks_at_exit() -> None:
                 finally:
                     caller._lock.release()
             except PendingCallsError as exc:
-                logger.warning('at exit: %s stays installed: %s calls pending', _hook_where(caller), exc.pending)
+                logger.warning('at exit: %s stays installed: %s calls pending', _hook_where(caller), getattr(exc, 'pending', '?'))
             except Exception as exc:
                 logger.warning('at exit: %s could not be removed: %s', _hook_where(caller), exc)
     except Exception:
