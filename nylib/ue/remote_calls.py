@@ -281,7 +281,8 @@ def _failure(exc, made: int) -> tuple[bool, str]:
     return made > 0, f'{type(exc).__name__}: {exc}'
 
 
-def resolve_text_offsets(e, transport, *, function=None, timeout=calls.DEFAULT_TIMEOUT, label: str = '--allow-calls text') -> FeatureResult:
+def resolve_text_offsets(e, transport, *, function=None, timeout=calls.DEFAULT_TIMEOUT, label: str = '--allow-calls text',
+                         raise_refused: bool = False) -> FeatureResult:
     """Off::InSDK::Text::InitTextOffsets @ ea0dab3 from its ProcessEvent call on: sets TextDatOffset and InTextDataStringOffset.
     function: the Conv_StringToText address, or None to find it by name (only on an engine whose name index is warm)."""
     if function is not None:
@@ -293,6 +294,8 @@ def resolve_text_offsets(e, transport, *, function=None, timeout=calls.DEFAULT_T
         raise TypeError(f'label must be a str, got {type(label).__name__}')
     if not label:
         raise ValueError('label must not be empty')
+    if not isinstance(raise_refused, bool):
+        raise TypeError(f'raise_refused must be a bool, got {type(raise_refused).__name__}')
     _check_timeout(timeout)
     t0 = time.perf_counter()
 
@@ -335,7 +338,7 @@ def resolve_text_offsets(e, transport, *, function=None, timeout=calls.DEFAULT_T
             if (found := _search_text_offsets(raw, _CallReader(e, transport), ftext_size)) is None:
                 return finish(True, False, 'Conv_StringToText ran, but no TextData pointer holding the probe string was found', t0, c)
         except CallError as exc:
-            if getattr(exc, 'exited', None):
+            if getattr(exc, 'exited', None) or (raise_refused and getattr(exc, 'refused', None)):
                 raise
             ran, detail = _failure(exc, c.made)
             return finish(ran, False, detail, t0, c)

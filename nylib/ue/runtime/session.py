@@ -283,17 +283,19 @@ def _bind_caller(caller: _calls.Caller, engine, opened, timeout=_calls.DEFAULT_T
 
 
 def _text_call(keys, engine, opened, *, function, write, calls, caller, allow_unverified, source, target, timeout) -> tuple:
-    """Resolve the FText offsets with one Conv_StringToText call, then gate the keys still unverified; returns (keys, transport)."""
-    transport = text_call = None
+    """Resolve the FText offsets with one Conv_StringToText call, then gate the keys still unverified; returns (keys, transport, result).
+    result is the call's FeatureResult, None when no call was attempted; a refused call raises its CallError."""
+    transport = text_call = result = None
     if engine.off.InSDK.ProcessEvent.PEIndex > 0:
         transport = _bind_caller(caller, engine, opened, timeout)
         _policy_warning(calls)
         r = _remote_calls.resolve_text_offsets(engine, transport, function=function, timeout=timeout,
-                                               label='attach FText call')
+                                               label='attach FText call', raise_refused=True)
         text_call = None if r.ok else r.detail
+        result = None if r.ok and not r.ran else r  # ok without a run: the offsets were already known
     after = tuple(k for k in keys if not (k in _TEXT_KEYS and engine.provenance.get(k, '').startswith(_KNOWN_LABELS)))
     return unverified_gate(after, write=write, allow_unverified=allow_unverified, source=source, target=target, calls=calls,
-                           text_call=text_call), transport
+                           text_call=text_call), transport, result
 
 
 def _check_path_arg(value, name: str) -> str:
@@ -416,6 +418,7 @@ class Unreal:
         write = bool(write)
         snap = opened = None
         dumped = False
+        attach_call = None
         try:
             if isinstance(caller, _calls.HookCaller):
                 _calls.check_hook_dependencies()  # before the target is opened and probed
@@ -438,14 +441,14 @@ class Unreal:
                     ctx.names = NameDecoder(ctx.e, ctx.lock)
                     ctx.index = ObjectIndex(ctx.e, ctx.names.decode, ctx.lock)
                     function = ctx.index.find(_remote_calls.CONV_STRING_TO_TEXT) or 0
-                    unverified, transport = _text_call(keys, ectx.engine, opened, function=function, write=write, calls=calls, caller=caller,
-                                                       allow_unverified=allow_unverified, source='dump' if dumped else 'snapshot',
-                                                       target=info.exe, timeout=call_timeout)
+                    unverified, transport, attach_call = _text_call(
+                        keys, ectx.engine, opened, function=function, write=write, calls=calls, caller=caller, allow_unverified=allow_unverified,
+                        source='dump' if dumped else 'snapshot', target=info.exe, timeout=call_timeout)
                 else:
                     unverified, transport = keys, None
             else:
-                ectx, unverified, probe_line, transport = cls._live_engine(opened, profile, root, write, calls, caller, allow_unverified,
-                                                                   call_timeout)
+                ectx, unverified, probe_line, transport, attach_call = cls._live_engine(
+                    opened, profile, root, write, calls, caller, allow_unverified, call_timeout)
 
             if calls is not None and ectx.engine.off.InSDK.ProcessEvent.PEIndex <= 0:
                 raise DetectionError('Off::InSDK::ProcessEvent::InitPE',
@@ -505,6 +508,7 @@ class Unreal:
         self.snapshot = os.path.abspath(snap.path) if snap is not None else None
         self.write, self.calls = write, calls
         self.unverified = tuple(unverified)
+        self.attach_call = attach_call
         return self
 
     @staticmethod
@@ -577,11 +581,11 @@ class Unreal:
                                                   f'dump the game instead')
         exe = opened.info.exe
         if _pre_gate(report.unverified, write=write, calls=calls, allow_unverified=allow_unverified, source='probe', target=exe):
-            unverified, transport = _text_call(report.unverified, report.context.engine, opened, function=None, write=write, calls=calls,
-                                               caller=caller,
-                                               allow_unverified=allow_unverified, source='probe', target=exe, timeout=call_timeout)
+            unverified, transport, attach_call = _text_call(
+                report.unverified, report.context.engine, opened, function=None, write=write, calls=calls, caller=caller,
+                allow_unverified=allow_unverified, source='probe', target=exe, timeout=call_timeout)
         else:
-            unverified, transport = tuple(report.unverified), None
+            unverified, transport, attach_call = tuple(report.unverified), None, None
         ectx = EngineContext.from_snapshot(meta, report.context.to_offsets(), opened.source.fresh)
         g = meta['globals']
         used = report.profile or ('<string>' if report.profile_note == 'explicit' else 'none')
@@ -589,7 +593,7 @@ class Unreal:
                       f'({report.seconds:.1f}s) · profile {used}')
         del report, meta
         opened.source.refresh()
-        return ectx, unverified, probe_line, transport
+        return ectx, unverified, probe_line, transport, attach_call
 
     @staticmethod
     def injected() -> bool:
