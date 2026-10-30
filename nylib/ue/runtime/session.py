@@ -288,7 +288,8 @@ def _text_call(keys, engine, opened, *, function, write, calls, caller, allow_un
     if engine.off.InSDK.ProcessEvent.PEIndex > 0:
         transport = _bind_caller(caller, engine, opened, timeout)
         _policy_warning(calls)
-        r = _remote_calls.resolve_text_offsets(engine, transport, function=function, timeout=timeout)
+        r = _remote_calls.resolve_text_offsets(engine, transport, function=function, timeout=timeout,
+                                               label='attach FText call')
         text_call = None if r.ok else r.detail
     after = tuple(k for k in keys if not (k in _TEXT_KEYS and engine.provenance.get(k, '').startswith(_KNOWN_LABELS)))
     return unverified_gate(after, write=write, allow_unverified=allow_unverified, source=source, target=target, calls=calls,
