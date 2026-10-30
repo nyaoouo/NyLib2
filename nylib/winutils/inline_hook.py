@@ -24,7 +24,7 @@ def read_code(p: 'Process', a, min_size=1, min_line=0, cs=None) -> tuple[list[ca
     while proceed < min_size or len(ret) < min_line:
         if (i := next(disasm, None)) is None:
             disasm = cs.disasm(p.read(a + proceed, 0x100), a + proceed)
-            continue
+            if (i := next(disasm, None)) is None: raise ValueError(f'cannot decode the instruction at {a + proceed:#x}')
         if not out_of_code:
             if i.mnemonic == 'int3':
                 out_of_code = True
