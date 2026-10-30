@@ -133,6 +133,12 @@ state.goto_hex(0x400000)      # navigate hex pane
 
 Interactive memory viewer with disassembly (Capstone-powered), hex pane, module list, breakpoint manager, pattern scanner, and Python console. Must call `render_debug_view(state)` inside a window with `ImGuiWindowFlags_MenuBar`. Panels shown via `show_module_panel`, `show_bp_panel`, `show_address_resolver`, `show_pinned_panel`, `show_history_panel`, `show_pattern_scan`, `show_dump_module`, `show_python_console`. Set `address_fmt` to `AddressFormat.HEX` or `AddressFormat.MODULE_OFFSET`. `mem_fmt` is a `MemFormat` with `cell` (U8, U16, U32, U64) and `radix` ("hex" or "dec"). Call `state.close()` to stop the background worker thread.
 
+`nylib.imguiutils` loads `DebugViewState` and `render_debug_view` lazily on first access, so `from nylib.imguiutils import *` does not give them (nor `debug_view`). A frozen app that uses the debug view must import `nylib.imguiutils.debug_view` (or the names from it), or PyInstaller does not bundle it:
+
+```python
+from nylib.imguiutils.debug_view import DebugViewState, render_debug_view
+```
+
 ## Notes
 
 - Modal dialogs auto-register with the global `window_manager`; call `window_manager.render()` each frame.

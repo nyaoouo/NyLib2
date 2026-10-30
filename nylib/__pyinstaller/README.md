@@ -27,8 +27,8 @@ at this hooks directory.
 | `hook-nylib.utils.oodle.py`   | `nylib.utils.oodle`              | Collects the bundled `oo2core_9_win64.dll` and `oo2net_9_win64.dll` into `nylib/utils/oodle/` via `collect_dynamic_libs` |
 | `hook-nylib.imguiutils.icons.py` | `nylib.imguiutils.icons`      | Collects the Font Awesome TTFs and pins every icon-set submodule as a hidden import |
 | `hook-nylib.winutils.sign.py` | `nylib.winutils.sign`            | Bundles the cross-certificate store `MSCVStore.p7b` as data                     |
-| `hook-nylib.winutils.breakpoint.py` | `nylib.winutils.breakpoint` | Bundles the backend sources and DLLs (builds a missing DLL at freeze time) and pins the `veh` / `debugger` hidden imports |
-| `hook-nylib.winutils.python_loader.py` | `nylib.winutils.python_loader` | Bundles `python_loader.cpp` and `python_loader.dll` (builds a missing DLL at freeze time) |
+| `hook-nylib.winutils.breakpoint.py` | `nylib.winutils.breakpoint` | Bundles the backend sources and DLLs (builds a missing DLL at freeze time only when MSVC is installed) and pins the `veh` / `debugger` hidden imports |
+| `hook-nylib.winutils.python_loader.py` | `nylib.winutils.python_loader` | Bundles `python_loader.cpp` and `python_loader.dll` (builds a missing DLL at freeze time only when MSVC is installed) |
 
 The pyimgui hooks discover the `*.pyd` files next to the loaded core
 extension whose ABI tag the interpreter being frozen accepts
@@ -52,8 +52,9 @@ them automatically.
 
 Neither of those works inside a PyInstaller bundle: pip's `dist-info`
 metadata is not collected by PyInstaller (so the presence check always
-returns False), and pip's internal commands are not bundled either (so
-the install fallback raises `ModuleNotFoundError`). To prevent crashes,
+returns False), and the install fallback would fail. nylib imports `pip`
+and `ensurepip` only through `importlib`, so its own imports no longer
+bundle them (an app importing `pip` itself still does). To prevent crashes,
 `nylib.utils.pip` detects `sys.frozen` at module-import time and replaces
 `required` with a no-op:
 
@@ -66,6 +67,20 @@ This means **downstream consumers do not need to add a runtime hook** to
 bypass `pip.required` — provided the C-extension packages themselves
 (`capstone`, `keystone-engine`, `pefile`, `setuptools`) are present in
 the build-time venv so PyInstaller can bundle them, freezing Just Works.
+
+## Debug view and native DLLs
+
+`nylib.imguiutils` loads `DebugViewState` and `render_debug_view` on first
+access, through `importlib`, so a freeze does not follow them. A frozen app
+that uses the debug view imports `nylib.imguiutils.debug_view` (or the names
+from it); `from nylib.imguiutils import *` no longer gives these or `debug_view`.
+
+The `breakpoint` and `python_loader` hooks build a missing DLL only when MSVC
+is installed; otherwise they log one WARNING per missing DLL and go on.
+Prebuild before freezing with `nylib.winutils.breakpoint.veh.build_backend()`,
+`nylib.winutils.breakpoint.debugger.build_backend()` and
+`nylib.winutils.python_loader.build_loader()`. A frozen app never builds: a
+missing DLL raises `FileNotFoundError` and `rebuild=` raises `RuntimeError`.
 
 ## Telling PyInstaller about the hooks
 

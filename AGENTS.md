@@ -352,7 +352,9 @@ Higher-level pyimgui widgets that depend on the user having a working
   breakpoint manager, module list, pattern scan, dump, Python console,
   pinned/history nav). Public API:
   `DebugViewState` + `render_debug_view(state)`, called inside a window
-  begun with `ImGuiWindowFlags_MenuBar`.
+  begun with `ImGuiWindowFlags_MenuBar`. `nylib.imguiutils` loads both
+  lazily on first access, so `from nylib.imguiutils import *` does not give
+  them; a frozen app imports them from `nylib.imguiutils.debug_view`.
 
 ### `nylib.mono`
 
@@ -561,6 +563,13 @@ editable):
   sources / DLLs.
 - `hook-nylib.winutils.python_loader.py` - bundles the in-process Python
   loader C source and DLL.
+
+  Both hooks build a missing DLL at freeze time only when MSVC is already
+  installed; otherwise they log one WARNING per missing DLL. Prebuild with
+  `nylib.winutils.breakpoint.veh.build_backend()`,
+  `nylib.winutils.breakpoint.debugger.build_backend()` and
+  `nylib.winutils.python_loader.build_loader()`. A frozen app never builds:
+  a missing DLL raises `FileNotFoundError`, `rebuild=` raises `RuntimeError`.
 - `hook-nylib.utils.oodle.py` - collects the bundled Oodle Data/Network
   DLLs (`oo2core_9_win64.dll`, `oo2net_9_win64.dll`) via
   `collect_dynamic_libs`.
@@ -617,8 +626,10 @@ if os.environ.get('PYTHON_PIP_ALL_REQ_INSTALLED') or getattr(sys, 'frozen', Fals
 
 This is because pip's `dist-info` metadata is not bundled by
 PyInstaller, so the lazy `is_installed` check would always return
-False and try to `pip install` from inside a frozen exe - which then
-fails because `pip._internal` is not bundled either.
+False and try to `pip install` from inside a frozen exe. `nylib.utils.pip`
+imports `pip` and `ensurepip` only through `importlib`, so a freeze of
+nylib's own imports does not bundle them (an app that imports `pip`
+itself does).
 
 The practical consequence: **the build-time venv must already have the
 native packages installed**, so PyInstaller can pick them up. Run
