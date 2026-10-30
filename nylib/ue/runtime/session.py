@@ -179,7 +179,7 @@ class RuntimeContext:
 
 def unverified_gate(keys: Iterable[str], *, write: bool, allow_unverified: bool, source: str = 'probe',
                     target: str = '<exe>', calls: str | None = None, text_call: str | None = None) -> tuple[str, ...]:
-    """D13 ([93] = D: CALL_EXEMPT keys do not gate calls): refuse unverified offsets unless allow_unverified; returns the keys.
+    """D13 ([93] = D: CALL_EXEMPT keys do not gate calls, WRITE_EXEMPT keys do not gate writes): refuse unverified offsets unless allow_unverified; returns the keys.
     text_call: why the attach-time Conv_StringToText call left the FText offsets unresolved, when it was made."""
     if not isinstance(source, str) or not isinstance(target, str):
         raise TypeError('source and target must be str')

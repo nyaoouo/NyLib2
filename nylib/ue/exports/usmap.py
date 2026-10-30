@@ -180,11 +180,10 @@ def write(snapshot, out_dir) -> str:
             struct_buf += _encode_struct(rec, w)
             struct_count += 1
     if w.missing_count:
-        logger.warning('%d propert%s referenced a missing enum or struct (first: %s)',
-                        w.missing_count, 'y' if w.missing_count == 1 else 'ies', w.missing_sample)
+        text = f"{w.missing_count} propert{'y' if w.missing_count == 1 else 'ies'} referenced a missing enum or struct (first: {w.missing_sample})"
+        logger.warning('%s', text)
         if (sink := export_warnings.get()) is not None:
-            sink.append('usmap: %d propert%s referenced a missing enum or struct (first: %s)'
-                        % (w.missing_count, 'y' if w.missing_count == 1 else 'ies', w.missing_sample))
+            sink.append(f'usmap: {text}')
 
     payload_len = 12 + len(w.name_buf) + len(enum_buf) + len(struct_buf)
     header = struct.pack('<HBiBII', _MAGIC, _VERSION, 0, 0, payload_len, payload_len)

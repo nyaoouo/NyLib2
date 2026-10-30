@@ -326,7 +326,7 @@ def _rva_pin(prof, name: str, pin, info: TargetInfo, warnings: list):
         return None
     if pin.rva >= info.size_of_image:
         raise errors.ProfileError(profiles.display_path(prof), f'[globals] {name} rva {pin.rva:#x} lies outside the image '
-                                              f'(SizeOfImage {info.size_of_image:#x})')
+                                                               f'(SizeOfImage {info.size_of_image:#x})')
     return pin.rva
 
 

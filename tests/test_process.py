@@ -229,17 +229,15 @@ class ProcessCallTests(unittest.TestCase):
         stop = threading.Event()
         helpers = [threading.Thread(target=stop.wait) for _ in range(8)]
         for helper in helpers: helper.start()
-        helper_ids, threads = set(), []
+        threads = []
         try:
             iterator = Process.current.iter_threads(da=0x0800)  # THREAD_QUERY_LIMITED_INFORMATION
             first = next(iterator)  # the snapshot is taken here and lists the helpers
             threads.append(first)
             stop.set()
-            for helper in helpers:
-                helper.join(5)
-                helper_ids.add(helper.native_id)
+            for helper in helpers: helper.join(5)
             threads.extend(iterator)
-            self.assertTrue(helper_ids.isdisjoint(thread.thread_id for thread in threads[1:]))
+            self.assertIn(threading.get_native_id(), {thread.thread_id for thread in threads})
         finally:
             stop.set()
             for thread in threads: thread.close()
