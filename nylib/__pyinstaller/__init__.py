@@ -8,17 +8,17 @@ static analysis alone — the ``pyimgui`` core extension installs its
 ``pyimgui.dx9``, ``pyimgui.dx11`` ... etc.
 
 This package exposes the hooks dir to PyInstaller via the standard
-``pyinstaller40`` entry point. If ``nylib`` is installed (``pip install``
-or in editable mode with ``pyproject.toml``), declare the entry point in
-your build config::
+``pyinstaller40`` entry point, which nylib's own ``pyproject.toml`` declares.
+A pip install (regular or ``-e``) writes the dist-info that holds it, so
+PyInstaller finds the hooks by itself.
 
-    [project.entry-points."pyinstaller40"]
-    hook-dirs = "nylib.__pyinstaller:get_hook_dirs"
-
-If ``nylib`` is used in-tree (no installation step), tell PyInstaller about
-the hooks dir on the command line::
+A checkout reached through a ``.pth`` file, ``PYTHONPATH`` or ``sys.path`` has
+no dist-info and counts as in-tree: tell PyInstaller about the hooks dir on the command line
+(or ``hookspath=nylib.__pyinstaller.get_hook_dirs()`` in a spec)::
 
     pyinstaller --additional-hooks-dir <path/to>/nylib/__pyinstaller your_app.py
+
+Without it the freeze succeeds, but the app fails at its first frontend import.
 """
 
 from __future__ import annotations

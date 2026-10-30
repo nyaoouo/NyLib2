@@ -84,7 +84,7 @@ All widgets emit events through a `GroupDelegate` that you register callbacks on
 ## nylib.__pyinstaller
 
 PyInstaller hook package that bundles C extensions (`nylib.pyimgui` and its frontend backends) and ctypes libraries (`keystone`, `capstone`) into frozen bundles.
-Get the hooks directory via the entry point:
+Get the hooks directory:
 
 ```python
 import nylib.__pyinstaller as h
@@ -92,14 +92,10 @@ dirs = h.get_hook_dirs()
 print(dirs[0])
 ```
 
-For installed packages, declare the entry point in `pyproject.toml`:
+An installed nylib needs nothing: a pip install, regular or editable, writes the dist-info that holds the `pyinstaller40` entry point, which nylib's own `pyproject.toml` declares.
+The pyimgui hooks bundle only the frontends of the interpreter being frozen, plus the pure-Python modules such as `esp.py`.
 
-```toml
-[project.entry-points."pyinstaller40"]
-hook-dirs = "nylib.__pyinstaller:get_hook_dirs"
-```
-
-For in-tree usage, pass `--additional-hooks-dir` on the PyInstaller command line:
+A checkout reached through a `.pth` file, `PYTHONPATH` or `sys.path` is in-tree use, although `import nylib` works there. Pass `--additional-hooks-dir` on the PyInstaller command line (or `hookspath=h.get_hook_dirs()` in a spec); without it the freeze succeeds, but the app fails at its first frontend import:
 
 ```python
 # needs: PyInstaller build

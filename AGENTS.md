@@ -541,11 +541,14 @@ exposes them through the standard `pyinstaller40` entry point in
 hook-dirs = "nylib.__pyinstaller:get_hook_dirs"
 ```
 
-What this gives you for free, once `nylib` is `pip install`ed:
+What this gives you for free, once `nylib` is `pip install`ed (regular or
+editable):
 
-- `hook-nylib.pyimgui.py` - bundles every `pyimgui/*.pyd` sibling
-  next to the core `pyimgui.pyd` and registers them as hidden imports
-  (`nylib.pyimgui.dx9` plus the short alias `pyimgui.dx9`, etc.).
+- `hook-nylib.pyimgui.py` - bundles the `pyimgui/*.pyd` siblings of the
+  core `pyimgui.pyd` whose ABI tag the interpreter being frozen accepts,
+  and registers them as hidden imports (`nylib.pyimgui.dx9` plus the short
+  alias `pyimgui.dx9`, etc.). Frontends of other CPython versions are
+  skipped. The pure-Python modules there (`esp.py`) are bundled as data.
 - `hook-pyimgui.py` - same, for top-level `import pyimgui`.
 - `hook-keystone.py` - collects `keystone.dll`.
 - `hook-capstone.py` - collects `capstone.dll` (defensive; usually
@@ -571,8 +574,11 @@ needed. PyInstaller discovers the hooks automatically:
 pyinstaller your_app.py
 ```
 
-**B. `nylib` used in-tree (no install step).** Point PyInstaller at the
-hooks directory yourself:
+**B. `nylib` used in-tree (no install step).** A checkout reached
+through a `.pth` file, `PYTHONPATH` or `sys.path` has no dist-info, so it counts as in-tree even though `import nylib` works. Point PyInstaller
+at the hooks directory yourself (or `hookspath=h.get_hook_dirs()` in a
+spec); without it the freeze succeeds, but the app fails at its first
+frontend import:
 
 ```bash
 pyinstaller --additional-hooks-dir nylib\__pyinstaller your_app.py
@@ -618,23 +624,26 @@ before freezing, or `pip install ".[full]"`.
 
 ### Expected bundle layout
 
-After a successful freeze the bundle should contain:
+After a successful onedir freeze (the PyInstaller 6 default puts everything
+except the exe under `_internal\`) the bundle should contain, with `cp3XX`
+the ABI tag of the interpreter that froze it:
 
 ```
-<bundle>\nylib\pyimgui.cp3XX-win_amd64.pyd
-<bundle>\nylib\pyimgui\dx9.cp3XX-win_amd64.pyd
-<bundle>\nylib\pyimgui\dx10.cp3XX-win_amd64.pyd
-<bundle>\nylib\pyimgui\dx11.cp3XX-win_amd64.pyd
-<bundle>\nylib\pyimgui\dx12.cp3XX-win_amd64.pyd
-<bundle>\nylib\imguiutils\icons\fa\resources\*.ttf
-<bundle>\keystone\keystone.dll
-<bundle>\capstone\lib\capstone.dll
-<bundle>\nylib\utils\oodle\oo2core_9_win64.dll
-<bundle>\nylib\utils\oodle\oo2net_9_win64.dll
+<dist>\<app>\_internal\nylib\pyimgui.cp3XX-win_amd64.pyd
+<dist>\<app>\_internal\nylib\pyimgui\dx9.cp3XX-win_amd64.pyd
+<dist>\<app>\_internal\nylib\pyimgui\dx10.cp3XX-win_amd64.pyd
+<dist>\<app>\_internal\nylib\pyimgui\dx11.cp3XX-win_amd64.pyd
+<dist>\<app>\_internal\nylib\pyimgui\dx12.cp3XX-win_amd64.pyd
+<dist>\<app>\_internal\nylib\pyimgui\esp.py
+<dist>\<app>\_internal\nylib\imguiutils\icons\fa\resources\*.ttf
+<dist>\<app>\_internal\keystone\keystone.dll
+<dist>\<app>\_internal\capstone\lib\capstone.dll
+<dist>\<app>\_internal\nylib\utils\oodle\oo2core_9_win64.dll
+<dist>\<app>\_internal\nylib\utils\oodle\oo2net_9_win64.dll
 ```
 
 Missing frontend `.pyd` files mean the pyimgui hook did not run -
-check that `nylib` is installed (entry-point mode) or that
+check that `nylib` is pip-installed (entry-point mode) or that
 `--additional-hooks-dir` is set (in-tree mode).
 
 ---
