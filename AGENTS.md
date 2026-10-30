@@ -459,6 +459,8 @@ with Unreal.attach('TRIANGLE_STRATEGY-Win64-Shipping.exe', dump=result.path) as 
   gated by `NYLIB_UE_CAPTURES`, `NYLIB_UE_EXES` and `NYLIB_UE_R0_ORACLE` (skipped when unset; a set
   variable naming a missing path fails). Target memory only through `nylib.process` wrappers in
   `nylib/ue/memory.py` - no `nylib.winapi`, no third-party imports (`nylib/ue/tests/test_hygiene.py`).
+  One exception is tracked: `tests/test_ue_hook_caller.py` binds a real `HookCaller` against a
+  child process (needs capstone and keystone; run `.\.venv\Scripts\python.exe -m unittest tests.test_ue_hook_caller`).
 - **WARNING:** `git clean -fdX` / `-fdx` deletes `ue_dumps/`, including captures under
   `ue_dumps/_captures/`.
 

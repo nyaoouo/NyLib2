@@ -579,8 +579,8 @@ def _report_after_calls(report: ProbeReport) -> ProbeReport:
     )
 
 
-def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, allow_calls=None, log_file=None,
-         cache_bytes=None, progress=None, strict: bool = False, _open_target=None) -> DumpResult:
+def _check_exports(exports) -> tuple[str, ...]:
+    """The distinct export formats of `exports`, in order; raises TypeError or ValueError on a bad value."""
     if not isinstance(exports, (list, tuple)):
         raise TypeError(f'exports must be a list or tuple, got {type(exports).__name__}')
     fmts = []
@@ -591,6 +591,12 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, a
             raise ValueError(f'unknown export format {fmt!r}')
         if fmt not in fmts:
             fmts.append(fmt)
+    return tuple(fmts)
+
+
+def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, allow_calls=None, log_file=None,
+         cache_bytes=None, progress=None, strict: bool = False, _open_target=None) -> DumpResult:
+    fmts = list(_check_exports(exports))
     features = remote_calls.parse_features(allow_calls)  # errors before any root or target access
     if log_file is not None and not isinstance(log_file, (str, os.PathLike)):
         raise TypeError(f'log_file must be str, os.PathLike or None, got {type(log_file).__name__}')
