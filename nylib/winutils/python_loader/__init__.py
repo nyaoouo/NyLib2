@@ -115,7 +115,11 @@ def build_loader(dst: str | pathlib.Path = _DEFAULT_DLL, build_dir=None) -> path
 def ensure_loader_dll(path: str | pathlib.Path | None = None, rebuild: bool = False) -> pathlib.Path:
     """Return a path to a buildable loader DLL, building it on demand."""
     path = pathlib.Path(path) if path is not None else _DEFAULT_DLL
+    if rebuild and getattr(sys, 'frozen', False):
+        raise RuntimeError('cannot rebuild the loader DLL in a frozen build')
     if rebuild or not path.exists():
+        if getattr(sys, 'frozen', False):
+            raise FileNotFoundError(f'bundled loader DLL missing: {path}')
         build_loader(path)
     return path
 

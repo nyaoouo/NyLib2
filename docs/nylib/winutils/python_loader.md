@@ -32,6 +32,8 @@ dll = ensure_loader_dll()  # returns path, builds on demand
 dll = ensure_loader_dll(rebuild=True)
 ```
 
+In a frozen app `ensure_loader_dll` never builds: a missing DLL raises `FileNotFoundError` and `rebuild=True` raises `RuntimeError`. Prebuild with `build_loader()` before freezing; the PyInstaller hook builds a missing DLL itself only when MSVC is installed, else it logs a WARNING.
+
 ## Inject and run Python code
 
 Execute code strings or files in the target process; the interpreter is reused across calls by default.

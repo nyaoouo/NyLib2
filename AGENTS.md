@@ -352,7 +352,10 @@ Higher-level pyimgui widgets that depend on the user having a working
   breakpoint manager, module list, pattern scan, dump, Python console,
   pinned/history nav). Public API:
   `DebugViewState` + `render_debug_view(state)`, called inside a window
-  begun with `ImGuiWindowFlags_MenuBar`.
+  begun with `ImGuiWindowFlags_MenuBar`. `nylib.imguiutils` loads both
+  lazily on first access; a star import gives them only once something has
+  loaded the debug view, so import them from `nylib.imguiutils.debug_view`
+  (a frozen app must).
 
 ### `nylib.mono`
 
@@ -561,6 +564,14 @@ editable):
   sources / DLLs.
 - `hook-nylib.winutils.python_loader.py` - bundles the in-process Python
   loader C source and DLL.
+
+  Both hooks build a missing DLL at freeze time only when MSVC is already
+  installed; otherwise they log one WARNING per missing DLL. Prebuild with
+  `nylib.winutils.breakpoint.veh.build_backend()`,
+  `nylib.winutils.breakpoint.debugger.build_backend()` and
+  `nylib.winutils.python_loader.build_loader()`. In a frozen app
+  `ensure_backend_dll()` and `ensure_loader_dll()` never build: a missing DLL
+  raises `FileNotFoundError`, `rebuild=True` raises `RuntimeError`.
 - `hook-nylib.utils.oodle.py` - collects the bundled Oodle Data/Network
   DLLs (`oo2core_9_win64.dll`, `oo2net_9_win64.dll`) via
   `collect_dynamic_libs`.
@@ -617,8 +628,10 @@ if os.environ.get('PYTHON_PIP_ALL_REQ_INSTALLED') or getattr(sys, 'frozen', Fals
 
 This is because pip's `dist-info` metadata is not bundled by
 PyInstaller, so the lazy `is_installed` check would always return
-False and try to `pip install` from inside a frozen exe - which then
-fails because `pip._internal` is not bundled either.
+False and try to `pip install` from inside a frozen exe. nylib imports `pip` and
+`ensurepip` only through `importlib`, which PyInstaller's analysis does not see,
+so freezing an app that imports nylib does not bundle them through nylib (an app
+that imports `pip` itself does).
 
 The practical consequence: **the build-time venv must already have the
 native packages installed**, so PyInstaller can pick them up. Run
