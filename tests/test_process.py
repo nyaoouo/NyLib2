@@ -1,4 +1,5 @@
 import ctypes
+import gc
 import struct
 import subprocess
 import sys
@@ -168,11 +169,17 @@ class ProcessCallTests(unittest.TestCase):
             return result.value
 
         self.call('GetCurrentThreadId')
-        before = count(winapi.GetCurrentProcess()), count(self.process.handle)
-        with patch.object(self.process, 'free', wraps=self.process.free) as free:
-            for _ in range(20): self.assertEqual(self.call('GetCurrentThreadId'), self.thread_id)
-            self.assertEqual(free.call_count, 40)
-        self.assertEqual((count(winapi.GetCurrentProcess()), count(self.process.handle)), before)
+        gc.collect()
+        was_enabled = gc.isenabled()
+        gc.disable()  # on 3.12 a collection in the window frees earlier tests' locks, which own handles
+        try:
+            before = count(winapi.GetCurrentProcess()), count(self.process.handle)
+            with patch.object(self.process, 'free', wraps=self.process.free) as free:
+                for _ in range(20): self.assertEqual(self.call('GetCurrentThreadId'), self.thread_id)
+                self.assertEqual(free.call_count, 40)
+            self.assertEqual((count(winapi.GetCurrentProcess()), count(self.process.handle)), before)
+        finally:
+            if was_enabled: gc.enable()
 
     def test_resume_failure_retains_queued_code(self):
         original_alloc = self.process.alloc
