@@ -344,19 +344,7 @@ def _check_dump_profile(dump, profile):
 
 def _check_dump_exports(exports) -> tuple[str, ...] | None:
     """None, or the distinct export formats of `exports` in order, by the rules pipeline.dump applies."""
-    if exports is None:
-        return None
-    if not isinstance(exports, (list, tuple)):
-        raise TypeError(f'exports must be a list or tuple, got {type(exports).__name__}')
-    fmts = []
-    for fmt in exports:
-        if not isinstance(fmt, str):
-            raise TypeError(f'export format must be a str, got {type(fmt).__name__}')
-        if fmt not in EXPORT_SPECS and fmt != pipeline.IMAGE_EXPORT:
-            raise ValueError(f'unknown export format {fmt!r}')
-        if fmt not in fmts:
-            fmts.append(fmt)
-    return tuple(fmts)
+    return None if exports is None else pipeline._check_exports(exports)
 
 
 def _check_tail(out, open_target):
