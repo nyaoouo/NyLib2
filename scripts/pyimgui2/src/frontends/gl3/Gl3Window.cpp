@@ -187,7 +187,7 @@ START_M_IMGUI_IMPL_GL3_NAMESPACE
 
         ::ShowWindow(this->hwnd, SW_SHOWDEFAULT);
         ::UpdateWindow(this->hwnd);
-        ::SetWindowTextA(this->hwnd, this->title.c_str());
+        SetWindowTextUtf8(this->hwnd, this->title);
 
         this->ctx = ImGui::CreateContext();
         ImGuiIO &io = ImGui::GetIO();
