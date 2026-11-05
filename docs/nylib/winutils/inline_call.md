@@ -67,5 +67,6 @@ with InlineCallQueue(process, trigger_at, thread_id=game_tid) as hook:
 - If no trampoline page is available within 2 GB, `InlineCallQueue` uses a 15-byte absolute jump and needs that much relocatable entry code.
 - Pass `_jmp_support=1` to relocate direct `jmp` and `Jcc` entry instructions; the default still rejects them.
 - Closing the queue (also on leaving `with`) refuses pending tickets: wait for every ticket first.
+- The queue obtains its local and target views through `Process.map_shared`; adapters can provide another shared-memory backend.
 - `ticket.wait` raises `ProcessLookupError` if the target exits before the call completes.
 - The plain hooks without a queue are in [index.md](index.md#inline-hook) (`InlineHook`, `VTableHook`).

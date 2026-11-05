@@ -71,6 +71,8 @@ with InlineCallQueue(process, trigger_at, thread_id=game_tid) as hook:
 <!-- dt:section id="notes-0" hash="d324be19cdd6" -->
 ## 注意
 
+- 队列通过 `Process.map_shared` 获取本地和目标进程视图；适配器可以提供其他共享内存后端。
+
 - 请在 64 位 Python 中使用 64 位目标。原生异常无法穿过生成的分发器进行展开。
 - `capacity` 是 1 到 64 之间的 2 的幂；当有这么多票据尚未释放时，`submit` 会抛出 `BufferError`。
 - 对于热点内联触发点，向 `InlineCallQueue` 传入 `quiescent_patch=True`：它会在安装、移除和代码释放期间挂起目标的其他线程并检查它们的指令指针。

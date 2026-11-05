@@ -72,35 +72,14 @@ class _AtomicWord:
 
 class _SharedQueue:
     def __init__(self, process, capacity):
-        self.process = process
         self.size = (_HEADER_SIZE + capacity * _SLOT_SIZE + 0xFFF) & ~0xFFF
-        self.section = self.local_at = self.remote_at = 0
-        try:
-            self.section = winapi.CreateFileMapping(winapi.INVALID_HANDLE_VALUE, None, 0x04, 0, self.size, None)  # PAGE_READWRITE
-            self.local_at = winapi.MapViewOfFile(self.section, 0x06, 0, 0, self.size)  # FILE_MAP_READ|FILE_MAP_WRITE
-            base = ctypes.c_void_p()
-            size = ctypes.c_size_t(self.size)
-            winapi.NtMapViewOfSection(self.section, process.handle, ctypes.byref(base), 0, 0, None, ctypes.byref(size), 1, 0, 0x04)
-            self.remote_at = base.value
-            winapi.CloseHandle(self.section)
-            self.section = 0
-        except BaseException:
-            self.close()
-            raise
+        self.mapping = process.map_shared(self.size)
+        self.local_at = self.mapping.local_at
+        self.remote_at = self.mapping.remote_at
 
     def close(self):
-        if self.remote_at:
-            try:
-                winapi.NtUnmapViewOfSection(self.process.handle, self.remote_at)
-            except OSError:
-                if self.process.still_alive(): raise
-            self.remote_at = 0
-        if self.local_at:
-            winapi.UnmapViewOfFile(self.local_at)
-            self.local_at = 0
-        if self.section:
-            winapi.CloseHandle(self.section)
-            self.section = 0
+        self.mapping.close()
+        self.local_at = self.remote_at = 0
 
 
 def _dispatcher_code(data_at: int, capacity: int, thread_id=None) -> bytes:

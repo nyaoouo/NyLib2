@@ -28,6 +28,32 @@ class PageGuardError(Exception):
         )
 
 
+class SharedMemoryMapping:
+    def __init__(self, process: 'Process', local_at=0, remote_at=0, close=None):
+        self.process = process
+        self.local_at = local_at
+        self.remote_at = remote_at
+        self._close = close
+        self._closed = False
+
+    def close(self):
+        if self._closed: return
+        if self._close is not None:
+            self._close()
+        else:
+            if self.remote_at:
+                try:
+                    winapi.NtUnmapViewOfSection(self.process.handle, self.remote_at)
+                except OSError:
+                    if self.process.still_alive(): raise
+                self.remote_at = 0
+            if self.local_at:
+                winapi.UnmapViewOfFile(self.local_at)
+                self.local_at = 0
+        self.local_at = self.remote_at = 0
+        self._closed = True
+
+
 class Process:
     current: 'Process'
 
@@ -57,6 +83,36 @@ class Process:
     def virtual_protect(self, address: int, size: int, protect: int):
         winapi.VirtualProtectEx(self.handle, address, size, protect, ctypes.byref(old_prot := ctypes.c_ulong()))
         return old_prot.value
+
+    def duplicate_handle(self, handle: int, *, desired_access=0, inherit=False, options=2) -> int:
+        """Duplicate a calling-process handle into this process."""
+        remote = ctypes.c_void_p()
+        winapi.DuplicateHandle(winapi.GetCurrentProcess(), handle, self.handle,
+                               ctypes.byref(remote), desired_access, inherit, options)
+        return remote.value
+
+    def close_remote_handle(self, handle: int):
+        """Close a handle owned by this process."""
+        winapi.DuplicateHandle(self.handle, handle, None, None, 0, False, 1)  # DUPLICATE_CLOSE_SOURCE
+
+    def map_shared(self, size: int) -> SharedMemoryMapping:
+        """Map a writable page range into this process and the caller."""
+        mapping = SharedMemoryMapping(self)
+        section = 0
+        try:
+            section = winapi.CreateFileMapping(winapi.INVALID_HANDLE_VALUE, None, 0x04, 0, size, None)  # PAGE_READWRITE
+            mapping.local_at = winapi.MapViewOfFile(section, 0x06, 0, 0, size)  # FILE_MAP_READ|FILE_MAP_WRITE
+            base = ctypes.c_void_p()
+            view_size = ctypes.c_size_t(size)
+            winapi.NtMapViewOfSection(section, self.handle, ctypes.byref(base), 0, 0, None,
+                                      ctypes.byref(view_size), 1, 0, 0x04)
+            mapping.remote_at = base.value
+            return mapping
+        except BaseException:
+            mapping.close()
+            raise
+        finally:
+            if section: winapi.CloseHandle(section)
 
     def iter_memory_region(self, start=0, end=None):
         pos = start
@@ -695,18 +751,18 @@ class _APCCall:
             raise ValueError('cannot suspend the calling thread for an APC')
         self.process = process
         self.handle = winapi.CreateEvent(None, True, False, None)
-        self.remote_event = ctypes.c_void_p()
+        self.remote_event = 0
         self.name_space = process.name_space()
         queued = False
         try:
-            winapi.DuplicateHandle(winapi.GetCurrentProcess(), self.handle, process.handle, ctypes.byref(self.remote_event), 0, False, 2)  # DUPLICATE_SAME_ACCESS
+            self.remote_event = process.duplicate_handle(self.handle)
             shell = (
                 b'\x48\x83\xEC\x28' +  # SUB rsp, 0x28
                 b'\x48\xB9' + struct.pack('<Q', params) +  # MOV rcx, params
                 b'\x48\xB8' + struct.pack('<Q', call_address) +  # MOV rax, call_address
                 b'\xFF\xD0' +  # CALL rax
                 b'\x48\x83\xC4\x28' +  # ADD rsp, 0x28
-                b'\x48\xB9' + struct.pack('<Q', self.remote_event.value) +  # MOV rcx, event
+                b'\x48\xB9' + struct.pack('<Q', self.remote_event) +  # MOV rcx, event
                 b'\x48\xB8' + struct.pack('<Q', process.get_proc_address('kernel32.dll', 'SetEvent')) +  # MOV rax, SetEvent
                 b'\xFF\xE0'  # JMP rax; completion must be signaled outside the temporary code
             )
@@ -732,8 +788,8 @@ class _APCCall:
         self.handle = None
         if free_memory:
             try:
-                if self.remote_event.value:
-                    winapi.DuplicateHandle(self.process.handle, self.remote_event, None, None, 0, False, 1)  # DUPLICATE_CLOSE_SOURCE
+                if self.remote_event:
+                    self.process.close_remote_handle(self.remote_event)
             finally:
                 self.name_space.free()
 

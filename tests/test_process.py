@@ -85,16 +85,27 @@ class ProcessCallTests(unittest.TestCase):
 
     def test_raw_call_passes_apc_parameter(self):
         event = winapi.CreateEvent(None, True, False, None)
-        remote_event = ctypes.c_void_p()
+        remote_event = 0
         try:
-            winapi.DuplicateHandle(winapi.GetCurrentProcess(), event, self.process.handle, ctypes.byref(remote_event), 0, False, 2)
+            remote_event = self.process.duplicate_handle(event)
             address = self.process.get_proc_address('kernel32.dll', 'SetEvent')
-            self.process._call(address, remote_event.value, queue_apc_thread=self.thread)
+            self.process._call(address, remote_event, queue_apc_thread=self.thread)
             self.assertEqual(winapi.WaitForSingleObject(event, 0), 0)
         finally:
-            if remote_event.value:
-                winapi.DuplicateHandle(self.process.handle, remote_event, None, None, 0, False, 1)
+            if remote_event:
+                self.process.close_remote_handle(remote_event)
             winapi.CloseHandle(event)
+
+    def test_shared_mapping_updates_target_and_releases_view(self):
+        mapping = self.process.map_shared(4096)
+        try:
+            ctypes.memmove(mapping.local_at, b'SHARED', 6)
+            self.assertEqual(self.process.read(mapping.remote_at, 6), b'SHARED')
+            remote_at = mapping.remote_at
+        finally:
+            mapping.close()
+        mapping.close()
+        self.assertEqual(self.process.virtual_query(remote_at).State, 0x10000)  # MEM_FREE
 
     def test_thread_lookup_and_enumeration(self):
         threads = list(self.process.iter_threads())
