@@ -1486,11 +1486,12 @@ class Texture:
                 layout = self._layout
                 if isinstance(layout, _texture.OrdinaryLayout):
                     idx = self._bulk if layout.sources[mip][0] == _texture.BULK_DATA else self._header
-                    pixels, filled = _texture.assemble_rows(layout, mip, rect, out=out,
-                                                            chunk_start=container.toc.chunk_range(idx)[0],
-                                                            block_size=container.toc.block_size,
-                                                            fetch=self._fetcher(container, counters, idx),
-                                                            checkpoint=self._checkpoint(mip, cancel, 'blocks'), counters=counters)
+                    assemble = _texture.assemble_blocks if layout.pixel_format in _texture.BLOCK_FORMATS else _texture.assemble_rows
+                    pixels, filled = assemble(layout, mip, rect, out=out,
+                                              chunk_start=container.toc.chunk_range(idx)[0],
+                                              block_size=container.toc.block_size,
+                                              fetch=self._fetcher(container, counters, idx),
+                                              checkpoint=self._checkpoint(mip, cancel, 'blocks'), counters=counters)
                 else:
                     pixels, filled = _texture.assemble(layout, mip, rect, missing=missing, out=out,
                                                        fetch=self._fetcher(container, counters, self._bulk),
@@ -1517,7 +1518,7 @@ class Texture:
         return fetch
 
     def _checkpoint(self, mip: int, cancel, unit: str):
-        """checkpoint(k, n) for assemble and assemble_rows: the closed check, then `cancel`; `unit` names what n counts."""
+        """checkpoint(k, n) for assemble, assemble_rows and assemble_blocks: the closed check, then `cancel`; `unit` names what n counts."""
         inst = self._inst
         pkg = self._info.package
 
