@@ -37,6 +37,10 @@ FChunkedFixedUObjectArrayLayouts = (
     FChunkedFixedUObjectArrayLayout(0x18, 0x00, 0x14, 0x10, 0x04),  # MindsEye
 )
 
+NYLIB_CHUNKED_LAYOUTS = (  # not in Dumper-7; ObjectArray.init tries them only after the table above finds nothing
+    FChunkedFixedUObjectArrayLayout(0x08, 0x14, 0x10, 0x00, 0x04),  # PBZ (UE 5.7, Denuvo): MaxChunks, NumChunks, Objects, NumElements, MaxElements
+)
+
 
 def _namespace(name: str, **fields) -> type:
     """A slotted namespace class; a field whose default is a class gets a fresh instance of it."""

@@ -7,6 +7,8 @@ NtSetValueKey = def_win_api(_dll.NtSetValueKey, ctypes.c_ulong, (ctypes.c_void_p
 RtlOpenCurrentUser = def_win_api(_dll.RtlOpenCurrentUser, ctypes.c_ulong, (ctypes.c_ulong, ctypes.c_void_p), error_nt=True)
 NtQuerySystemInformation = def_win_api(_dll.NtQuerySystemInformation, ctypes.c_ulong, (ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p), error_nt=True)
 NtQueryObject = def_win_api(_dll.NtQueryObject, ctypes.c_ulong, (ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p), error_nt=True)
+NtMapViewOfSection = def_win_api(_dll.NtMapViewOfSection, ctypes.c_ulong, (ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t, ctypes.c_size_t, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t), ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong), error_nt=True)
+NtUnmapViewOfSection = def_win_api(_dll.NtUnmapViewOfSection, ctypes.c_ulong, (ctypes.c_void_p, ctypes.c_void_p), error_nt=True)
 RtlGetVersion = def_win_api(_dll.RtlGetVersion, ctypes.c_long, (ctypes.c_void_p,), error_nt=True)
 RtlAddFunctionTable = def_win_api(_dll.RtlAddFunctionTable, ctypes.c_bool, (ctypes.POINTER(RUNTIME_FUNCTION), ctypes.c_ulong, ctypes.c_uint64), error_zero=True)
 RtlDeleteFunctionTable = def_win_api(_dll.RtlDeleteFunctionTable, ctypes.c_bool, (ctypes.POINTER(RUNTIME_FUNCTION),), error_zero=True)

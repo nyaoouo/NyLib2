@@ -77,6 +77,7 @@ exclude = [
     ".ignore*",
     "nylib.ue.tests*",
     "nylib.utils.oodle.tests*",
+    "nylib.utils.imagecodec.tests*",
 ]
 
 # Ship Python type stubs, PyInstaller hooks, and the bundled font resources.
@@ -90,6 +91,7 @@ exclude = [
 "nylib.vmware_wp" = ["py.typed", "README.md"]
 "nylib.ue" = ["py.typed"]
 "nylib.pyimgui" = ["*.pyi", "**/*.pyi"]
+"nylib.imguiutils" = ["*.pyi"]
 "nylib.imguiutils.icons" = ["**/*.ttf"]
 "nylib.__pyinstaller" = ["README.md"]
 "nylib.winutils.python_hijack" = ["*.template.cpp"]

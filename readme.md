@@ -52,6 +52,7 @@ pip install ".[full]"   # all of the above
 | PDB symbols | `nylib.pdb` | read PDB files via Microsoft DIA; write PDB files from a model | [docs/nylib/pdb.md](docs/nylib/pdb.md) |
 | Remote ctypes | `nylib.ctype` | declarative structs that read/write through a process accessor | [docs/nylib/ctype.md](docs/nylib/ctype.md) |
 | Function hooking | `nylib.hook` | Microsoft Detours wrapper (`Hook`, `@create_hook`) | [docs/nylib/hook.md](docs/nylib/hook.md) |
+| Call queues | `nylib.winutils.inline_call` | run queued calls on a target's own thread at its next entry to a hooked function or vtable slot | [docs/nylib/winutils/inline_call.md](docs/nylib/winutils/inline_call.md) |
 | Breakpoints | `nylib.winutils.breakpoint` | x64 HW/SW breakpoints (VEH + debugger backends) | [docs/nylib/winutils/breakpoint.md](docs/nylib/winutils/breakpoint.md) |
 | PE mapping | `nylib.winutils.pe_map` | pure PE planning, local or cross-process DLL loading from bytes, and optional post-attach block discard | [docs/nylib/winutils/pe_map.md](docs/nylib/winutils/pe_map.md) |
 | Injection | `nylib.winutils.python_loader` / `python_hijack` | run arbitrary Python inside a third-party process | [docs/nylib/winutils/python_loader.md](docs/nylib/winutils/python_loader.md) |
@@ -62,6 +63,7 @@ pip install ".[full]"   # all of the above
 | Unreal Engine | `nylib.ue` | UE4.25+/UE5 reflection dumper (snapshots, Dumper-7-format exports, IDA importer), runtime objects with opt-in writes and UFunction calls | [docs/nylib/ue/index.md](docs/nylib/ue/index.md) |
 | VMware | `nylib.vmware_wp` | drive VMware Workstation Pro (power/snapshots/guest/REST) | [docs/nylib/vmware_wp.md](docs/nylib/vmware_wp.md) |
 | Compression | `nylib.utils.oodle` | Oodle Data compression and Oodle Network 1 UDP/TCP packet codecs, bundled 2.9.14 DLLs | [docs/nylib/utils/oodle.md](docs/nylib/utils/oodle.md) |
+| Image encoding | `nylib.utils.imagecodec` | JPEG (Windows WIC) and PNG (zlib) encoding of RGBA8 pixels | [docs/nylib/utils/imagecodec.md](docs/nylib/utils/imagecodec.md) |
 | Misc | `nylib.utils`, `nylib.logging` | lazy pip, asm, eventloop, color logging, ... | [docs/nylib/utils.md](docs/nylib/utils.md), [docs/nylib/logging.md](docs/nylib/logging.md) |
 
 ---
@@ -205,7 +207,8 @@ standalone window and an injected inbound overlay.
 
 `nylib` ships its own PyInstaller hooks under `nylib/__pyinstaller/` and registers
 them through the standard `pyinstaller40` entry point, so once `nylib` is installed
-they are auto-discovered:
+(pip-installed; a checkout on `sys.path` through a `.pth` file is not: see
+AGENTS.md section 6) they are auto-discovered:
 
 ```bash
 pyinstaller your_app.py

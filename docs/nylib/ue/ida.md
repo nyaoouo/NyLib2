@@ -24,7 +24,7 @@ Other ways:
 ## What it applies
 
 - Names: the exec functions of native UFunctions, vtables, and the globals `GObjects`, `GNames`, `GWorld`, `ProcessEvent`, `AppendString`.
-- Types: the engine core types, enums, and the classes and structs (all, only those the roots reference, or none).
+- Types: the engine core types, enums, and the classes and structs (all, only those the roots reference, or none). The importer lays out the `FFieldClass` members `Id`, `ClassFlags` and `SuperClass` from `Off.FFieldClass.Id`, `Off.FFieldClass.ClassFlags` and `Off.FFieldClass.SuperClass` even when `offsets.json` labels them unverified, so those members can then sit at a wrong offset.
 - Comments: each UFunction's signature and flags on its exec function.
 
 It first checks that the database was built from the snapshot's exe (SHA-256, or PE timestamp and size) and refuses another build unless you confirm (`--force`). A second run keeps what you changed by hand in its names, types and comments, and lists it; `--overwrite` (the dialog's "overwrite what I changed by hand") replaces them.

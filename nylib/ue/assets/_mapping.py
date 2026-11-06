@@ -619,9 +619,14 @@ class Requirement:
 
 def _requirement_from(data, path: str) -> Requirement:
     d = _data(data, path, ('struct', 'name', 'index', 'type'))
+    label = _val(d, path, 'type', 'str', True)
+    if label is not None:
+        try:
+            _parse_label(label)
+        except ValueError:
+            raise ValueError(f'{_join(path, "type")}: not a type label') from None
     try:
-        return Requirement(_val(d, path, 'struct', 'str'), _val(d, path, 'name', 'str', True), _val(d, path, 'index', 'int', True),
-                           _val(d, path, 'type', 'str', True))
+        return Requirement(_val(d, path, 'struct', 'str'), _val(d, path, 'name', 'str', True), _val(d, path, 'index', 'int', True), label)
     except (TypeError, ValueError) as e:
         raise ValueError(f'{path or "data"}: {e}') from None
 

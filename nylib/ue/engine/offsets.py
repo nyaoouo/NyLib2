@@ -1,4 +1,5 @@
 """Offsets.cpp of Dumper-7 @ ea0dab3 over an Engine: Off::Init, PropertySizes, ProcessEvent, GWorld and FText (up to its call)."""
+import logging
 import time
 import typing
 from collections.abc import Mapping
@@ -10,6 +11,8 @@ from .unreal import UEClass, UEFunction, UEObject, UEProperty, _PARENT_LINKS, _C
 
 if typing.TYPE_CHECKING:
     from .core import Engine
+
+_log = logging.getLogger('nylib.ue.engine')
 
 _M32 = 0xFFFFFFFF
 
@@ -161,10 +164,34 @@ def _field_class_cast_flags_found(e: 'Engine', value: int) -> bool:
     return False
 
 
+def _check_ffield_layout(e: 'Engine', pins: Mapping[str, int]) -> None:
+    """Off.FField.Owner/Next and bUseMaskForFieldOwner from the member-chain search; unverified when it finds none."""
+    found = OffsetFinder.find_ffield_owner_next_offsets(e, pins.get('Off.FField.Owner'), pins.get('Off.FField.Next'))
+    if found is None:
+        e.cerr("Off::FField::Owner / Next: no layout walks Guid's and Vector's members\n")
+        for key in ('Off.FField.Owner', 'Off.FField.Next'):
+            if key not in pins:
+                e.provenance[key] = "not found: no FField Owner / Next layout walks Guid's and Vector's members"
+        return
+    owner, next_, masked = found
+    label = 'auto: OffsetFinder::FindFFieldOwnerNextOffsets (nylib)'
+    _assign(e, 'Off.FField.Owner', owner, label, pins)
+    _assign(e, 'Off.FField.Next', next_, label, pins)
+    e.settings.Internal.bUseMaskForFieldOwner = masked
+    e.provenance['Settings.Internal.bUseMaskForFieldOwner'] = label
+    e.cerr(f'Off::FField::Owner: 0x{owner:X}, Next: 0x{next_:X}, masked owner: {masked} (member-chain search)\n')
+
+
 def off_init(e: 'Engine', *, pins: Mapping[str, int] | None = None) -> None:
     """Off::Init @ ea0dab3, plus dd8fe34's FFieldClass::CastFlags finder (Q23 = A) and O2's pins."""
     pins = _check_pins(pins, 'Off.')
     off = e.off
+
+    def repin() -> None:  # finders read pinned keys no finder assigns; the Fixup/FName adjusters shift pinned keys
+        for key, value in pins.items():
+            setattr(*_target(e, key), value)
+
+    repin()
 
     def overwrite_if_invalid_offset(key: str, default_value: int, expression: str) -> None:
         if _get(e, key) == OffsetFinder.OffsetNotFound:
@@ -193,6 +220,7 @@ def off_init(e: 'Engine', *, pins: Mapping[str, int] | None = None) -> None:
     overwrite_if_invalid_offset('Off.UObject.Outer', _i32(off.UObject.Name + 4 + 4), 'Off::UObject::Name + sizeof(int32) + sizeof(int32)')
 
     OffsetFinder.init_fname_settings(e)
+    repin()
 
     e.names.post_init()
 
@@ -224,12 +252,16 @@ def off_init(e: 'Engine', *, pins: Mapping[str, int] | None = None) -> None:
         e.cerr(f'Off::UStruct::ChildProperties: 0x{off.UStruct.ChildProperties:X}\n')
 
         OffsetFinder.fixup_hardcoded_offsets(e)
+        repin()
 
         _find(e, pins, 'Off.FField.Next', 'FindFFieldNextOffset', OffsetFinder.find_ffield_next_offset)
         e.cerr(f'Off::FField::Next: 0x{off.FField.Next:X}\n')
 
         _find(e, pins, 'Off.FField.Class', 'FindFFieldClassOffset', OffsetFinder.find_ffield_class_offset)
         e.cerr(f'Off::FField::Class: 0x{off.FField.Class:X}\n')
+
+        if not OffsetFinder.has_consistent_ffield_layout(e):
+            _check_ffield_layout(e, pins)
 
         _find(e, pins, 'Off.FField.Name', 'FindFFieldNameOffset', OffsetFinder.find_ffield_name_offset)
 
@@ -250,6 +282,17 @@ def off_init(e: 'Engine', *, pins: Mapping[str, int] | None = None) -> None:
             else:  # keep ea0dab3's effective value on a miss, not dd8fe34's 0x10 fallback
                 _assign(e, 'Off.FFieldClass.CastFlags', before, f'default: {_hexs(before)} (dd8fe34 finder missed)', pins)
         e.cerr(f'Off::FFieldClass::CastFlags: 0x{off.FFieldClass.CastFlags:X}\n\n')
+
+        if 'Off.FFieldClass.Name' not in pins and not OffsetFinder.has_ffield_class_name_at(e, off.FFieldClass.Name):
+            if (value := OffsetFinder.find_ffield_class_name_offset(e)) != OffsetFinder.OffsetNotFound:
+                _assign(e, 'Off.FFieldClass.Name', value, 'auto: OffsetFinder::FindFFieldClassNameOffset (nylib)', pins)
+            else:
+                e.provenance['Off.FFieldClass.Name'] = 'not found: no FFieldClass offset names IntProperty and ByteProperty'
+            for field in ('Id', 'ClassFlags', 'SuperClass'):
+                key = f'Off.FFieldClass.{field}'
+                if key not in pins:
+                    e.provenance[key] = f'default: {_hexs(getattr(off.FFieldClass, field))} (FFieldClass.Name moved; header layout unchecked)'
+            e.cerr(f'Off::FFieldClass::Name: 0x{off.FFieldClass.Name:X}\n\n')
 
     _find(e, pins, 'Off.UClass.ClassDefaultObject', 'FindDefaultObjectOffset', OffsetFinder.find_default_object_offset)
     e.cerr(f'Off::UClass::ClassDefaultObject: 0x{off.UClass.ClassDefaultObject:X}\n')
@@ -343,6 +386,7 @@ def off_init(e: 'Engine', *, pins: Mapping[str, int] | None = None) -> None:
     e.cerr(f'Off::InSDK::UDataTable::RowMap: 0x{off.InSDK.UDataTable.RowMap:X}\n\n')
 
     OffsetFinder.post_init_fname_settings(e)
+    repin()
 
     e.cerr('\n')
 
@@ -499,12 +543,26 @@ def init_gworld(e: 'Engine') -> None:
     uworld = e.objects.find_class_fast('World')
 
     worlds: dict[int, bool] = {}
-    for obj in e.objects:
-        if obj.has_any_flags(EObjectFlags.ClassDefaultObject) or not (_is_a_class_memo(obj, uworld, worlds) if uworld else obj.is_a_class(uworld)):
-            continue
 
-        results = e.platform.find_all_aligned_values_in_process(obj.get_address())
+    def is_world(obj: UEObject) -> bool:
+        try:
+            return not obj.has_any_flags(EObjectFlags.ClassDefaultObject) and (_is_a_class_memo(obj, uworld, worlds) if uworld else obj.is_a_class(uworld))
+        except MemoryReadError:  # one unreadable object (live churn) must not end the search
+            return False
 
+    def world_hits():
+        """(UWorld, its aligned image references): the first world by its own scan, every later one from a single pass."""
+        objs = (obj for obj in e.objects if is_world(obj))
+        if (first := next(objs, None)) is None:
+            return
+        yield first, e.platform.find_all_aligned_values_in_process(first.get_address())
+        rest = list(objs)
+        hits = e.platform.find_all_aligned_values_in_process_many([obj.get_address() for obj in rest])
+        for obj in rest:
+            yield obj, hits[obj.get_address()]
+
+    candidates: dict[int, None] = {}
+    for obj, results in world_hits():
         result = 0
         if results:
             if len(results) == 1:
@@ -512,20 +570,26 @@ def init_gworld(e: 'Engine') -> None:
             elif len(results) == 2:
                 obj_address = obj.get_address()
                 possible_gworld = results[0]
-                current_value = e.mem.fresh.u64(possible_gworld)
-
-                i = 0
-                while current_value == obj_address and i < 50:
-                    time.sleep(0.001)
+                try:
                     current_value = e.mem.fresh.u64(possible_gworld)
-                    i += 1
+
+                    i = 0
+                    while current_value == obj_address and i < 50:
+                        time.sleep(0.001)
+                        current_value = e.mem.fresh.u64(possible_gworld)
+                        i += 1
+                except MemoryReadError:
+                    continue
                 if current_value == obj_address:
                     result = results[0]
                 else:
                     result = results[1]
                     e.cerr(f'Filter GActiveLogWorld at 0x{possible_gworld:X}\n\n')
             else:
-                e.cerr(f'Detected {len(results)} GWorld \n\n')
+                rvas = [e.platform.get_offset(address) for address in results]
+                candidates.update(dict.fromkeys(rvas))
+                listed = ', '.join(f'rva 0x{r:X}' for r in rvas)
+                e.cerr(f'Detected {len(results)} GWorld candidates for UWorld 0x{obj.get_address():X}: {listed}\n\n')
 
         if result:
             e.off.InSDK.World.GWorld = _i32(e.platform.get_offset(result))
@@ -534,7 +598,14 @@ def init_gworld(e: 'Engine') -> None:
             break
 
     if e.off.InSDK.World.GWorld == 0x0:
-        e.provenance['Off.InSDK.World.GWorld'] = 'not found: no pointer to a UWorld in the image'
+        if candidates:
+            rvas = list(candidates)
+            listed = ', '.join(f'rva 0x{r:X}' for r in rvas[:8]) + (', ...' if len(rvas) > 8 else '')
+            e.provenance['Off.InSDK.World.GWorld'] = f'not found: {len(rvas)} UWorld references, none unique ({listed})'
+            _log.warning('GWorld not found: %d image slots point at a UWorld (%s); pin the right one as [offsets] "Off.InSDK.World.GWorld"',
+                         len(rvas), listed)
+        else:
+            e.provenance['Off.InSDK.World.GWorld'] = 'not found: no pointer to a UWorld in the image'
         e.cerr('\nGWorld WAS NOT FOUND!!!!!!!!!\n\n')
 
 

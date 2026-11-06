@@ -464,6 +464,35 @@ class ProcessEntry32(ctypes.Structure):
     ]
 
 
+class ThreadEntry32(ctypes.Structure):
+    _fields_ = [
+        ('dwSize', ctypes.c_ulong),
+        ('cntUsage', ctypes.c_ulong),
+        ('th32ThreadID', ctypes.c_ulong),
+        ('th32OwnerProcessID', ctypes.c_ulong),
+        ('tpBasePri', ctypes.c_long),
+        ('tpDeltaPri', ctypes.c_long),
+        ('dwFlags', ctypes.c_ulong),
+    ]
+
+
+CONTEXT_CONTROL = 0x00100001  # AMD64 CONTEXT_CONTROL
+
+
+class CONTEXT(ctypes.Structure):
+    _fields_ = [
+        ('_home', ctypes.c_uint64 * 6),
+        ('ContextFlags', ctypes.c_uint32),
+        ('MxCsr', ctypes.c_uint32),
+        ('_segments', ctypes.c_uint16 * 6),
+        ('EFlags', ctypes.c_uint32),
+        ('_debug', ctypes.c_uint64 * 6),
+        ('_integer', ctypes.c_uint64 * 16),
+        ('Rip', ctypes.c_uint64),
+        ('_extended', ctypes.c_byte * (0x4D0 - 0x100)),
+    ]  # AMD64 CONTEXT_CONTROL fields; pass a 16-byte-aligned buffer to GetThreadContext
+
+
 class STARTUPINFOA(ctypes.Structure):
     _fields_ = [
         ('cb', ctypes.c_ulong),

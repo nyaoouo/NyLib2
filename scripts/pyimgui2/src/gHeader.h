@@ -48,6 +48,30 @@ namespace py = pybind11;
 
 #define DX_HR_FAILED(vname, ...) ((vname = (__VA_ARGS__)) != S_OK)
 
+// Window title helpers: std::string is UTF-8, the Win32 calls are the wide ones.
+inline void SetWindowTextUtf8(HWND hwnd, const std::string &utf8)
+{
+    int n = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), (int)utf8.size(), nullptr, 0);
+    std::wstring w(n > 0 ? n : 0, L'\0');
+    if (n > 0)
+        MultiByteToWideChar(CP_UTF8, 0, utf8.data(), (int)utf8.size(), w.data(), n);
+    SetWindowTextW(hwnd, w.c_str());
+}
+
+inline std::string GetWindowTextUtf8(HWND hwnd)
+{
+    int len = GetWindowTextLengthW(hwnd);
+    if (len <= 0)
+        return {};
+    std::wstring w(len + 1, L'\0');
+    w.resize(GetWindowTextW(hwnd, w.data(), len + 1));
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    std::string utf8(n > 0 ? n : 0, '\0');
+    if (n > 0)
+        WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), utf8.data(), n, nullptr, nullptr);
+    return utf8;
+}
+
 #define mNameSpace PyImgui
 
 inline py::module_ pyimgui_import_parent_module(py::module_ m)
