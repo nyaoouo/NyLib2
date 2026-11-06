@@ -165,13 +165,14 @@ def _check_target(target):
     raise TypeError(f'target must be None, int or str, got {type(target).__name__}')
 
 
-def _check_cache_bytes(cache_bytes):
+def _check_cache_bytes(cache_bytes) -> int | None:
+    """None, 0 (uncached) or a page-cache cap in bytes of at least 0x10000."""
     if cache_bytes is None:
         return None
     if not isinstance(cache_bytes, int) or isinstance(cache_bytes, bool):
         raise TypeError(f'cache_bytes must be an int or None, got {type(cache_bytes).__name__}')
-    if cache_bytes < 0x10000:
-        raise ValueError(f'cache_bytes must be >= 0x10000, got {cache_bytes:#x}')
+    if cache_bytes != 0 and cache_bytes < 0x10000:
+        raise ValueError(f'cache_bytes must be 0 (uncached) or >= 0x10000, got {cache_bytes:#x}')
     return cache_bytes
 
 
@@ -288,7 +289,8 @@ def _resolve_pid(name: str) -> int:
 def _open_external(pid: int, *, write: bool, remote_calls: bool, cache_bytes) -> OpenedTarget:
     process = memory.open_process(pid, write=write, remote_calls=remote_calls)
     try:
-        source = memory.ProcessSource(process, max_cache_bytes=cache_bytes or CACHE_CAP_EXTERNAL)
+        source = (memory.ProcessSource(process, cache=False) if cache_bytes == 0 else
+                  memory.ProcessSource(process, max_cache_bytes=CACHE_CAP_EXTERNAL if cache_bytes is None else cache_bytes))
         info = target_info(source, mode='external', pid=pid)
     except Exception:
         process.close()
@@ -298,7 +300,8 @@ def _open_external(pid: int, *, write: bool, remote_calls: bool, cache_bytes) ->
 
 def _open_internal(cache_bytes) -> OpenedTarget:
     process = memory.current_process()
-    source = memory.ProcessSource(process, max_cache_bytes=cache_bytes or CACHE_CAP_INTERNAL)
+    source = (memory.ProcessSource(process, cache=False) if cache_bytes == 0 else
+              memory.ProcessSource(process, max_cache_bytes=CACHE_CAP_INTERNAL if cache_bytes is None else cache_bytes))
     info = target_info(source, mode='internal', pid=process.process_id)
     return OpenedTarget(source=source, info=info, process=process, check_alive=None, closer=lambda: None)
 
@@ -473,13 +476,17 @@ def probe_opened(opened: OpenedTarget, *, profile=None, out_root=None) -> ProbeR
 
     prof = _check_profile(profile)
     if prof is not None:
+        if not profiles._build_matches(prof, info.pe_timestamp, info.size_of_image):
+            raise errors.ProfileError(profiles.display_path(prof),
+                                      profiles._build_mismatch(prof, info.pe_timestamp, info.size_of_image) +
+                                      '; this profile is for another build')
         note = 'explicit'
         if prof.exe is not None and prof.exe.casefold() != info.exe.casefold():
             msg = f'profile {profiles.display_path(prof)} is for {prof.exe}; the target is {info.exe}'
             warnings.append(msg)
             logger.warning(msg)
     elif out_root is not None:
-        matches = profiles.find_profiles(out_root, info.exe)
+        matches = profiles.find_profiles(out_root, info.exe, build=info.pe_timestamp, image_size=info.size_of_image or None)
         if not matches:
             note = 'none'
         elif len(matches) == 1:
@@ -822,10 +829,17 @@ def _profile_status(root: str, exe: str, image):
         return os.path.basename(e.path), 'invalid'
     if not matches:
         return None, '-'
+    unfiltered = matches
+    matches = [p for p in matches if profiles._build_matches(p, image.timestamp, image.size)]
+    if not matches:
+        name = os.path.basename(unfiltered[0].path) if len(unfiltered) == 1 and unfiltered[0].path else None
+        return name, 'build differs'
     if len(matches) > 1:
         return None, f'ambiguous ({len(matches)} profiles)'
     prof = matches[0]
     name = os.path.basename(prof.path) if prof.path else None
+    if prof.build is not None:
+        return name, 'build matches'
     rva_pins = [p for p in prof.pins.values() if p.rva is not None]
     if not rva_pins:
         return name, 'no rva pins'

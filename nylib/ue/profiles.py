@@ -54,6 +54,8 @@ class Profile:
     pins: dict
     offsets: dict
     hooks: dict
+    build: int | None = None
+    image_size: int | None = None
 
 
 def _check_int(p, name: str, key: str, value, lo: int, hi: int, exclusive_lo: bool):
@@ -115,14 +117,21 @@ def _parse_pin(name, v, p):
 
 def _parse_match(table, p):
     for k in table:
-        if k != 'exe':
+        if k not in ('exe', 'build', 'image_size'):
             raise ProfileError(p, f'unknown key [match] {k}')
     exe = table.get('exe')
-    if exe is None:
-        return None
-    if not isinstance(exe, str) or not exe:
+    if exe is not None and (not isinstance(exe, str) or not exe):
         raise ProfileError(p, '[match] exe must be a non-empty string')
-    return exe
+    for key in ('build', 'image_size'):
+        if key not in table:
+            continue
+        value = table[key]
+        if not _is_int(value) or not (0 <= value < 2 ** 32 if key == 'build' else 0 < value < 2 ** 32):
+            bound = '0x0 <= x < 0x100000000' if key == 'build' else '0x0 < x < 0x100000000'
+            raise ProfileError(p, f'[match] {key} must be an int in range {bound}')
+    if 'image_size' in table and 'build' not in table:
+        raise ProfileError(p, '[match] image_size needs build')
+    return exe, table.get('build'), table.get('image_size')
 
 
 def _parse_globals(table, p):
@@ -213,7 +222,7 @@ def parse_profile(text: str, path=None) -> Profile:
         if not isinstance(v, dict):
             raise ProfileError(p, f'[{k}] must be a table')
 
-    exe = _parse_match(doc['match'], p) if 'match' in doc else None
+    exe, build, image_size = _parse_match(doc.get('match', {}), p)
     pins = _parse_globals(doc['globals'], p) if 'globals' in doc else {}
     offsets = _parse_offsets(doc['offsets'], p) if 'offsets' in doc else {}
     hooks = _parse_hooks(doc['hooks'], p) if 'hooks' in doc else {}
@@ -222,7 +231,8 @@ def parse_profile(text: str, path=None) -> Profile:
         raise ProfileError(p, '[globals] gobjects cannot be combined with [hooks] decrypt_objects: '
                                'a pinned GObjects is read without decryption')
 
-    return Profile(path=os.path.abspath(path) if path is not None else None, exe=exe, pins=pins, offsets=offsets, hooks=hooks)
+    return Profile(path=os.path.abspath(path) if path is not None else None, exe=exe, pins=pins, offsets=offsets, hooks=hooks,
+                   build=build, image_size=image_size)
 
 
 def load_profile(path) -> Profile:
@@ -251,11 +261,34 @@ def _raw_match_exe(path) -> str | None:
     return exe if isinstance(exe, str) else None
 
 
-def find_profiles(out_root, exe: str) -> list:
+def _build_matches(prof, build, image_size) -> bool:
+    return prof.build is None or (prof.build == build and (prof.image_size is None or prof.image_size == image_size))
+
+
+def _build_mismatch(prof, build, image_size) -> str:
+    match_text = f'[match] build 0x{prof.build:X}'
+    if prof.image_size is not None:
+        match_text += f' / image_size 0x{prof.image_size:X}'
+    target_text = f'build 0x{build:X}'
+    if image_size is not None:
+        target_text += f' / image_size 0x{image_size:X}'
+    return f'{match_text} does not match the target ({target_text})'
+
+
+def find_profiles(out_root, exe: str, *, build=None, image_size=None) -> list:
     if not isinstance(exe, str):
         raise TypeError(f'exe must be str, got {type(exe).__name__}')
     if not exe:
         raise ValueError('exe must be a non-empty string')
+    for key, value, lo in (('build', build, 0), ('image_size', image_size, 1)):
+        if value is None:
+            continue
+        if not _is_int(value):
+            raise TypeError(f'{key} must be int or None, got {type(value).__name__}')
+        if not lo <= value < 2 ** 32:
+            raise ValueError(f'{key} must be in range {lo:#x} <= x < 0x100000000, got {value:#x}')
+    if image_size is not None and build is None:
+        raise ValueError('image_size needs build')
     folder = os.path.join(os.fspath(out_root), 'profiles')
     try:
         names = sorted(n for n in os.listdir(folder) if n.lower().endswith('.toml'))
@@ -273,6 +306,9 @@ def find_profiles(out_root, exe: str) -> list:
             logger.warning('skipping profile %s: %s', e.path, e.reason)
             continue
         if prof.exe is not None and prof.exe.casefold() == target:
+            if build is not None and not _build_matches(prof, build, image_size):
+                logger.warning('skipping profile %s: %s', path, _build_mismatch(prof, build, image_size))
+                continue
             found.append(prof)
     return found
 
