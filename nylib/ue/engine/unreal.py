@@ -342,6 +342,8 @@ class UEEnum(UEField):
 
     def get_name_value_pairs(self) -> list[tuple[FName, int]]:
         """UEEnum::GetNameValuePairs @ ea0dab3 (DV9 kept, DV10)."""
+        if self.e.off.UEnum.Names < 0:
+            raise DetectionError('UEEnum::GetNameValuePairs', 'Off.UEnum.Names is unresolved', explanations=tuple(self.e.messages))
         internal = self.e.settings.Internal
         if internal.bIsNewUE5EnumNamesContainer:
             return self._get_name_value_pairs_for_fname_data((self.e.off.UEnum.Names - 0x8) & _U32, self.e.off.InSDK.Name.FNameSize & _U32)
