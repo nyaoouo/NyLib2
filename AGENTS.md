@@ -440,11 +440,12 @@ with Unreal.attach('TRIANGLE_STRATEGY-Win64-Shipping.exe', dump=result.path) as 
 - Read-only by default (`PROCESS_QUERY_INFORMATION | PROCESS_VM_READ`); writes need
   `Unreal.attach(..., write=True)`; UFunction calls need `calls=`.
 - The dumper's own calls need `allow_calls=` / CLI `--allow-calls [append-string,game-info,text]`:
-  never from a profile, blocked while an unverified offset other than the two FText and the two
-  stem keys is present, what ran is listed in `meta.json`'s `remote_calls` and
-  `DumpResult.remote_calls`, a failing feature degrades to a warning, and a call can crash the
-  game. A calls-enabled attach resolves the two FText offsets first, so `write=True` then needs
-  no `allow_unverified=True` for them.
+  never from a profile, blocked while an unverified offset other than the two FText, the two
+  stem keys and `Off.FFieldClass.Id`, `Off.FFieldClass.ClassFlags`, `Off.FFieldClass.SuperClass`
+  is present, what ran is listed in `meta.json`'s `remote_calls` and `DumpResult.remote_calls`,
+  a failing feature degrades to a warning, and a call can crash the game. A calls-enabled attach
+  resolves the two FText offsets first, so `write=True` then needs no `allow_unverified=True` for
+  them.
 - Output root: `out=` / `--out`, else env `NYLIB_UE_OUT`, else `.\ue_dumps` under the current
   directory (internal/injected mode needs one set explicitly).
 - Snapshot folder: `meta.json`, `offsets.json`, `objects.jsonl`, `fields.jsonl`, `types.jsonl` and

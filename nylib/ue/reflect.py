@@ -362,8 +362,9 @@ class _Issues:
         self.entries: dict[str, dict] = {}
 
     def add(self, kind: str, index: int, name: str, detail) -> None:
-        sample = f'{index} {name}: {detail}'.replace('\r', ' ').replace('\n', ' ')[:_SAMPLE_LIMIT]
-        logger.debug('issue %s: %s', kind, sample)
+        text = f'{index} {name}: {detail}'.replace('\r', ' ').replace('\n', ' ')
+        logger.debug('issue %s: %s', kind, text)
+        sample = text[:_SAMPLE_LIMIT]
         if (entry := self.entries.get(kind)) is None:
             self.entries[kind] = {'kind': kind, 'count': 1, 'first': sample, 'last': sample}
         else:

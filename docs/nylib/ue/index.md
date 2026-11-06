@@ -44,7 +44,7 @@ The snapshot stays usable without the game: [load it](dump.md#load-a-snapshot), 
 - UFunction calls need `calls=` on `Unreal.attach`: `'game-thread'` queues through a filtered `ProcessEvent` hook, `'remote-thread'` creates a thread, and `'any-thread'` is available inside the game. A custom `Caller` can use another call mechanism. The dumper's own calls need `allow_calls=` (CLI: `--allow-calls`).
 - Calls on a new or arbitrary thread can race the game thread and its garbage collector and crash the game or corrupt its state. The game-thread hook needs a naturally occurring `ProcessEvent` entry and stays in the game until `close()`, a normal interpreter exit or a game restart.
 - Latent functions (those taking an `FLatentActionInfo`) are refused.
-- Offsets the dumper could not verify block writes and calls, except the two game-name keys (and, for calls, the two FText keys); the error lists them and how to fix them.
+- Offsets the dumper could not verify block writes and calls, except the two game-name keys and `Off.FFieldClass.Id`, `Off.FFieldClass.ClassFlags`, `Off.FFieldClass.SuperClass` (and, for calls, the two FText keys); the error lists them and how to fix them.
 - A profile's hooks are Python code that the dumper runs (inside the game in internal mode): use only profiles you trust.
 - A call can leave memory in the game: what the engine allocates for out parameters, and the call's own memory when it times out or is interrupted.
 - Ctrl+C during a remote-thread call can crash the game.
@@ -56,4 +56,5 @@ The snapshot stays usable without the game: [load it](dump.md#load-a-snapshot), 
 - Dumps: verified on captures of all three, and live against Dumper-7 on all three; the internal (injected) dump live on PalServer; the `.usmap` export matches Dumper-7's on captures of all three.
 - The IDA importer, runtime reads, call parameter layouts, `--allow-calls` targets and stubs: checked on captures of all three; the importer applied in IDA 9.3.
 - Live on FrostBound (main menu): runtime reads through both type sources, one property write (restored), one remote-thread UFunction call, and `dump --allow-calls` with all three features, checked against Dumper-7's output for the same build.
-- Not yet verified on a real game: `attach_current`, `calls='any-thread'`, `calls='game-thread'` and custom `Caller`; runtime sessions and `--allow-calls` on PalServer and TRIANGLE STRATEGY; calls with inputs or with string, array or FText outputs.
+- A downstream user reported `calls='game-thread'` working on one UE 5.7 game with nylib `68ae975`: an attach-time `Conv_StringToText` call and two calls returned, and `close()` restored the prologue. This project did not make that run.
+- Not yet verified on a real game: `attach_current`, `calls='any-thread'` and custom `Caller`; runtime sessions and `--allow-calls` on PalServer and TRIANGLE STRATEGY; calls with inputs or with string, array or FText outputs.

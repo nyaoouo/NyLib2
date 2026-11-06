@@ -44,25 +44,26 @@ with Unreal.attach(exe, dump=result.path) as ue:  # read-only session, types fro
 
 快照在没有游戏运行的情况下依然可用：[加载它](dump.md#load-a-snapshot)、将其导入 [IDA](ida.md)，或用它生成 [stubs](stubs.md)。
 
-<!-- dt:section id="safety-0" hash="183a4998312c" -->
+<!-- dt:section id="safety-0" hash="d89527537698" -->
 ## 安全性
 
-- 读取是默认行为。dumper 和默认会话打开游戏时只拥有读取权限,从不在游戏中执行代码。
-- 写入需要在 `Unreal.attach` 上设置 `write=True`。写入会直接作用于游戏的内存。
-- UFunction 调用需要在 `Unreal.attach` 上设置 `calls=`:`'game-thread'` 通过经过过滤的 `ProcessEvent` hook 排队执行,`'remote-thread'` 创建一个线程,`'any-thread'` 在游戏内可用。自定义的 `Caller` 可以使用其他调用机制。dumper 自身的调用需要 `allow_calls=`(CLI 为 `--allow-calls`)。
-- 在新线程或任意线程上的调用可能会与游戏线程及其垃圾回收器产生竞争,导致游戏崩溃或状态损坏。game-thread hook 需要一次自然发生的 `ProcessEvent` 入口,并会一直留在游戏中,直到 `close()`、正常的解释器退出或游戏重启。
-- 潜在函数(接受 `FLatentActionInfo` 的函数)会被拒绝。
-- dumper 无法验证的偏移量会阻止写入和调用,但游戏名称的两个键(以及调用时的两个 FText 键)除外;错误信息会列出这些偏移量以及修复方法。
-- Profile 的 hooks 是 dumper 运行的 Python 代码(在内部模式下于游戏内运行):只使用你信任的 profile。
-- 调用可能会在游戏中留下内存:引擎为输出参数分配的内存,以及调用超时或被中断时调用自身占用的内存。
-- 在 remote-thread 调用期间按 Ctrl+C 可能会导致游戏崩溃。
-- 向已经加载了相同 `python3XY.dll` 的游戏注入 Python 会使其崩溃。在冻结的应用之外,缺失的 `python_loader.dll` 会在首次使用时构建,这需要 MSVC;若 MSVC 缺失,还会下载并安装 Visual Studio Build Tools。可以先用 `python -m nylib.winutils.python_loader build` 构建一次。在冻结的应用中,对于缺失的 DLL,`ensure_loader_dll()` 会改为抛出 `FileNotFoundError`。
+- 默认只读。转储器和默认会话仅以读取权限打开游戏,从不在其中运行代码。
+- 写入需要在 `Unreal.attach` 上设置 `write=True`。写入会直接进入游戏内存。
+- UFunction 调用需要在 `Unreal.attach` 上设置 `calls=`:`'game-thread'` 通过经过过滤的 `ProcessEvent` 钩子排队,`'remote-thread'` 创建一个线程,`'any-thread'` 可在游戏内部使用。自定义 `Caller` 可以使用其他调用机制。转储器自身的调用需要 `allow_calls=`(CLI:`--allow-calls`)。
+- 在新线程或任意线程上调用可能与游戏线程及其垃圾回收器发生竞争,导致游戏崩溃或状态损坏。游戏线程钩子需要一次自然发生的 `ProcessEvent` 入口,并且会一直留在游戏中,直到 `close()`、解释器正常退出或游戏重启。
+- 延迟函数(接受 `FLatentActionInfo` 的函数)会被拒绝。
+- 转储器无法验证的偏移会阻止写入和调用,但两个游戏名称键以及 `Off.FFieldClass.Id`、`Off.FFieldClass.ClassFlags`、`Off.FFieldClass.SuperClass` 除外(对于调用,还有两个 FText 键除外);错误信息会列出它们以及修复方法。
+- 配置文件的钩子是转储器运行的 Python 代码(在内部模式下于游戏内运行):仅使用你信任的配置文件。
+- 一次调用可能在游戏中遗留内存:引擎为输出参数分配的内存,以及调用超时或被中断时调用自身的内存。
+- 在远程线程调用期间按 Ctrl+C 可能使游戏崩溃。
+- 向已加载同一 `python3XY.dll` 的游戏注入 Python 会使其崩溃。在冻结应用之外,缺失的 `python_loader.dll` 会在首次使用时构建,这需要 MSVC,并且当它缺失时会下载并安装 Visual Studio Build Tools;请事先用 `python -m nylib.winutils.python_loader build` 构建一次。在冻结应用中,对于缺失的 DLL,`ensure_loader_dll()` 会改为抛出 `FileNotFoundError`。
 
-<!-- dt:section id="tested-with-0" hash="6c36f4c15fd5" -->
+<!-- dt:section id="tested-with-0" hash="86be06e7399b" -->
 ## 测试环境
 
-- PalServer（UE 5.1，build 25247047）、TRIANGLE STRATEGY（UE 4.27，build 11410614）和 FrostBound（UE 5.4，build 24486464）。
-- Dumps：已在三者的捕获（captures）上验证，也针对 Dumper-7 在三者上进行了实时对比；内部（注入式）dump 在 PalServer 上实时验证；`.usmap` 导出在三者的捕获上与 Dumper-7 的一致。
-- IDA 导入器、运行时读取、调用参数布局、`--allow-calls` 目标与 stub：已在三者的捕获上检查，该导入器已在 IDA 9.3 中应用。
-- 在 FrostBound（主菜单）上实时验证：通过两种类型来源进行运行时读取、一次属性写入（已还原）、一次远程线程 UFunction 调用，以及对全部三项功能使用 `dump --allow-calls`，并与 Dumper-7 针对同一 build 的输出进行了比对。
-- 尚未在真实游戏中验证：`attach_current`、`calls='any-thread'`、`calls='game-thread'` 和自定义 `Caller`；在 PalServer 和 TRIANGLE STRATEGY 上的运行时会话与 `--allow-calls`；带输入参数或带字符串、数组或 FText 输出的调用。
+- PalServer(UE 5.1,build 25247047)、TRIANGLE STRATEGY(UE 4.27,build 11410614)和 FrostBound(UE 5.4,build 24486464)。
+- 转储:已在这三者的捕获数据上验证,并在这三者上与 Dumper-7 进行了实时对照;内部(注入式)转储已在 PalServer 上实时验证;`.usmap` 导出与 Dumper-7 在这三者捕获数据上的结果一致。
+- IDA 导入器、运行时读取、调用参数布局、`--allow-calls` 目标和桩:已在这三者的捕获数据上检查;导入器已在 IDA 9.3 中应用。
+- 在 FrostBound(主菜单)上实时验证:通过两种类型来源的运行时读取、一次属性写入(已恢复)、一次远程线程 UFunction 调用,以及启用全部三项功能的 `dump --allow-calls`,并与 Dumper-7 对同一 build 的输出进行了核对。
+- 一位下游用户报告称,在 nylib `68ae975` 下,`calls='game-thread'` 在一款 UE 5.7 游戏上可用:附加时的一次 `Conv_StringToText` 调用和两次调用均已返回,且 `close()` 恢复了函数序言。本项目没有进行该次运行。
+- 尚未在真实游戏上验证:`attach_current`、`calls='any-thread'` 和自定义 `Caller`;PalServer 和 TRIANGLE STRATEGY 上的运行时会话和 `--allow-calls`;带输入的调用,或带字符串、数组或 FText 输出的调用。
