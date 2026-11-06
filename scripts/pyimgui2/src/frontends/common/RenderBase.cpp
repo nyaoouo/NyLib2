@@ -61,9 +61,7 @@ START_M_IMGUI_IMPL_NAMESPACE
     {
         if (this->hwnd == nullptr)
             return this->title;
-        char buf[512] = {};
-        GetWindowTextA(this->hwnd, buf, sizeof(buf));
-        this->title = buf;
+        this->title = GetWindowTextUtf8(this->hwnd);
         return this->title;
     }
 
@@ -71,7 +69,7 @@ START_M_IMGUI_IMPL_NAMESPACE
     {
         this->title = title;
         if (this->hwnd != nullptr)
-            SetWindowTextA(this->hwnd, title.c_str());
+            SetWindowTextUtf8(this->hwnd, title);
     }
 
     void RenderBase::SetRenderCallback(std::optional<py::function> renderCallback)

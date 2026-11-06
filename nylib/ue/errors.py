@@ -130,6 +130,10 @@ class UnverifiedOffsetsError(SessionError):
     """Raised when a session would use offsets that were never verified."""
 
 
+class PendingCallsError(SessionError, RuntimeError):
+    """Raised when close() finds game-thread calls still pending; .pending counts them and the session stays open."""
+
+
 class AmbiguousNameError(UeError, LookupError):
     """Raised when a short-name lookup matches more than one object."""
 

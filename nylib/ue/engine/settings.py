@@ -1,6 +1,7 @@
 """Settings detection of Dumper-7 @ ea0dab3: the four Settings::Init*Settings and Generator.cpp's InitSettings."""
 import typing
 
+from ..errors import MemoryReadError
 from ..flags import EClassCastFlags
 from .unreal import UEStruct
 
@@ -76,17 +77,30 @@ def init_array_dim_size_settings(e: 'Engine') -> None:
     """Settings::InitArrayDimSizeSettings @ ea0dab3."""
     key = 'Settings.Internal.bUseUint8ArrayDim'
     label = 'auto: Settings::InitArrayDimSizeSettings'
+    skipped = structs = 0
+    use_uint8 = False
     for obj in e.objects:
-        if not obj.is_a(EClassCastFlags.Struct):
+        try:
+            if not obj.is_a(EClassCastFlags.Struct):
+                continue
+            for prop in obj.cast(UEStruct).get_properties():
+                if prop.get_array_dim() >= 0x000F0001:
+                    use_uint8 = True
+                    break
+            else:
+                structs += 1
+        except MemoryReadError:
+            skipped += 1
             continue
-        for prop in obj.cast(UEStruct).get_properties():
-            if prop.get_array_dim() >= 0x000F0001:
-                e.settings.Internal.bUseUint8ArrayDim = True
-                e.provenance[key] = label
-                e.cerr(f'\nDumper-7: bUseUint8ArrayDim = {_bool_str(e.settings.Internal.bUseUint8ArrayDim)}\n\n')
-                return
+        if use_uint8:
+            break
 
-    e.settings.Internal.bUseUint8ArrayDim = False
+    if skipped:
+        e.cerr(f'Settings::InitArrayDimSizeSettings: {skipped} unreadable objects skipped\n')
+        label += f' ({skipped} unreadable objects skipped)'
+        if not use_uint8 and not structs:
+            label = f'fallback: Settings::InitArrayDimSizeSettings (no struct object could be read; {skipped} unreadable objects skipped)'
+    e.settings.Internal.bUseUint8ArrayDim = use_uint8
     e.provenance[key] = label
     e.cerr(f'\nDumper-7: bUseUint8ArrayDim = {_bool_str(e.settings.Internal.bUseUint8ArrayDim)}\n\n')
 

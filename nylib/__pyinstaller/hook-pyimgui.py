@@ -14,6 +14,7 @@ extensions at the bundle root's ``pyimgui/`` directory.
 
 from __future__ import annotations
 
+import importlib.machinery
 import os
 import pathlib
 
@@ -25,6 +26,13 @@ from PyInstaller.utils.hooks import (  # type: ignore[import-not-found]
 binaries: list[tuple[str, str]] = []
 datas: list[tuple[str, str]] = []
 hiddenimports: list[str] = []
+
+_EXT_SUFFIXES = tuple(importlib.machinery.EXTENSION_SUFFIXES)
+
+
+def _is_native_ext(name: str) -> bool:
+    """True when the file's ABI tag is accepted by the interpreter being frozen."""
+    return '.' + name.lower().partition('.')[2] in _EXT_SUFFIXES
 
 
 def _collect() -> None:
@@ -44,14 +52,27 @@ def _collect() -> None:
 
     dest = 'pyimgui'
 
-    for entry in sorted(package_dir.iterdir()):
+    entries = sorted(package_dir.iterdir())
+    collected_stems = set()
+    for entry in entries:
         if entry.is_file() and entry.suffix.lower() == '.pyd':
+            if not _is_native_ext(entry.name):
+                logger.info('hook-pyimgui: skipping %s, built for another Python ABI', entry.name)
+                continue
             binaries.append((str(entry), dest))
             stem = entry.name.split('.', 1)[0]
+            collected_stems.add(stem.lower())
             hiddenimports.append(f'pyimgui.{stem}')
+        elif entry.is_file() and entry.suffix.lower() == '.py':
+            datas.append((str(entry), dest))
         elif entry.is_file() and entry.suffix.lower() == '.pyi':
             datas.append((str(entry), dest))
-        elif entry.is_dir():
+
+    for entry in entries:
+        if entry.is_dir():
+            if entry.name.lower() != 'imgui' and entry.name.lower() not in collected_stems:
+                logger.debug('hook-pyimgui: skipping stub folder %s, its frontend was not collected', entry.name)
+                continue
             for sub in entry.rglob('*'):
                 if sub.is_file() and sub.suffix.lower() == '.pyi':
                     rel_parent = sub.parent.relative_to(package_dir)

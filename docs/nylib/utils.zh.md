@@ -133,6 +133,7 @@ packed = pkg_archive.pack('pkg/', is_main=True, package_name='myapp')
 | `delegate` | 事件处理程序模式，单个或分组 | `Delegate`, `GroupDelegate` |
 | `enum` | Enum 辅助工具，用于缺失值的回退 | `missing()`, `auto_missing()` |
 | `handles` | 分配和释放整数句柄 | `Handles.get()`, `.free()` |
+| [`imagecodec`](utils/imagecodec.md) | 把 RGBA8 像素编码成 JPEG（Windows WIC）和 PNG（zlib） | `encode_jpeg()`, `encode_png()` |
 | `mutex` | 跨进程基于文件的锁 | `Mutex(__enter__, __exit__)` |
 | [`oodle`](utils/oodle.md) | Oodle Data 压缩和 Oodle Network 1 UDP/TCP 数据包编解码器 | `compress()`, `decompress()`, `UdpCodec`, `TcpCodec` |
 | `preprocessor` | 编译时宏和条件代码处理器 | `IProcessors` |

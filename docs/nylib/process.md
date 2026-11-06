@@ -2,7 +2,7 @@
 
 Read and write another process's memory, call its functions remotely, and manage its module list. Use it to inspect or modify a running game, hook functions, inject DLLs, or test memory operations cross-process.
 
-Keywords: Process, RemoteCall, read memory, write memory, function call, DLL injection, PEB, export, pattern scan, module list, get_proc_address, enum_exports, load_library, ReadProcessMemory, WriteProcessMemory, rpm
+Keywords: Process, Thread, RemoteCall, read memory, write memory, function call, QueueUserAPC, APC, get_thread, iter_threads, DLL injection, PEB, export, pattern scan, module list, get_proc_address, enum_exports, load_library, ReadProcessMemory, WriteProcessMemory, rpm
 
 ## Quick start
 
@@ -28,7 +28,7 @@ result = p.call(0x140010000, 100, 200)
 
 # Call without blocking; check when ready.
 pending = p.call(func_address, 1, 2, block=False)
-# pending.done -> True when the thread finishes
+# pending.done -> True when the call finishes
 # pending.wait() -> blocks and returns the result
 ```
 
@@ -73,6 +73,34 @@ result = p.call(addr)
 for export in p.enum_exports('kernel32.dll'):
     print(export.name, hex(export.address))
 ```
+
+## Threads and APC calls
+
+Open the target's threads, then run a call on an existing thread through `QueueUserAPC` instead of a new remote thread.
+
+```python
+# needs: a running target process and an alertable target thread
+
+for thread in p.iter_threads():
+    with thread:
+        print(thread.thread_id, thread.process_id)
+
+with p.get_thread(thread_id) as thread:
+    # Execute on this existing thread, with automatic suspend/queue/resume.
+    pending = p.call(func_address, 1, 2, queue_apc_thread=thread, block=False)
+    result = pending.wait(5000)
+```
+
+- `get_thread(thread_id, da=0x1FFFFF)` validates that the thread belongs to the process; `iter_threads(da=0x1FFFFF)` opens the process's threads from a Toolhelp snapshot, skipping a thread that exited after the snapshot or whose id another process reused; other `OpenThread` errors raise. Each returned `Thread` owns its handle: use `with thread:` or call `thread.close()`.
+- `thread.suspend()` and `thread.resume()` return the previous suspend count. `thread.description()` returns the name set by `SetThreadDescription`, or `None` if unnamed; `thread.creation_time()` returns a FILETIME (100-ns ticks since 1601), and the earliest thread of a process is its initial thread. Both raise `OSError` without `THREAD_QUERY_LIMITED_INFORMATION`.
+- `call(..., queue_apc_thread=None)` uses `CreateRemoteThread` by default; a `Thread` or a local thread handle selects [`QueueUserAPC`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-queueuserapc). The thread must belong to the target process and allow query, suspend/resume and set-context access; the native handle duplication path needs `PROCESS_DUP_HANDLE` on the process handle. `Process.current.call` takes another thread of the current process; selecting the calling thread raises `ValueError`.
+- The APC runs when the target thread enters an alertable wait, such as `SleepEx(..., True)`. Suspending and resuming preserves its previous suspend count and does not force an ordinary thread to become alertable; a thread that was already suspended stays suspended until its owner resumes it.
+- Blocking calls and `RemoteCall.done` / `.wait()` track callback completion; the target thread can keep running afterward. A timeout leaves the call pending: keep the `RemoteCall` and wait again. Dropping a pending call retains its remote code and completion resources until process exit.
+- If queueing succeeds but resuming fails, an `OSError` is raised and the queued callback memory is retained. Finish pending calls before closing the process handle.
+
+## Handle and shared-memory operations
+
+`p.duplicate_handle(local_handle)` copies a handle from the calling process into `p` and returns its numeric value there. `p.close_remote_handle(remote_handle)` closes that target handle. `p.map_shared(size)` returns a `SharedMemoryMapping` with `local_at`, `remote_at`, and `close()`; close it before closing `p`. The native mapping uses a writable section and unmaps both views on close. An installed Process adapter may replace these methods while keeping the same ownership contract.
 
 ## Pattern scanning
 

@@ -20,17 +20,28 @@ at this hooks directory.
 
 | File                          | Triggers on import of            | Effect                                                                          |
 |-------------------------------|----------------------------------|---------------------------------------------------------------------------------|
-| `hook-nylib.pyimgui.py`       | `nylib.pyimgui` (and submodules) | Bundles frontend `.pyd` files into `nylib/pyimgui/`; hidden-imports the aliases |
+| `hook-nylib.pyimgui.py`       | `nylib.pyimgui` (and submodules) | Bundles this interpreter's frontend `.pyd` files, their stubs, the core `imgui/` stubs and the pure-Python modules (`esp.py`) into `nylib/pyimgui/`; hidden-imports the aliases |
 | `hook-pyimgui.py`             | top-level `pyimgui` import       | Same, but bundled into top-level `pyimgui/`                                     |
-| `hook-keystone.py`            | `keystone`                       | Collects `keystone.dll` next to the `keystone` package via `collect_dynamic_libs` |
-| `hook-capstone.py`            | `capstone`                       | Collects `capstone.dll`. Strictly redundant with `pyinstaller-hooks-contrib` (always installed alongside PyInstaller) — kept as a defensive fallback for stripped-down installs |
+| `hook-keystone.py`            | `keystone`                       | Collects `keystone.dll` next to the `keystone` package via `collect_dynamic_libs`; keeps keystone's `distutils` fallback out of the analysis |
+| `hook-capstone.py`            | `capstone`                       | Collects `capstone.dll`. PyInstaller runs one hook per module, so whenever it finds nylib's hooks, this one replaces the lower-priority `pyinstaller-hooks-contrib` hook |
 | `hook-nylib.utils.oodle.py`   | `nylib.utils.oodle`              | Collects the bundled `oo2core_9_win64.dll` and `oo2net_9_win64.dll` into `nylib/utils/oodle/` via `collect_dynamic_libs` |
+| `hook-nylib.imguiutils.icons.py` | `nylib.imguiutils.icons`      | Collects the Font Awesome TTFs and pins every icon-set submodule as a hidden import |
+| `hook-nylib.winutils.sign.py` | `nylib.winutils.sign`            | Bundles the cross-certificate store `MSCVStore.p7b` as data                     |
+| `hook-nylib.winutils.breakpoint.py` | `nylib.winutils.breakpoint` | Bundles only the backend DLLs (builds a missing DLL at freeze time only when MSVC is installed) and pins the `veh` / `debugger` hidden imports |
+| `hook-nylib.winutils.python_loader.py` | `nylib.winutils.python_loader` | Bundles only `python_loader.dll` (builds a missing DLL at freeze time only when MSVC is installed) |
 
-The pyimgui hooks discover every `*.pyd` next to the loaded core
-extension, register them as PyInstaller `binaries`, and add their dotted
-module names to `hiddenimports` so the analyser keeps them. The keystone
-and capstone hooks are one-liners delegating to
-`PyInstaller.utils.hooks.collect_dynamic_libs`.
+The pyimgui hooks discover the `*.pyd` files next to the loaded core
+extension whose ABI tag the interpreter being frozen accepts
+(`importlib.machinery.EXTENSION_SUFFIXES`), register them as PyInstaller
+`binaries`, and add their dotted module names to `hiddenimports`. PyInstaller
+logs `Hidden import ... not found` for each frontend and alias; this is
+harmless, because the `binaries` entries carry the files. Frontends built for another CPython version are
+skipped, so no foreign `pythonXY.dll` is pulled in. The pure-Python modules
+there (`esp.py`), top-level `.pyi` files, and stubs under `imgui/` and collected
+frontends are added as data. Stub folders for other frontends are skipped. The
+keystone and capstone hooks use `PyInstaller.utils.hooks.collect_dynamic_libs`;
+keystone also excludes its own `distutils` fallback from analysis. An app that
+imports `distutils` elsewhere keeps it.
 
 ## Frozen-runtime behaviour of `nylib.utils.pip`
 
@@ -42,10 +53,11 @@ them automatically.
 
 Neither of those works inside a PyInstaller bundle: pip's `dist-info`
 metadata is not collected by PyInstaller (so the presence check always
-returns False), and pip's internal commands are not bundled either (so
-the install fallback raises `ModuleNotFoundError`). To prevent crashes,
-`nylib.utils.pip` detects `sys.frozen` at module-import time and replaces
-`required` with a no-op:
+returns False), and the install fallback would fail. nylib imports `pip` and
+`ensurepip` only through `importlib`, which PyInstaller's analysis does not see,
+so freezing an app that imports nylib does not bundle them through nylib (an app
+that imports `pip` itself does). To prevent crashes, `nylib.utils.pip` detects
+`sys.frozen` at module-import time and replaces `required` with a no-op:
 
 ```python
 if os.environ.get('PYTHON_PIP_ALL_REQ_INSTALLED') or getattr(sys, 'frozen', False):
@@ -57,29 +69,56 @@ bypass `pip.required` — provided the C-extension packages themselves
 (`capstone`, `keystone-engine`, `pefile`, `setuptools`) are present in
 the build-time venv so PyInstaller can bundle them, freezing Just Works.
 
+## Debug view and native DLLs
+
+`nylib.imguiutils` loads `DebugViewState` and `render_debug_view` on first
+access, through `importlib`, which PyInstaller's analysis does not see. A star
+import gives them only once something has loaded the debug view, so import
+them from `nylib.imguiutils.debug_view`; a frozen app must.
+
+Without MSVC, the `breakpoint` and `python_loader` hooks log one WARNING per
+missing DLL and go on. Sources are not bundled, so a frozen app cannot build
+these DLLs; prebuild them before freezing with `nylib.winutils.breakpoint.veh.build_backend()`,
+`nylib.winutils.breakpoint.debugger.build_backend()` and
+`nylib.winutils.python_loader.build_loader()`. In a frozen app
+`ensure_backend_dll()` and `ensure_loader_dll()` never build: a missing DLL
+raises `FileNotFoundError` and `rebuild=True` raises `RuntimeError`.
+
 ## Telling PyInstaller about the hooks
 
-**Option A — installed package.** If you publish `nylib` via a `pyproject.toml`,
-declare the standard PyInstaller entry point so the hooks are auto-discovered:
-
-```toml
-[project.entry-points."pyinstaller40"]
-hook-dirs = "nylib.__pyinstaller:get_hook_dirs"
-```
-
-**Option B — in-tree usage.** If you run `nylib` from a checkout (no install
-step), pass the hooks directory on the PyInstaller command line:
+**Option A — installed package.** A pip install of `nylib`, regular or
+editable (`pip install -e`), writes the dist-info that holds the
+`pyinstaller40` entry point (declared in nylib's own `pyproject.toml`), so
+PyInstaller finds the hooks with no flags:
 
 ```bash
-pyinstaller \
-  --additional-hooks-dir path/to/nylib/__pyinstaller \
-  --collect-binaries nylib.pyimgui \
-  your_app.py
+pyinstaller your_app.py
 ```
 
-or programmatically:
+**Option B — in-tree usage.** A checkout reached through a `.pth`
+file, `PYTHONPATH` or `sys.path` usually has no dist-info and counts as
+in-tree, although `import nylib` works. (A checkout holding a
+`nylib.egg-info`, which setuptools writes when it is built, is found.) To
+check, run the command below: the hooks are found when the list holds
+`nylib.__pyinstaller:get_hook_dirs`; other packages' entries do not count.
+
+```bash
+python -c "import importlib.metadata as m; print([e.value for e in m.entry_points(group='pyinstaller40', name='hook-dirs')])"
+```
+
+If it is missing, pass the hooks directory on the PyInstaller command line
+(or `hookspath=nylib.__pyinstaller.get_hook_dirs()` in a spec file):
+
+```bash
+pyinstaller --additional-hooks-dir path/to/nylib/__pyinstaller your_app.py
+```
+
+Without it the freeze succeeds, but the app fails at run time where it
+first needs a hooked file (e.g. its first frontend import): there is also no
+`keystone.dll`, Oodle DLL, TTF, `MSCVStore.p7b` or loader DLL. Programmatically:
 
 ```python
+import PyInstaller.__main__
 import nylib.__pyinstaller as h
 PyInstaller.__main__.run([
     'your_app.py',
@@ -89,20 +128,29 @@ PyInstaller.__main__.run([
 
 ## Verifying
 
-After freezing, the bundle layout should contain:
+After freezing, a onedir build (the PyInstaller 6 default, which puts
+everything except the exe under `_internal/`) should contain:
 
 ```
-<bundle>/nylib/pyimgui.cp3XX-win_amd64.pyd
-<bundle>/nylib/pyimgui/dx9.cp3XX-win_amd64.pyd
-<bundle>/nylib/pyimgui/dx10.cp3XX-win_amd64.pyd
-<bundle>/nylib/pyimgui/dx11.cp3XX-win_amd64.pyd
-<bundle>/nylib/pyimgui/dx12.cp3XX-win_amd64.pyd
-<bundle>/keystone/keystone.dll
-<bundle>/capstone/lib/capstone.dll
+<dist>/<app>/_internal/nylib/pyimgui.cp3XX-win_amd64.pyd
+<dist>/<app>/_internal/nylib/pyimgui/dx9.cp3XX-win_amd64.pyd
+<dist>/<app>/_internal/nylib/pyimgui/dx10.cp3XX-win_amd64.pyd
+<dist>/<app>/_internal/nylib/pyimgui/dx11.cp3XX-win_amd64.pyd
+<dist>/<app>/_internal/nylib/pyimgui/dx12.cp3XX-win_amd64.pyd
+<dist>/<app>/_internal/nylib/pyimgui/esp.py
+<dist>/<app>/_internal/nylib/imguiutils/icons/fa/resources/*.ttf
+<dist>/<app>/_internal/keystone/keystone.dll
+<dist>/<app>/_internal/capstone/lib/capstone.dll
+<dist>/<app>/_internal/nylib/utils/oodle/oo2core_9_win64.dll
+<dist>/<app>/_internal/nylib/utils/oodle/oo2net_9_win64.dll
 ```
 
-If any of the frontend `.pyd` files are missing from `<bundle>/nylib/pyimgui/`,
-PyInstaller didn't pick up this hook — re-check option A/B above. If
-`keystone.dll` is missing, the freeze likely ran without
-`--additional-hooks-dir` pointing at this directory (or without the entry
-point registered).
+`cp3XX` is the ABI tag of the interpreter that froze the app; the gl3 / vk
+frontends appear when they were built. If any of the frontend `.pyd` files
+are missing from `nylib/pyimgui/`, PyInstaller didn't pick up this hook —
+re-check option A/B above. If `keystone.dll` is missing, the freeze likely
+ran without the hooks directory being found (see option B).
+
+A onefile build has no bundle folder to inspect. List its archive with
+`pyi-archive_viewer -l -r -b <app>.exe`, or read `build/<app>/PKG-00.toc`;
+the same paths appear without the `<dist>/<app>/_internal/` prefix.

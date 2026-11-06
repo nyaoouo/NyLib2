@@ -5,6 +5,7 @@ import pathlib
 import struct
 import typing
 from .namespace import Namespace
+from .thread import Thread
 from ..pattern import CachedRawMemoryPatternScanner, StaticPatternSearcher
 from .. import ctype as m_ctype
 from .. import winapi, winutils
@@ -25,6 +26,32 @@ class PageGuardError(Exception):
         super().__init__(
             f"unreadable at 0x{addr:X}+0x{size:X}: {reason}"
         )
+
+
+class SharedMemoryMapping:
+    def __init__(self, process: 'Process', local_at=0, remote_at=0, close=None):
+        self.process = process
+        self.local_at = local_at
+        self.remote_at = remote_at
+        self._close = close
+        self._closed = False
+
+    def close(self):
+        if self._closed: return
+        if self._close is not None:
+            self._close()
+        else:
+            if self.remote_at:
+                try:
+                    winapi.NtUnmapViewOfSection(self.process.handle, self.remote_at)
+                except OSError:
+                    if self.process.still_alive(): raise
+                self.remote_at = 0
+            if self.local_at:
+                winapi.UnmapViewOfFile(self.local_at)
+                self.local_at = 0
+        self.local_at = self.remote_at = 0
+        self._closed = True
 
 
 class Process:
@@ -56,6 +83,36 @@ class Process:
     def virtual_protect(self, address: int, size: int, protect: int):
         winapi.VirtualProtectEx(self.handle, address, size, protect, ctypes.byref(old_prot := ctypes.c_ulong()))
         return old_prot.value
+
+    def duplicate_handle(self, handle: int, *, desired_access=0, inherit=False, options=2) -> int:
+        """Duplicate a calling-process handle into this process."""
+        remote = ctypes.c_void_p()
+        winapi.DuplicateHandle(winapi.GetCurrentProcess(), handle, self.handle,
+                               ctypes.byref(remote), desired_access, inherit, options)
+        return remote.value
+
+    def close_remote_handle(self, handle: int):
+        """Close a handle owned by this process."""
+        winapi.DuplicateHandle(self.handle, handle, None, None, 0, False, 1)  # DUPLICATE_CLOSE_SOURCE
+
+    def map_shared(self, size: int) -> SharedMemoryMapping:
+        """Map a writable page range into this process and the caller."""
+        mapping = SharedMemoryMapping(self)
+        section = 0
+        try:
+            section = winapi.CreateFileMapping(winapi.INVALID_HANDLE_VALUE, None, 0x04, 0, size, None)  # PAGE_READWRITE
+            mapping.local_at = winapi.MapViewOfFile(section, 0x06, 0, 0, size)  # FILE_MAP_READ|FILE_MAP_WRITE
+            base = ctypes.c_void_p()
+            view_size = ctypes.c_size_t(size)
+            winapi.NtMapViewOfSection(section, self.handle, ctypes.byref(base), 0, 0, None,
+                                      ctypes.byref(view_size), 1, 0, 0x04)
+            mapping.remote_at = base.value
+            return mapping
+        except BaseException:
+            mapping.close()
+            raise
+        finally:
+            if section: winapi.CloseHandle(section)
 
     def iter_memory_region(self, start=0, end=None):
         pos = start
@@ -332,6 +389,47 @@ class Process:
         self.handle = None
         winapi.CloseHandle(handle)
 
+    def get_thread(self, thread_id: int, da=0x1FFFFF) -> Thread:
+        """Open a thread belonging to this process; the caller owns its handle."""
+        thread = Thread(thread_id, da=da)
+        try:
+            if thread.process_id != self.process_id:
+                raise ValueError(f'thread {thread_id} does not belong to process {self.process_id}')
+        except BaseException:
+            thread.close()
+            raise
+        return thread
+
+    def iter_threads(self, da=0x1FFFFF) -> typing.Iterator[Thread]:
+        """Yield owned thread objects from a snapshot, skipping threads that exited since it; close each returned thread."""
+        snapshot = winapi.CreateToolhelp32Snapshot(0x4, 0)  # TH32CS_SNAPTHREAD
+        try:
+            entry = winapi.ThreadEntry32()
+            entry.dwSize = ctypes.sizeof(entry)
+            try:
+                winapi.Thread32First(snapshot, ctypes.byref(entry))
+            except OSError as e:
+                if e.winerror == 18: return  # ERROR_NO_MORE_FILES
+                raise
+            while True:
+                if entry.th32OwnerProcessID == self.process_id:
+                    try:
+                        thread = self.get_thread(entry.th32ThreadID, da=da)
+                    except ValueError:
+                        thread = None  # the TID was reused by another process
+                    except OSError as e:
+                        if e.winerror != 87: raise  # ERROR_INVALID_PARAMETER: the thread exited after the snapshot
+                        thread = None
+                    if thread is not None: yield thread
+                entry.dwSize = ctypes.sizeof(entry)
+                try:
+                    winapi.Thread32Next(snapshot, ctypes.byref(entry))
+                except OSError as e:
+                    if e.winerror == 18: break  # ERROR_NO_MORE_FILES
+                    raise
+        finally:
+            winapi.CloseHandle(snapshot)
+
     def read_bytes_zero_trim_unk_size(self, address: int, chunk_size=0x100):
         mbi = self.virtual_query(address)
         max_addr = mbi.BaseAddress + mbi.RegionSize
@@ -498,8 +596,16 @@ class Process:
             if err := self.read_u32(result_at): raise ctypes.WinError(err)
             return self.read_u64(result_at + 8)
 
-    def _call(self, call_address, params=None, block=True):
+    def _call(self, call_address, params=None, block=True, queue_apc_thread=None):
         params = params or 0
+        if queue_apc_thread is not None:
+            pending = _APCCall(self, call_address, params, queue_apc_thread)
+            if not block: return pending  # caller owns the completion object
+            try:
+                _wait_object(pending)
+            finally:
+                pending.close(_wait_object(pending, 0))
+            return
         thread_h = winapi.CreateRemoteThread(self.handle, None, 0, call_address, params, 0, None)
         if not block: return thread_h  # caller owns the handle
         try:
@@ -507,7 +613,7 @@ class Process:
         finally:
             winapi.CloseHandle(thread_h)
 
-    def call(self, func_ptr, *args: int | float | bytes | bool, push_stack_depth=0x28, block=True, read_xmm=False, get_bytes=False):
+    def call(self, func_ptr, *args: int | float | bytes | bool, push_stack_depth=0x28, block=True, read_xmm=False, get_bytes=False, queue_apc_thread=None):
         _MOV_RBX = b'\x48\xBB'  # MOV rbx, n
         _INT_ARG = (
             b'\x48\xB9',  # MOV rcx, n
@@ -552,7 +658,7 @@ class Process:
                     if isinstance(a, int):
                         shell += _INT_ARG[i] + struct.pack('q', a)
                     elif isinstance(a, float):
-                        shell += _MOV_RBX + struct.pack('f', a) + bytes(4) + _FLOAT_ARG[i]
+                        shell += _MOV_RBX + struct.pack('<Q', name_space.store(struct.pack('f', a))) + _FLOAT_ARG[i]
                     else:
                         raise TypeError(f'not support arg type {type(a)} at pos {i}')
                 else:
@@ -582,7 +688,12 @@ class Process:
                              b"\xC3"  # RET
                      )
             code_address = name_space.store(shell)
-            pending = RemoteCall(self, self._call(code_address, block=False), name_space.detach(), return_address, get_bytes)
+            try:
+                thread_h = self._call(code_address, block=False, queue_apc_thread=queue_apc_thread)
+            except _APCResumeError:
+                name_space.detach()  # the queued callback still owns these addresses
+                raise
+            pending = RemoteCall(self, thread_h, name_space.detach(), return_address, get_bytes)
         return pending.wait() if block else pending
 
 
@@ -607,7 +718,10 @@ class RemoteCall:
         return self.result
 
     def _release(self, free_memory: bool):
-        winapi.CloseHandle(self.thread_handle)
+        if isinstance(self.thread_handle, _APCCall):
+            self.thread_handle.close(free_memory)
+        else:
+            winapi.CloseHandle(self.thread_handle)
         self.thread_handle = None
         if free_memory:
             with contextlib.suppress(OSError):  # target process is gone
@@ -624,13 +738,73 @@ class RemoteCall:
             self._release(self.done)  # still running: leak the shellcode memory instead of freeing it under the thread
 
 
+class _APCResumeError(OSError):
+    pass
+
+
+class _APCCall:
+    def __init__(self, process: Process, call_address: int, params: int, thread):
+        thread_h = thread.handle if isinstance(thread, Thread) else thread
+        if winapi.GetProcessIdOfThread(thread_h) != process.process_id:
+            raise ValueError(f'APC thread does not belong to process {process.process_id}')
+        if process.process_id == winapi.GetCurrentProcessId() and winapi.GetThreadId(thread_h) == winapi.GetCurrentThreadId():
+            raise ValueError('cannot suspend the calling thread for an APC')
+        self.process = process
+        self.handle = winapi.CreateEvent(None, True, False, None)
+        self.remote_event = 0
+        self.name_space = process.name_space()
+        queued = False
+        try:
+            self.remote_event = process.duplicate_handle(self.handle)
+            shell = (
+                b'\x48\x83\xEC\x28' +  # SUB rsp, 0x28
+                b'\x48\xB9' + struct.pack('<Q', params) +  # MOV rcx, params
+                b'\x48\xB8' + struct.pack('<Q', call_address) +  # MOV rax, call_address
+                b'\xFF\xD0' +  # CALL rax
+                b'\x48\x83\xC4\x28' +  # ADD rsp, 0x28
+                b'\x48\xB9' + struct.pack('<Q', self.remote_event) +  # MOV rcx, event
+                b'\x48\xB8' + struct.pack('<Q', process.get_proc_address('kernel32.dll', 'SetEvent')) +  # MOV rax, SetEvent
+                b'\xFF\xE0'  # JMP rax; completion must be signaled outside the temporary code
+            )
+            code_address = self.name_space.store(shell)
+            winapi.FlushInstructionCache(process.handle, code_address, len(shell))
+            winapi.SuspendThread(thread_h)
+            try:
+                winapi.QueueUserAPC(code_address, thread_h, 0)
+                queued = True
+            finally:
+                try:
+                    winapi.ResumeThread(thread_h)
+                except OSError as e:
+                    if queued: raise _APCResumeError('APC queued but thread could not be resumed; callback memory retained') from e
+                    raise
+        except BaseException:
+            self.close(not queued)
+            raise
+
+    def close(self, free_memory: bool):
+        if self.handle is None: return
+        winapi.CloseHandle(self.handle)
+        self.handle = None
+        if free_memory:
+            try:
+                if self.remote_event:
+                    self.process.close_remote_handle(self.remote_event)
+            finally:
+                self.name_space.free()
+
+
 def _wait_object(handle, timeout_ms=-1) -> bool:
+    if isinstance(handle, _APCCall): handle = handle.handle
     res = winapi.WaitForSingleObject(handle, timeout_ms) & 0xFFFFFFFF  # DWORD result; WAIT_FAILED is not raised by the wrapper
     if res == 0xFFFFFFFF: raise ctypes.WinError()
     return res == 0  # WAIT_OBJECT_0
 
 
-def _local_call(func_ptr, *args: int | float | bytes | bool, push_stack_depth=0x28, block=True):
+def _local_call(func_ptr, *args: int | float | bytes | bool, push_stack_depth=0x28, block=True, read_xmm=False, get_bytes=False, queue_apc_thread=None):
+    if queue_apc_thread is not None or read_xmm or get_bytes:
+        return Process.call(Process.current, func_ptr, *args, push_stack_depth=push_stack_depth, block=block,
+                            queue_apc_thread=queue_apc_thread, read_xmm=read_xmm, get_bytes=get_bytes)
     a = [ctypes.c_size_t]
     for v in args:
         if isinstance(v, int):

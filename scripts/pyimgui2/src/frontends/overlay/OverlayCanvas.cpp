@@ -136,7 +136,7 @@ START_M_IMGUI_IMPL_NAMESPACE
                         _throwV_("Failed to create the overlay window: {}", GetLastError());
                     this->self.SetHwnd(this->canvas);
                     this->hwndSet = true;
-                    SetWindowTextA(this->canvas, this->self.title.c_str());
+                    SetWindowTextUtf8(this->canvas, this->self.title);
 
                     RECT client{};
                     GetClientRect(this->canvas, &client);

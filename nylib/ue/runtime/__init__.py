@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 from ..errors import UeError, MemoryReadError, MemoryWriteError, TargetError, PeFormatError, CaptureError, \
     SnapshotError, SchemaError, DetectionError, AmbiguousTargetError, ProfileError, OutputRootError, \
-    SessionError, ReadOnlySessionError, CallsDisabledError, DumpMismatchError, UnverifiedOffsetsError, \
+    SessionError, ReadOnlySessionError, CallsDisabledError, DumpMismatchError, UnverifiedOffsetsError, PendingCallsError, \
     AmbiguousNameError, CallError, MarshalError
 
 if TYPE_CHECKING:
@@ -38,7 +38,7 @@ _LAZY: dict[str, str] = {
 __all__ = [
     'UeError', 'MemoryReadError', 'MemoryWriteError', 'TargetError', 'PeFormatError', 'CaptureError',
     'SnapshotError', 'SchemaError', 'DetectionError', 'AmbiguousTargetError', 'ProfileError', 'OutputRootError',
-    'SessionError', 'ReadOnlySessionError', 'CallsDisabledError', 'DumpMismatchError', 'UnverifiedOffsetsError',
+    'SessionError', 'ReadOnlySessionError', 'CallsDisabledError', 'DumpMismatchError', 'UnverifiedOffsetsError', 'PendingCallsError',
     'AmbiguousNameError', 'CallError', 'MarshalError',
     'Unreal', 'FNameValue', 'UObjectProxy', 'StructView', 'RawPointer',
     'WeakObjectPtr', 'LazyObjectPtr', 'SoftObjectPtr', 'FTextValue', 'DelegateBinding', 'DelegateValue',
