@@ -2,7 +2,7 @@
 
 Read-only reader for a UE 5.7 game's IoStore (`.utoc`/`.ucas`) containers: enumerate packages, including those under plugin mount roots, read `Texture2D` metadata, read typed export properties and cross-package references, and decode bounded regions of virtual-texture BC1 tiles and ordinary `PF_B8G8R8A8`, `PF_DXT1`, `PF_DXT5` and `PF_BC7` textures to RGBA8, including ordinary mips stored as optional bulk data (`.uptnl`). Python, with Windows BCrypt for AES and the bundled Oodle DLL for decompression; no FModel, CUE4Parse or Unreal dependency.
 
-Keywords: IoStore, utoc, ucas, AesKey, open_installation, Installation, Texture, virtual texture, VT, BC1, DXT1, DXT5, BC7, B8G8R8A8, .uptnl, ordinary texture, plugin, read_region, usmap, mapping, zen package, PackageInfo, TextureInfo, Region, ScriptObjects, Oodle, Exports, StructValue, DataTable, CurveTable, native struct, ObjectRef
+Keywords: IoStore, utoc, ucas, AesKey, open_installation, Installation, Texture, virtual texture, VT, BC1, DXT1, DXT5, BC7, B8G8R8A8, .uptnl, ordinary texture, plugin, read_region, usmap, mapping, zen package, PackageInfo, TextureInfo, Region, ScriptObjects, Oodle, Exports, StructValue, DataTable, CurveTable, native struct, ObjectRef, pak, read_file, FileInfo, locres, locmeta, localization, InstanceData, instanced mesh
 
 ## Quick start
 
@@ -122,10 +122,67 @@ Compatibility: names, types and slots now follow the effective mapping; an opt-i
 - Plugin mount roots: `list_packages()` also lists packages under an `Engine/Plugins/.../Content/...` or `<Project>/Plugins/.../Content/...` directory, named `/<mount>/<rest>`. `<mount>` is the plugin folder name when that already matches the entries' recorded chunk ids; otherwise the directory spends one summary read on its first non-matching entry to learn `<mount>` from that entry's recorded package name, then reuses it for the rest of the directory (measured on one game: 106 of 22,313 plugin-root files needed a learned mount, from 2 learning reads). A learned `<mount>` keeps the recorded name's case; `<rest>` always keeps the directory index's case.
 - The `.uasset`/`.umap` file-path form does not extend to plugin roots: a file path under a `Plugins/` directory still raises `ValueError`. Address a plugin-root package by the package-path or object-path form (`/<mount>/...`), or by the name `list_packages()` returns.
 
+## Loose files
+
+The same installation reads loose files from legacy `.pak` versions 11 and 12, including encrypted entries. Opening still needs a `.usmap` and an IoStore installation; there is no standalone `.pak` opener. Packages inside a `.pak` stay unmounted: use the package APIs for mounted IoStore packages.
+
+```python
+# needs: an open Installation named assets with the listed loose file
+path = 'Wardogs/Content/Localization/Game/en/Game.locres'
+info = assets.file(path)
+data = assets.read_file(info)
+sample = assets.read_file(path, offset=100000, limit=70000)
+print(info.size, len(data), len(sample))
+```
+
+- `assets.has_file(path: str) -> bool` checks for a listed path; `assets.file(path: str) -> FileInfo` returns its record or raises `MissingAssetError`.
+- `assets.list_files(prefix='', *, match=None) -> list[FileInfo]` returns a new list, filtered by a path prefix and an optional `fnmatch` pattern over the whole path. Both match ASCII-case-insensitively; any string is allowed for either filter. Results sort by `(ASCII-lower(path), path, container)`.
+- `FileInfo` is immutable: `path` keeps the index's case, `container` is the `.pak` basename, `size` is uncompressed bytes, `stored_size` is stored bytes, `compression` is `'None'`, a method name or `'#k'` for an unnamed method index, and `encrypted` describes the entry itself. Passing a `FileInfo` to `read_file()` uses only its `path`, looking it up in that installation.
+- Lookup paths are non-empty relative paths with `/` separators, such as the example above. Backslashes, a leading or trailing `/`, empty segments (`//`), and `.` or `..` segments raise `ValueError`; lookup is ASCII-case-insensitive. Entry paths join the mount point (without its leading `../../../`), directory and filename, collapse repeated `/` and remove a leading `/`. Invalid entry paths, paths over 1,024 characters, control characters, Unicode line/paragraph separators, lone surrogates and undecodable filenames are skipped, as are delete records.
+- Duplicate paths, including case variants within one `.pak`, are not resolved by patch order: `has_file()` returns True and `list_files()` lists both, but `file()` and `read_file()` raise `UnsupportedContainerError(feature='patch containers')`.
+- The first of these four calls loads all recognized `.pak` indexes, checks both indexes' SHA-1 hashes and keeps the result until `close()`. An encrypted index uses the `aes_key=` supplied at open whose GUID matches the footer; no key file is read again. Missing/wrong keys raise `InvalidKeyError`, damaged indexes raise `CorruptAssetError`, another version raises `UnsupportedContainerError(feature='pak version <v>')`, and no full directory index raises `UnsupportedContainerError(feature='pak without a full directory index')`. Any failure discards the whole load; the next call retries it. Opening itself still reads only footers, so these failures occur on first loose-file use.
+- `assets.read_file(path, *, offset=0, limit=None, cancel=None) -> bytes` reads only the range's compression blocks, or 64 KiB pieces for stored entries. `offset` must be a non-negative integer no greater than `size`; `limit` is an integer from 0 to 67,108,864 (64 MiB), or `None` to read from `offset` to the end, subject to the same cap. Booleans are not integers here. An explicit limit is clipped at EOF; an empty range returns `b''`. Invalid arguments fail before I/O. A file larger than the cap can be read in bounded ranges.
+- Only `'None'` and `'Oodle'` compression are read; another method raises `UnsupportedContainerError(feature='compression <method>')`. Encrypted entries use the `.pak` footer GUID's key too; missing keys raise `InvalidKeyError`. AES windows are aligned to 16 bytes before decrypting and cutting the result to the requested range. Reads use a call-local handle and bypass the shared block cache. `read_file()` returns the bytes UE stores; encryption a game adds to those bytes is the caller's to handle.
+
+One key-validation limit: if an entry is encrypted but its index is plain, and nothing else validates that GUID's key, a wrong key returns wrong bytes for a stored entry; a compressed entry raises `CorruptAssetError`. The measured installation had encrypted indexes throughout, so this case was not exercised there.
+
+Compatibility: `.pak` rows still have `mounted=False`. A supported 221-byte footer's `reason` is now `'legacy .pak: loose files only, through read_file()'`. Other versions keep `'legacy .pak is not read by this nylib version'`; recognized 222-, 225- and 262-byte footers now report their version and index-encryption flag, with `compression=()`, but are not read further. Unrecognized or unreadable footers keep their existing reasons and are skipped by the index load. `Installation.identity` and its repr are unchanged and do not identify `.pak` contents; key localization caches by `Locres.sha256`. The seven added lazy public names in `nylib.ue.assets.__all__` (now 59) are `FileInfo`, `parse_locres`, `parse_locmeta`, `Locres`, `LocresEntry`, `Locmeta` and `InstanceData`; `nylib.ue.__all__` is unchanged.
+
+## Localization
+
+`parse_locres(data, *, file=None) -> Locres` reads version 3; `parse_locmeta(data, *, file=None) -> Locmeta` reads version 2. Both accept `bytes`, `bytearray` or `memoryview`, keep no mutable input reference, and use the optional string `file=` for error context. Other versions raise `UnsupportedAssetError` with `feature='locres version <v>'` or `'locmeta version <v>'`; absent `.locres` magic is treated as legacy version 0. Missing `.locmeta` magic and malformed supported data raise `CorruptAssetError`. On one measured installation only 38 of 82 `.locres` and 2 of 8 `.locmeta` had supported versions; the older files are refused.
+
+```python
+# needs: an open Installation named assets and a Base TextValue named tv
+from nylib.ue.assets import Locres, parse_locres, parse_locmeta
+
+root = 'Wardogs/Content/Localization/Game/'
+meta_path = root + 'Game.locmeta'
+meta = parse_locmeta(assets.read_file(meta_path), file=meta_path)
+loc_path = root + meta.native_locres
+loc = parse_locres(assets.read_file(loc_path), file=loc_path)
+translated = tv.string
+if tv.history == 'Base':
+    try:
+        entry = loc.entry(tv.namespace, tv.key)
+    except KeyError:
+        pass
+    else:
+        if Locres.source_hash(tv.string) == entry.source_hash:
+            translated = entry.string
+```
+
+- `Locres` is immutable and made only by `parse_locres()`: `version`, `sha256` (the full input's SHA-256), `namespaces` and `entries` (tuples in file order). Empty namespaces are preserved. `len(loc)` counts entries; `loc.get(namespace, key, default=None)` returns the localized string or the default; `loc.entry(namespace, key)` returns a `LocresEntry` or raises `KeyError`. Both lookup arguments must be strings. Each entry holds `namespace`, `key`, `string` and the stored unsigned 32-bit `source_hash`. Equality and hashing compare version, namespaces and entries, excluding `sha256`.
+- `Locres.source_hash(text)` implements UE's `FCrc::StrCrc32`: text before the first NUL, UTF-16 code units (including surrogate pairs as two units), each fed to CRC-32 as four little-endian bytes. Empty text hashes to 0. Compare it with the entry's source hash before replacing a `Base` text, as above; the parser itself supplies no staleness policy.
+- `Locmeta` holds `version`, `native_culture`, `native_locres` (relative to the metadata file's folder), `cultures` (a tuple of compiled cultures in file order) and `ugc` (`bool`). A listed culture need not have a `.locres` in the installation.
+- There is no automatic culture fallback, target merge or `TextValue.localize()`. `StringTableEntry` text needs a namespace from the `StringTable` native tail, which this reader does not decode.
+- Both parsers hold the GIL and take no `cancel=`. Their records remain usable after the installation closes and support pickling and `deepcopy`.
+
 ## Metadata
 
 - `assets.texture(name) -> Texture` resolves the `Texture2D` export and parses its header into `Texture.info` (a `TextureInfo`): `width`, `height`, `pixel_format`, `mips` (a `MipInfo` per level), `alpha` (`'none'` or `'straight'`), `virtual` (a `VirtualTextureInfo`, or `None` for an ordinary texture), `readable`, and `unsupported` (the reason, matching the error `read_region` would raise). The first `texture()` call on an installation is slower; see Notes.
-- `assets.stats() -> ReadStats` returns the running totals since open (`reads`, `bytes_read`, `blocks_decompressed`, `tiles_decoded`, `seconds`, ...); `reads` now also counts `read()`, `Exports.read()`, `raw()` and `Exports.raw()` calls, not only region reads. Subtracting two snapshots measures one span; `str(stats)` is a one-line summary.
+- `assets.stats() -> ReadStats` returns the running totals since open (`reads`, `bytes_read`, `blocks_decompressed`, `tiles_decoded`, `seconds`, ...); `reads` also counts `read()`, `Exports.read()`, `raw()`, `Exports.raw()` and `read_file()` calls. Subtracting two snapshots measures one span; `str(stats)` is a one-line summary.
+- `has_file()`, `file()` and `list_files()` do not increment `reads`. The call loading the loose-file index counts two `blocks_read` per `.pak` (primary and directory indexes), their stored bytes in `bytes_read`, and I/O/AES time. `read_file()` counts each compressed block or stored piece read, including encrypted alignment bytes, with the Oodle/AES counters as applicable and no cache hits. Localization parsers add nothing; instance-tail parsing contributes to the export read's `seconds_decode`.
 
 ## Reading regions
 
@@ -169,8 +226,8 @@ with open_installation('path/to/MyGame/Content/Paks', engine='5.7',
         print(str(e))                                        # not serialized: the archetype's value is unknown here
 ```
 
-- `assets.exports(name, *, cancel=None) -> Exports` reads a package's cooked header only (no export data) and returns an `Exports` handle: a `Sequence[ExportInfo]` with `package` (a `PackageInfo`), `stats` (a `ReadStats` for this call), `find(name) -> ExportInfo` (no I/O), `read(which, *, partial=False, cancel=None) -> Export` and `raw(which, *, offset=0, limit, cancel=None) -> bytes`. `which` takes an index, a name or sub-object path, or an `ExportInfo` from this handle. Calling `Exports(...)` directly raises `TypeError`; an `Exports` keeps its `Installation` alive and refuses pickling. After `close()`, its `read()` and `raw()` raise `InstallationClosedError`; `len`, indexing, iteration and `find()` keep working.
-- `assets.read(target, *, partial=False, cancel=None) -> Export` reads one export directly: `target` is a package or object path (`str`, sub-object paths included), an `ExportInfo`, an `ObjectRef` or a `SoftObjectRef` (see References, below). `Export` holds `info` (`ExportInfo`), `properties` (a `StructValue`), `native` (a `DataTable`, `CurveTable` or `None`), `native_size` (the bytes after the object trailer, or after any table rows), `exact` (`complete` and `native_size == 0`), `guid`, `complete` and `problem` (an `AssetError`, set only on a partial result; see Partial reads, below).
+- `assets.exports(name, *, cancel=None) -> Exports` reads a package's cooked header only (no export data) and returns an `Exports` handle: a `Sequence[ExportInfo]` with `package` (a `PackageInfo`), `stats` (a `ReadStats` for this call), `find(name) -> ExportInfo` (no I/O), `read(which, *, partial=False, cancel=None, instances=False) -> Export` and `raw(which, *, offset=0, limit, cancel=None) -> bytes`. `which` takes an index, a name or sub-object path, or an `ExportInfo` from this handle. Calling `Exports(...)` directly raises `TypeError`; an `Exports` keeps its `Installation` alive and refuses pickling. After `close()`, its `read()` and `raw()` raise `InstallationClosedError`; `len`, indexing, iteration and `find()` keep working.
+- `assets.read(target, *, partial=False, cancel=None, instances=False) -> Export` reads one export directly: `target` is a package or object path (`str`, sub-object paths included), an `ExportInfo`, an `ObjectRef` or a `SoftObjectRef` (see References, below). `Export` holds `info` (`ExportInfo`), `properties` (a `StructValue`), `native` (a `DataTable`, `CurveTable`, `InstanceData` or `None`), `native_size` (the unconsumed bytes after the trailer and any decoded native tail), `exact` (`complete` and `native_size == 0`), `guid`, `complete` and `problem` (an `AssetError`, set only on a partial result; see Partial reads, below).
 - `ExportInfo` (from `Exports`, `find()` or `resolve()`) holds `package`, `name`, `path`, `index`, `class_name`, `class_ref`, `super_ref`, `template_ref` (the last three `ObjectRef`s), `outer` (an export index or `None`), `flags`, `size` and `container`. `class_name` is set only when `class_ref.kind` is `'script'` (an engine class) or `'export'` (a class in the same package); for a class imported from another package, which is how a Blueprint `..._C` class usually appears, it is `None`, and `assets.resolve(info.class_ref).name` gives the class name.
 - Each property reads to a plain Python value for the simple kinds (`bool`, `int`, `float`, `str`), or to one of the records above: `ObjectRef` / `SoftObjectRef` for a reference, `EnumValue` for an enum, `TextValue` for an `FText`, a `tuple` (or `bytes`, for a byte array) for an array or set, `MapValue` for a map, the value itself or `None` for an optional, and a nested `StructValue` for a struct -- reflected (decoded through the `.usmap` mapping) or native (one of the built-in layouts below).
 - `StructValue` is a read-only `Mapping[str, object]` with `struct` (its class or struct name), `native` (`bool`) and `slots` (a tuple of `Slot`); `sv[name]`, `sv.at(index)` and `sv.state(key)` read by name or by schema index. A slot's state is `'serialized'` (its bytes were stored), `'zero'` (the header marked it unset; it reads as its type's zero value), `'absent'` (the header never listed it -- the real value is the class archetype's, which this data does not hold, so `sv[name]` raises `AbsentPropertyError`), or `'unread'` (only inside a partial result). A name shared by more than one property in the class chain raises `AmbiguousNameError` from `sv[name]`; use `sv.at(index)` instead.
@@ -202,7 +259,27 @@ with open_installation('path/to/MyGame/Content/Paks', engine='5.7',
 
 - A `DataTable` export's `Export.native` is a `DataTable` record: `row_struct` (the row struct's name, or `None` when it came from another package -- the rows still decode through the resolved struct), `row_struct_ref` (an `ObjectRef`) and `rows`, a `MapValue` from row name to that row's `StructValue`, in file order.
 - A `CurveTable` export's `Export.native` is a `CurveTable` record: `mode` (`'Empty'`, `'SimpleCurves'` or `'RichCurves'`), `rows` (as above, each row a `SimpleCurve` or `RichCurve` `StructValue`), and `keys(row) -> tuple[StructValue, ...]`, the row's key array -- `SimpleCurveKey` or `RichCurveKey` values, in order; `keys()` raises `KeyError` for an unknown row name.
-- `Export.native` is `None` for every other class; a class is read as a table only when its class chain includes `DataTable` or `CurveTable`.
+- A class is read as a table only when its class chain includes `DataTable` or `CurveTable`; these take precedence over instanced meshes. Other classes have `native=None` unless instance decoding is requested below.
+
+## Instanced meshes
+
+`assets.read(target, *, partial=False, cancel=None, instances=False)` and `Exports.read(which, *, partial=False, cancel=None, instances=False)` accept an opt-in boolean `instances`. With True, a non-CDO export whose mapped class chain includes `InstancedStaticMeshComponent` returns its native tail as `InstanceData`. Other exports read as before; the default remains False. `raw()`, `resolve()` and `texture()` have no such keyword.
+
+```python
+# needs: an open Installation named assets and an instanced component object path
+from nylib.ue.assets import InstanceData
+
+export = assets.read('/Game/Maps/MyMap.MyMap:PersistentLevel.Actor.InstancedComponent',
+                     instances=True)
+if isinstance(export.native, InstanceData):
+    print(len(export.native.matrices), len(export.native.custom_data))
+```
+
+- `InstanceData.matrices` is a tuple of per-instance tuples: each is the exact 16 doubles of an `FMatrix`, row-major, element `(r, c)` at `4 * r + c`. No transform decomposition or float32 rounding is applied. `custom_data` is a flat tuple of float32 values widened exactly to Python floats, in instance order; its length is a multiple of the instance count, or zero when there are no instances. The immutable record pickles and `deepcopy` round-trips; its compact repr reports instance and custom-float counts.
+- The reader skips actor-component bookkeeping and static-mesh LOD payloads, reads the instance arrays, then skips any hierarchical cluster-node array. Bounds, LOD payloads and the HISM cluster tree are not exposed. A scene-bounds block is read only when the export's own `SceneComponent.bComputeBoundsOnceForGame` slot is serialized as True; an absent or zero-masked slot reads no block. This also supports HLOD tails: all 120,022 measured HLOD exports followed that rule. Across the measured installation, 565,893 family tails contained 9,587,851 instances, with at most 23,340 in one export.
+- A successful tail read has `native_size=0`, `exact=True` and `complete=True`; missing instance arrays give `InstanceData((), ())`. An unknown tail layout raises `UnsupportedAssetError(feature='<class> tail')`, and cooked instance render data raises it with `feature='instanced mesh cooked data'`. Both carry the class, failing `position` and an empty `property_path`, plus mapping-change/custom-serialization attribution under the usual rules.
+- With `partial=True`, a tail failure keeps the decoded properties and trailer GUID, sets `complete=False`, `native=None`, `native_size=0`, `exact=False`, and puts the error in `problem`; no successfully decoded slot becomes unread. Each matrix, custom float and LOD entry counts toward the decode budget and the checkpoint every 4,096 values.
+- Compatibility: `Export.native` can now be `InstanceData` as well as `DataTable`, `CurveTable` or `None`. For a family export, opting in changes `native`, `native_size`, `exact` and therefore equality; without the keyword existing results are unchanged. Retained memory is about 570 bytes per instance plus 32 bytes per custom float while the export lives; release large results between reads.
 
 ## Partial reads and `raw()`
 
@@ -216,17 +293,18 @@ with open_installation('path/to/MyGame/Content/Paks', engine='5.7',
 
 ## Threads and cancellation
 
-- Any number of threads may call `Installation`, `Exports` and `Texture` methods at once; they wait on each other only briefly, around each container block read and the shared block cache. Records and `AesKey` are immutable.
+- Any number of threads may call `Installation`, `Exports` and `Texture` methods at once; container block reads and the shared block cache use short locks. Loose-file index loading has its own lock and publishes one immutable index; other callers wait for it. Records and `AesKey` are immutable.
 - The GIL is released during file I/O, AES decrypt and Oodle decompress, and held during parsing and the BC1, DXT5 and BC7 decodes, which are pure Python.
 - `close()` waits for reads running on other threads, except one it is called from itself; once it returns with no in-flight read of its own, the installation holds no file handle, lock object or cache.
 - `Installation`, `Exports`, `Texture`, `AesKey` and `Usmap` refuse pickling and `copy`/`deepcopy`; records, values (`StructValue` and `MapValue` included) and the error classes pickle and `deepcopy` round-trip. A `Usmap` may be shared by any number of threads and installations, including concurrent `check()` calls; `load_usmap()` has no `cancel=`.
 - `cancel=` on `exports()`, `read()`, `raw()` and `resolve()` is checked before every compression block an operation touches, every few thousand export-map entries while listing a package's exports, and every few thousand decoded values while decoding properties or table rows. The one gap is the cooked-header parse itself after its last block, which has no checkpoint and grows linearly with the header: on one measured install, worst-case cancel latency there was about 0.2 s for a main map's `exports()` and about 0.45-0.48 s for the largest cooked header in the whole install.
+- `read_file()` checks cancellation before any read, before each `.pak`'s index reads, about every 50 ms while waiting for another call's index load, and before every compressed block or stored piece. Cancellation raises `ReadCancelledError` and returns no bytes. The four loose-file methods raise `InstallationClosedError` after close; an in-flight read notices close at its next checkpoint. `close()` releases the index, retained keys and decryptors; no `.pak` handle survives a call. Returned file, localization and instance records outlive the installation.
 
 ## Errors
 
 ```text
 UeError
-└── AssetError                      every nylib.ue.assets failure but argument-type errors; .package, .container, .export
+└── AssetError                      every nylib.ue.assets failure but argument-type errors; .package, .container, .export, .file
     ├── InvalidKeyError             no/wrong AES key, GUID mismatch, bad key file; .key_guid, .reason, .path
     ├── InvalidMappingError         .usmap missing, invalid, or does not fit the data; .usmap, .class_name, .property_index,
     │                               .property_name, .reason, .path, .property_path, .property_type, .position, .struct_name, .row,
@@ -249,25 +327,32 @@ UeError
 ```
 
 - Wrong argument types raise `TypeError`, wrong values raise `ValueError` -- never one of the classes above, except `RegionOutOfBoundsError`, which is both an `AssetError` and a `ValueError`. An out-of-range `Exports` index, or an out-of-range index to `StructValue.at()` or `StructValue.state()`, raises `IndexError`; an unknown name to `sv[name]` or `CurveTable.keys()` raises `KeyError`.
+- Every `AssetError` has `file`, defaulting to `None`: loose-file failures concerning one path set it to that path, and localization parser failures use the supplied `file=`. These failures have no mapping-change or custom-serialization attribution. `Locres.entry()` raises `KeyError` for a missing namespace/key pair.
 - `AmbiguousNameError` (re-exported from `nylib.ue`, not under `AssetError`) is raised by `texture()` when a package name, or an object path's export name, matches more than one Texture2D export, and by `read()`, `raw()` and `Exports.find()` when a name matches more than one export; it is not an `AssetError`.
 - `AbsentPropertyError` is also a `KeyError`, but overrides `__str__` so `str(err)` is the plain message despite `KeyError`'s quoting; `StructValue.get()` and `in` treat it as missing, the way a real `KeyError` would. A `problem` carried by a partial `Export` (below) is never a `KeyError`, so `get()` never turns an unread property into a default silently.
 - A failure found while reading one export's properties -- `InvalidMappingError` or `UnsupportedAssetError` raised from inside a property block, the object trailer, a table row, or a native struct -- carries `property_path`: the steps from the export's class down to the failure, for example `WDWeaponStatsData#1.WDWeaponStats#36`, an array index as `[3]`, a map key or value as `[key 0]` / `[value 0]`, a table row as `[row 2]`. `class_name`, `property_index`, `property_name` and `property_type` describe that last step; `position` is where the failing read began; `struct_name` names the native struct involved, when there is one; `row` names the table row, when the failure is inside one. The message itself still never repeats a property or row name -- those live only in the attributes.
-- Messages are one line of English; never a path beyond a basename, key material, decrypted/decoded bytes, mapping-file content, or a property name. `load_usmap()` reports mapping/meta failures as `InvalidMappingError`; a missing meta file has `reason='meta.json not found'`, invalid UTF-8/JSON has `'meta.json not JSON'`, and a wrong dump schema has `'meta.json schema'`. `with_changes()` refusals have `reason='change does not apply'`; inspect attributes and change records for names. Report summaries and requirement details omit property names too.
+- Messages are one line of English; paths use basenames except for quoted in-pak paths and object paths. They never include key material, decrypted/decoded bytes, localized text, mapping-file content or a property name. `load_usmap()` reports mapping/meta failures as `InvalidMappingError`; a missing meta file has `reason='meta.json not found'`, invalid UTF-8/JSON has `'meta.json not JSON'`, and a wrong dump schema has `'meta.json schema'`. `with_changes()` refusals have `reason='change does not apply'`; inspect attributes and change records for names. Report summaries and requirement details omit property names too.
 
 ## Supported profile
 
 | Layer | Supported in this version | Beyond it |
 |---|---|---|
-| Container | IoStore TOC v8, one or more partitions (partition `p >= 1` read from `<base>_s<p>.ucas`); AES-256-ECB; Oodle (Kraken) and stored blocks; compression blocks a power of two from 4 KiB to 16 MiB | `UnsupportedContainerError` (a count of 0 partitions: `feature='zero partitions'`; one such container makes `open_installation` fail for the whole install); a missing partition file or a block crossing a partition end: `CorruptAssetError`; a `.pak` is listed in `containers` but never mounted |
+| Container | IoStore TOC v8, one or more partitions (partition `p >= 1` read from `<base>_s<p>.ucas`); AES-256-ECB; Oodle (Kraken) and stored blocks; compression blocks a power of two from 4 KiB to 16 MiB. Legacy `.pak` v11/v12 loose files with a full directory index, stored or Oodle, encrypted indexes and entries included | `UnsupportedContainerError` (a count of 0 IoStore partitions: `feature='zero partitions'`; one such container makes `open_installation` fail for the whole install); a missing partition or a block crossing its end: `CorruptAssetError`. Other `.pak` versions, no full directory index or another entry codec are unsupported; `.pak` packages stay unmounted |
 | Mapping | `.usmap` v0-v4; compression None, Oodle, ZStd (needs Python 3.14+); reusable `Usmap`, in-memory changes and requirement checks | `InvalidMappingError`; no `.usmap` writer or automatic name repair |
 | Package | zen packages, unversioned properties | `InvalidMappingError`, `CorruptAssetError` |
 | Exports and typed properties | every property kind and reference (`exports()`, `read()`, `raw()`, `resolve()`); 121 built-in native struct layouts; any other struct name through the `.usmap` mapping | a native struct this version does not read (named under Supported natives, above): `UnsupportedAssetError` |
+| Localization | `.locres` v3 and `.locmeta` v2 over bytes; namespace/key lookup and source hashes | other versions: `UnsupportedAssetError`; malformed supported data: `CorruptAssetError`; no culture fallback, target merge or StringTable tail |
+| Instanced meshes | opt-in `instances=True` for the mapped instanced-static-mesh family, HISM and HLOD included; exact matrices and custom floats | cooked instance render data or another tail layout: `UnsupportedAssetError`; cluster tree and matrix decomposition are not exposed |
 | Texture metadata | every `Texture2D` export, virtual and ordinary | another class: `UnsupportedAssetError` |
 | Virtual-texture region reads | `RawGPU` codec, one layer, `PF_DXT1`, non-legacy tile layout | `UnsupportedAssetError` / `UnsupportedPixelFormatError`; `info.readable` is False and names the reason. Any other VT layer format, including `PF_DXT5` and `PF_BC7`, still reports `has no decoder in this nylib version`, although those formats decode on ordinary textures |
 | Ordinary-texture region reads | `PF_B8G8R8A8`, `PF_DXT1`, `PF_DXT5`, `PF_BC7`; inline mips, default `.ubulk` or optional `.uptnl` (cooked index 0, in any mounted container) | `UnsupportedPixelFormatError` for another pixel format; `UnsupportedAssetError` for no serialized mips, mip data not serialized with the texture, compressed or memory-mapped bulk data (`.m.ubulk`), another cooked index, an optional chunk in multiple containers, optional data also flagged inline, or any other placement; `info.readable` is False and names the reason. An unmounted optional chunk keeps `info.readable=True` but that mip's read raises `MissingAssetError` |
 
 ## Notes
 
+- Measured on one shared machine with other work running, Python 3.12/3.14: the product's first loose-file index load over 16 `.pak` files and 5,976 entries took about 60-94 ms, retaining 6.1-6.3 MiB (6.1-6.4 MiB peak); later index lookups took about 5 microseconds. Loose-file reads took about 0.53-0.54 ms p50 and 0.63-0.68 ms p95; reading all 219 encrypted entries took about 24 ms. Earlier range probes read 70,000 bytes across 2 blocks in each Game `.locres`, and a 70,000-byte movie tail across 2 stored pieces. These are approximate observations, with no cold-cache claim or throughput guarantee.
+- On that shared machine, the product parsed Game `en` (525,364 bytes, 5,948 entries, 169 namespaces) in about 13-15 ms, retaining about 2.1 MiB; the largest `.locres` (6,892,728 bytes) took about 145-183 ms and retained 19.1-19.6 MiB. Earlier prototype probes of the two Game cultures took about 12-14 ms and retained 2.2 MiB each. Parser memory and time grow with the strings and entries; parsing has no cancellation checkpoint.
+- On the same shared machine, reading 43,117 exports of a main map took about 9.0-10.6 s without instances and 10.1-13.1 s with them; a 23,340-instance export took about 12-14 ms with 15.5-15.7 MiB peak traced allocation. Earlier whole-install probes found about 8% extra tail work; this is a different workload from that map. Measured cancellation latency was about 1.7-2.1 ms during instance parsing and 0.10-0.14 ms during a stored loose-file read.
+- `read_file()` keeps the returned bytes plus working buffers: measured traced allocation peaked near 128 MiB for a 64 MiB stored range and 67.5 MiB for a 33.8 MiB Oodle file, within `2 * returned_bytes + 4 MiB` on those inputs. Use smaller ranges to reduce peak memory.
 - No resampling: a mip's pixels come back at that mip's own size; scaling is the caller's job.
 - The BC1, DXT5 and BC7 decodes are pure Python: they hold the GIL, so large reads are single-core bound during decode. Prototype whole-mip measurements on one machine were about 25-30 Mpx/s for DXT1, 2.6-2.9 Mpx/s for DXT5 and 0.6-1.0 Mpx/s for BC7, depending on the blocks. A whole 4096x4096 BC7 mip takes about 17-27 s at those rates; use bounded regions for interactive reads.
 - Measured on one machine with other work running: ordinary 512x512 region reads took about 27 ms p50 for DXT1, 97 ms for DXT5 and 239 ms for BC7 (16, 32 and 32 compression blocks respectively). A 2x2 sample took about 0.07-0.13 ms p50 on 1 block, including about 0.09 ms for an optional `.uptnl` mip. Measured cancellation latency was about 13 ms, 24 ms and 60 ms for those formats respectively; polls are between compression blocks, so latency includes decode work between polls. These figures do not establish cold-cache performance.
