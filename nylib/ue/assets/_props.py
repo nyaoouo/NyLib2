@@ -6,7 +6,7 @@ import threading
 
 from ..errors import InvalidMappingError, UnsupportedAssetError
 from . import _natives
-from ._values import CurveTable, DataTable, EnumValue, MapValue, ObjectRef, Slot, SoftObjectRef, StructValue, TextValue, _layout
+from ._values import CurveTable, DataTable, EnumValue, InstanceData, MapValue, ObjectRef, Slot, SoftObjectRef, StructValue, TextValue, _layout
 
 _LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
 _MAX_LEVEL = 16  # struct nesting, nested FTexts included
@@ -579,7 +579,7 @@ class PropertyReader:
         struct's cached schema."""
         return Schema.of(templates, self)
 
-    def read(self, data: bytes, schema: Schema, flags: int, partial: bool) -> tuple:
+    def read(self, data: bytes, schema: Schema, flags: int, partial: bool, instances: bool = False) -> tuple:
         """(properties, native, native_size, guid, complete, problem) of the export's bytes `data`, whose class has `schema`."""
         self.data, self.pos, self.end = data, 0, len(data)
         name = self.cls
@@ -643,7 +643,121 @@ class PropertyReader:
                         raise e
                     return properties, None, 0, guid, False, _kept(e)
                 return properties, native, 0, guid, True, None
+            if instances and 'instancedstaticmeshcomponent' in schema.records:
+                try:
+                    native = self._instance_tail(properties, 'hierarchicalinstancedstaticmeshcomponent' in schema.records)
+                except _PROBLEMS as e:
+                    if not partial:
+                        raise
+                    return properties, None, 0, guid, False, _kept(e)
+                return properties, native, 0, guid, True, None
         return properties, None, self.end - self.pos, guid, True, None
+
+    def _instance_tail(self, properties: StructValue, hierarchical: bool) -> InstanceData:
+        """Read the cooked instanced-static-mesh tail, skipping bounds, LOD payloads and cluster nodes."""
+        def fail(reason, pos, cooked=False):
+            attrs = self._attrs(pos, None)
+            if cooked:
+                message = (f'{self.package}.{self.export}: the {self.cls} native tail holds cooked instance render data, '
+                           f'which this nylib version does not read (at {pos:#x})')
+                feature = 'instanced mesh cooked data'
+            else:
+                message = (f'{self.package}.{self.export}: the {self.cls} native tail does not have the instanced static mesh '
+                           f'layout this nylib version reads ({reason} at {pos:#x}; export is {self.size} bytes)')
+                feature = f'{self.cls} tail'
+            raise UnsupportedAssetError(message, feature=feature, **attrs)
+
+        def need(n):
+            p = self.pos
+            if n > self.end - p:
+                fail('read past the export end', p)
+            self.pos += n
+            return p
+
+        def i32():
+            return _I32.unpack_from(self.data, need(4))[0]
+
+        def u8():
+            return self.data[need(1)]
+
+        def boolean():
+            p = need(4)
+            v = _U32.unpack_from(self.data, p)[0]
+            if v > 1:
+                fail(f'bool value {v}', p)
+            return bool(v)
+
+        def count(unit, what):
+            p = self.pos
+            n = i32()
+            if n < 0 or n * unit > self.end - self.pos:
+                fail(f'{what} count {n}', p)
+            return n
+
+        def bulk(size, what):
+            p = self.pos
+            es = i32()
+            cp = self.pos
+            n = i32()
+            if n < 0:
+                fail(f'{what} count {n}', cp)
+            if es != size:
+                fail(f'{what} element size {es}', p)
+            if n * size > self.end - self.pos:
+                fail(f'{what} count {n}', cp)
+            return n
+
+        need(28 * count(28, 'UCSModifiedProperties'))
+        bounds = next((s for s in properties.slots if _lower(s.owner) == 'scenecomponent'
+                       and s.name == 'bComputeBoundsOnceForGame'), None)
+        if bounds is not None and bounds.state == 'serialized' and properties.at(bounds.index) is True:
+            if boolean():
+                need(56)
+        for _ in range(count(2, 'LOD')):
+            self.tick()
+            g, c = u8(), u8()
+            if not g & 2:
+                need(32)
+            if not c & 1:
+                p = self.pos
+                v = u8()
+                if v > 1:
+                    fail(f'vertex colour flag {v}', p)
+                if v:
+                    vg, _vc = u8(), u8()
+                    i32()
+                    p = self.pos
+                    nv = i32()
+                    if nv < 0:
+                        fail(f'colour vertex count {nv}', p)
+                    if not vg & 2 and nv:
+                        need(4 * bulk(4, 'colour'))
+        if boolean():
+            need(4)
+        cooked, has_data = boolean(), boolean()
+        matrices, custom = [], []
+        if has_data:
+            n = bulk(128, 'instance')
+            matrix = struct.Struct('<16d')
+            for _ in range(n):
+                self.tick()
+                matrices.append(matrix.unpack_from(self.data, need(128)))
+            p = self.pos
+            k = bulk(4, 'custom data')
+            if (not n and k) or (n and k % n):
+                fail(f'custom data count {k} for {n} instances', p)
+            for _ in range(k):
+                self.tick()
+                custom.append(_F32.unpack_from(self.data, need(4))[0])
+        if cooked:
+            p = self.pos
+            if boolean():
+                fail('cooked data', p, True)
+        if hierarchical and self.pos < self.end:
+            need(64 * bulk(64, 'cluster node'))
+        if self.pos != self.end:
+            fail(f'{self.end - self.pos} bytes after the tail', self.pos)
+        return InstanceData(tuple(matrices), tuple(custom))
 
     # ---- DataTable and CurveTable ----------------------------------------------------------------------------------
 

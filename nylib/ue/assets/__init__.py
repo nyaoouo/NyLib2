@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from ._installation import open_installation, Installation, Texture, Exports
     from ._keys import AesKey
     from ._records import ContainerInfo, BuildInfo, PackageInfo, MipInfo, VirtualTextureInfo, TextureInfo, Region, ReadStats
-    from ._values import ExportInfo, Export, StructValue, Slot, MapValue, EnumValue, TextValue, ObjectRef, SoftObjectRef, DataTable, CurveTable
+    from ._values import ExportInfo, Export, StructValue, Slot, MapValue, EnumValue, TextValue, ObjectRef, SoftObjectRef, DataTable, CurveTable, InstanceData
     from ._mapping import load_usmap, Usmap, RecordInfo, PropertyInfo, MappingChange, Requirement, RequirementResult, FamilyResult, \
         MappingReport, DumpInfo, index_and_type_fallback, unique_prefix_fallback
 
@@ -28,7 +28,7 @@ __all__ = [
     'DataTable', 'CurveTable',
     'load_usmap', 'Usmap', 'RecordInfo', 'PropertyInfo', 'MappingChange', 'Requirement', 'RequirementResult', 'FamilyResult',
     'MappingReport', 'DumpInfo', 'index_and_type_fallback', 'unique_prefix_fallback',
-    'FileInfo', 'parse_locres', 'parse_locmeta', 'Locres', 'LocresEntry', 'Locmeta',
+    'FileInfo', 'parse_locres', 'parse_locmeta', 'Locres', 'LocresEntry', 'Locmeta', 'InstanceData',
     'AssetError', 'InvalidKeyError', 'InvalidMappingError', 'BuildMismatchError', 'MissingAssetError', 'MissingTileError',
     'UnsupportedError', 'UnsupportedContainerError', 'UnsupportedAssetError', 'UnsupportedPixelFormatError',
     'CorruptAssetError', 'RegionOutOfBoundsError', 'ReadCancelledError', 'InstallationClosedError', 'AbsentPropertyError',
@@ -43,7 +43,7 @@ _LAZY = {
     'VirtualTextureInfo': '_records', 'TextureInfo': '_records', 'Region': '_records', 'ReadStats': '_records',
     'Exports': '_installation', 'ExportInfo': '_values', 'Export': '_values', 'StructValue': '_values', 'Slot': '_values',
     'MapValue': '_values', 'EnumValue': '_values', 'TextValue': '_values', 'ObjectRef': '_values', 'SoftObjectRef': '_values',
-    'DataTable': '_values', 'CurveTable': '_values',
+    'DataTable': '_values', 'CurveTable': '_values', 'InstanceData': '_values',
     'load_usmap': '_mapping', 'Usmap': '_mapping', 'RecordInfo': '_mapping', 'PropertyInfo': '_mapping',
     'MappingChange': '_mapping', 'Requirement': '_mapping', 'RequirementResult': '_mapping', 'FamilyResult': '_mapping',
     'MappingReport': '_mapping', 'DumpInfo': '_mapping', 'index_and_type_fallback': '_mapping', 'unique_prefix_fallback': '_mapping',

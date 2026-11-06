@@ -326,6 +326,17 @@ def _problem_key(p) -> tuple | None:
     return None if p is None else (type(p), str(p))
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class InstanceData:
+    matrices: tuple[tuple[float, ...], ...]
+    custom_data: tuple[float, ...]
+
+    def __repr__(self) -> str:
+        n = len(self.matrices)
+        k = len(self.custom_data) // n if n else 0
+        return f'InstanceData({n} instances, {k} custom floats each)'
+
+
 @dataclass(frozen=True, slots=True, eq=False, repr=False)
 class Export:
     info: ExportInfo

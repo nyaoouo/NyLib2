@@ -1264,7 +1264,7 @@ class Installation:
         return header.name, toc.basename, table
 
     def _read_export(self, toc: Toc, container: Container, idx: int, header: ZenHeader, infos: '_Infos', i: int, partial: bool,
-                     counters, check: '_Check') -> tuple:
+                     counters, check: '_Check', instances: bool = False) -> tuple:
         """The fields of the Export of export `i` of `header`, all but its stats."""
         pkg, c = header.name, toc.basename
         info = infos.info(i)
@@ -1305,7 +1305,7 @@ class Installation:
             data = container.read_range(idx, start, size, cache=self._cache, counters=counters, checkpoint=check.blocks(toc, idx, start, size))
             t0 = time.perf_counter()
             try:
-                properties, native, native_size, guid, complete, problem = reader.read(data, schema, info.flags, partial)
+                properties, native, native_size, guid, complete, problem = reader.read(data, schema, info.flags, partial, instances)
             finally:
                 counters.seconds_decode += time.perf_counter() - t0 - resolving[0]
         except (InvalidMappingError, UnsupportedAssetError) as e:
@@ -1317,10 +1317,12 @@ class Installation:
         return (info, properties, native, native_size, complete and native_size == 0, guid, complete, problem), self._mapping_changes(used)
 
     def read(self, target: 'str | ExportInfo | ObjectRef | SoftObjectRef', *, partial: bool = False,
-             cancel: Callable[[], bool] | None = None) -> Export:
+             cancel: Callable[[], bool] | None = None, instances: bool = False) -> Export:
         """The export's typed properties and object trailer, from its package's cooked header and its own range."""
         if not isinstance(partial, bool):
             raise TypeError(f'partial must be a bool, got {type(partial).__name__}')
+        if not isinstance(instances, bool):
+            raise TypeError(f'instances must be a bool, got {type(instances).__name__}')
         _cancel_arg(cancel)
         shown = _shown(target)
         with self._op(reads=1) as op:
@@ -1329,7 +1331,7 @@ class Installation:
             toc, container, idx, header, script, i = self._select(self._plan(target), op.counters, check, 'read')
             try:
                 fields, changes = self._read_export(toc, container, idx, header, _Infos(header, script, toc.basename), i, partial,
-                                           op.counters, check)
+                                           op.counters, check, instances)
             except AssetError as e:
                 _annotate(e, header.name, toc.basename)
                 raise
@@ -1507,11 +1509,14 @@ class Exports(Sequence):
             raise IndexError('export index out of range')
         return i % n
 
-    def read(self, which: 'int | str | ExportInfo', *, partial: bool = False, cancel: Callable[[], bool] | None = None) -> Export:
+    def read(self, which: 'int | str | ExportInfo', *, partial: bool = False,
+             cancel: Callable[[], bool] | None = None, instances: bool = False) -> Export:
         """The selected export's typed properties and object trailer, from this handle's header and the export's own range."""
         i = self._which(which)
         if not isinstance(partial, bool):
             raise TypeError(f'partial must be a bool, got {type(partial).__name__}')
+        if not isinstance(instances, bool):
+            raise TypeError(f'instances must be a bool, got {type(instances).__name__}')
         _cancel_arg(cancel)
         inst = self._inst
         info = self._infos[i]
@@ -1522,7 +1527,7 @@ class Exports(Sequence):
                 toc, container, _aes = inst._mounted[self._mi]
                 script = inst._script_objects(op.counters, 'read', check)
                 fields, changes = inst._read_export(toc, container, self._idx, self._header, _Infos(self._header, script, toc.basename), i,
-                                           partial, op.counters, check)
+                                           partial, op.counters, check, instances)
             except AssetError as e:
                 _annotate(e, self._package.name, self._package.container)
                 raise
