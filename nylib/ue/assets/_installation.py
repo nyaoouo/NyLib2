@@ -971,12 +971,17 @@ class Installation:
                 cid = toc.chunk_fields(idx)[0]
                 bulk = toc.find(cid, 0, _BULK_DATA)
                 bulk_length = 0 if bulk is None else toc.chunk_range(bulk)[1]
-                info, layout, unreadable = _texture.parse_texture2d(header, ei, self._mappings, bulk_length)
+                holders = [(mi, oi) for mi, (otoc, _c, _a) in enumerate(self._mounted)
+                           if (oi := otoc.find(cid, 0, _texture.OPTIONAL_BULK_DATA)) is not None]
+                optional = holders[0] if len(holders) == 1 else None
+                optional_length = 0 if optional is None else self._mounted[optional[0]][0].chunk_range(optional[1])[1]
+                info, layout, unreadable = _texture.parse_texture2d(header, ei, self._mappings, bulk_length,
+                                                                   (len(holders), optional_length))
             except AssetError as e:
                 _annotate(e, pkg, c)
                 raise
             mi = next(i for i, m in enumerate(self._mounted) if m[1] is container)  # inside the operation: not yet released
-        return Texture._new(self, info, layout, unreadable, mi, c, idx, bulk)
+        return Texture._new(self, info, layout, unreadable, mi, c, idx, bulk, optional)
 
     def _read_cooked(self, toc: Toc, container: Container, idx: int, pkg: str, counters, check: '_Check', method: str) -> tuple:
         """(ZenHeader, ScriptObjects tuple) of the package in chunk `idx`, from its cooked header alone."""
@@ -1421,7 +1426,7 @@ class Texture:
 
     @classmethod
     def _new(cls, inst: Installation, info, layout, unreadable, mi: int, container: str, header: int,
-             bulk: int | None) -> 'Texture':
+             bulk: int | None, optional: tuple | None = None) -> 'Texture':
         self = object.__new__(cls)
         self._inst = inst
         self._info = info
@@ -1431,6 +1436,7 @@ class Texture:
         self._container = container
         self._header = header
         self._bulk = bulk
+        self._optional = optional
         return self
 
     info = property(lambda self: self._info)
@@ -1485,7 +1491,15 @@ class Texture:
                 container = inst._mounted[self._mi][1]
                 layout = self._layout
                 if isinstance(layout, _texture.OrdinaryLayout):
-                    idx = self._bulk if layout.sources[mip][0] == _texture.BULK_DATA else self._header
+                    kind = layout.sources[mip][0]
+                    if kind == _texture.OPTIONAL_BULK_DATA:
+                        if self._optional is None:
+                            raise MissingAssetError(f'{pkg}: mip {mip} is stored as optional bulk data (.uptnl), '
+                                                    'which no mounted container holds')
+                        mi, idx = self._optional
+                        container = inst._mounted[mi][1]
+                    else:
+                        idx = self._bulk if kind == _texture.BULK_DATA else self._header
                     assemble = _texture.assemble_blocks if layout.pixel_format in _texture.BLOCK_FORMATS else _texture.assemble_rows
                     pixels, filled = assemble(layout, mip, rect, out=out,
                                               chunk_start=container.toc.chunk_range(idx)[0],

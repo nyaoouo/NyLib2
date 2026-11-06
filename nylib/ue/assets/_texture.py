@@ -18,7 +18,7 @@ from ._records import MipInfo, TextureInfo, VirtualTextureInfo
 from ._zen import PropertySkipper, Reader
 
 _VT_CODEC_NAMES = ('Black', 'OpaqueBlack', 'White', 'Flat', 'RawGPU', 'ZippedGPU_DEPRECATED', 'Crunch_DEPRECATED')
-EXPORT_BUNDLE_DATA, BULK_DATA = 1, 2  # the IoStore chunk types an ordinary mip's payload lives in
+EXPORT_BUNDLE_DATA, BULK_DATA, OPTIONAL_BULK_DATA = 1, 2, 3  # ordinary mip payload chunk types
 BLOCK_FORMATS = {'PF_DXT1': (8, _bc1.decode), 'PF_DXT5': (16, _bc3.decode), 'PF_BC7': (16, _bc7.decode)}  # block bytes, decoder
 _ORDINARY_FORMATS = ('PF_B8G8R8A8', *BLOCK_FORMATS)  # the ordinary pixel formats this version decodes
 _BULK_COMPRESSED = (1 << 1) | (1 << 4) | (1 << 9)  # SerializeCompressedZLIB, CompressedLZO, SerializeCompressedBitWindow
@@ -487,7 +487,7 @@ def _unreadable_vt(vt: dict, codecs: tuple):
     return None
 
 
-def _mip_placement(entry) -> tuple:
+def _mip_placement(entry, optional_count: int = 0) -> tuple:
     """The ordinary mip table: (chunk type, None) for a readable bulk-data entry, else (None, the placement not read)."""
     if entry is None:
         return None, 'no bulk-data entry'
@@ -497,7 +497,13 @@ def _mip_placement(entry) -> tuple:
     if flags & _BULK_COMPRESSED:
         return None, 'compressed bulk data'
     if flags & _BULK_OPTIONAL_PAYLOAD:
-        return None, 'optional bulk data (.uptnl)'
+        if flags & _BULK_FORCE_INLINE_PAYLOAD:
+            return None, 'optional bulk data (.uptnl)'
+        if entry.cooked_index:
+            return None, f'optional bulk data (.uptnl) with cooked index {entry.cooked_index}'
+        if optional_count >= 2:
+            return None, f'optional bulk data (.uptnl) in {optional_count} containers'
+        return OPTIONAL_BULK_DATA, None
     if flags & _BULK_MEMORY_MAPPED_PAYLOAD:
         return None, 'memory-mapped bulk data (.m.ubulk)'
     if flags & _BULK_FORCE_INLINE_PAYLOAD or flags in (0, _BULK_LAZY_LOADABLE):
@@ -509,7 +515,7 @@ def _mip_placement(entry) -> tuple:
     return None, f'bulk data with flags {flags:#x}'
 
 
-def _unreadable_ordinary(pd: dict, serialize_mips: bool):
+def _unreadable_ordinary(pd: dict, serialize_mips: bool, optional_count: int = 0):
     """(reason, error class, details) of the first rule that makes an ordinary texture unreadable, or None."""
     fmt = pd['pixel_format']
     if fmt not in _ORDINARY_FORMATS:
@@ -522,7 +528,7 @@ def _unreadable_ordinary(pd: dict, serialize_mips: bool):
         return ('mip data that is not serialized with the texture is not supported by this nylib version', UnsupportedAssetError,
                 {'feature': 'mip data not serialized'})
     for m, (entry, _pos) in enumerate(pd['sources']):
-        if (placement := _mip_placement(entry)[1]) is not None:
+        if (placement := _mip_placement(entry, optional_count)[1]) is not None:
             return (f'mip {m} is stored as {placement}, which this nylib version does not read', UnsupportedAssetError,
                     {'feature': f'bulk data: {placement}'})
     return None
@@ -534,7 +540,7 @@ def _mip_bytes(fmt: str, w: int, h: int) -> int:
     return spec[0] * _ceil_div(w, 4) * _ceil_div(h, 4)
 
 
-def _ordinary_sources(pd: dict, pkg: str, export_start: int, bulk_chunk_length: int) -> tuple:
+def _ordinary_sources(pd: dict, pkg: str, export_start: int, bulk_chunk_length: int, optional: tuple = (0, 0)) -> tuple:
     """(chunk type, payload offset in that chunk, length) per mip of a readable ordinary texture; raises CorruptAssetError."""
     fmt = pd['pixel_format']
     sources = []
@@ -544,10 +550,12 @@ def _ordinary_sources(pd: dict, pkg: str, export_start: int, bulk_chunk_length: 
         kind = _mip_placement(entry)[0]
         if kind == BULK_DATA and entry.serial_offset + entry.serial_size > bulk_chunk_length:
             raise _corrupt(pkg, f"mip {m}'s bulk range falls outside the .ubulk chunk")
+        if kind == OPTIONAL_BULK_DATA and optional[0] == 1 and entry.serial_offset + entry.serial_size > optional[1]:
+            raise _corrupt(pkg, f"mip {m}'s bulk range falls outside the .uptnl chunk")
         need = _mip_bytes(fmt, w, h)
         if entry.serial_size != need:
             raise _corrupt(pkg, f'mip {m} holds {entry.serial_size} bytes, but {w}x{h} {fmt} needs {need}')
-        sources.append((kind, entry.serial_offset if kind == BULK_DATA else export_start + pos, need))
+        sources.append((kind, export_start + pos if kind == EXPORT_BUNDLE_DATA else entry.serial_offset, need))
     return tuple(sources)
 
 
@@ -607,11 +615,11 @@ def _morton2(x: int, y: int) -> int:
     return part(x) | (part(y) << 1)
 
 
-def parse_texture2d(header, export: int, mappings, bulk_chunk_length: int) -> tuple:
+def parse_texture2d(header, export: int, mappings, bulk_chunk_length: int, optional: tuple = (0, 0)) -> tuple:
     """Parse export `export` of zen `header` as a Texture2D: (TextureInfo, VtLayout | OrdinaryLayout | None, unreadable).
 
-    `bulk_chunk_length` is the length of the package's (id, 0, BulkData) chunk, or 0. `unreadable` is None for a
-    readable texture, else (error class, details) of the reason it is not.
+    `bulk_chunk_length` is the default BulkData length or 0; `optional` is (holder count, length when unique).
+    `unreadable` is None for a readable texture, else (error class, details).
     """
     pkg = header.name
     usmap = mappings._usmap
@@ -646,10 +654,10 @@ def parse_texture2d(header, export: int, mappings, bulk_chunk_length: int) -> tu
             width, height = pd0['mips'][0]
         else:
             width, height = pd0['size_x'], pd0['size_y']
-        rule = _unreadable_ordinary(pd0, serialize_mips)
+        rule = _unreadable_ordinary(pd0, serialize_mips, optional[0])
         layout = unreadable = None
         if rule is None:
-            layout = OrdinaryLayout(package=pkg, mips=pd0['mips'], sources=_ordinary_sources(pd0, pkg, start, bulk_chunk_length),
+            layout = OrdinaryLayout(package=pkg, mips=pd0['mips'], sources=_ordinary_sources(pd0, pkg, start, bulk_chunk_length, optional),
                                     pixel_format=pixel_format)
         else:
             unreadable = rule[1:]
