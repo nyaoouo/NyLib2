@@ -20,7 +20,7 @@ from ..errors import (
     AmbiguousNameError, AssetError, BuildMismatchError, CorruptAssetError, InstallationClosedError, InvalidKeyError,
     InvalidMappingError, MissingAssetError, ReadCancelledError, RegionOutOfBoundsError, UnsupportedAssetError, UnsupportedContainerError,
 )
-from . import _iostore, _pe, _texture, _usmap
+from . import _iostore, _pe, _texture
 from ._bcrypt import Aes256Ecb
 from ._hashes import package_id
 from ._iostore import Container, Toc, check_key, iter_directory_index, read_directory_index
@@ -1006,7 +1006,8 @@ class Installation:
                 info, layout, unreadable = _texture.parse_texture2d(header, ei, self._mappings.view(used), bulk_length,
                                                                    (len(holders), optional_length))
             except AssetError as e:
-                if walking:
+                if walking and (isinstance(e, InvalidMappingError) or
+                                isinstance(e, UnsupportedAssetError) and (e.feature or '').startswith(('property type ', 'struct '))):
                     self._mapping_problem(e, 'Texture2D', used)
                 _annotate(e, pkg, c)
                 raise
@@ -1197,7 +1198,8 @@ class Installation:
             finally:
                 counters.seconds_decode += time.perf_counter() - t0 - resolving[0]
         except (InvalidMappingError, UnsupportedAssetError) as e:
-            self._mapping_problem(e, class_name, used, reader.problem_structs)
+            if e is not reader._resolving:
+                self._mapping_problem(e, class_name, used, reader.problem_structs)
             raise
         if problem is not None:
             self._mapping_problem(problem, class_name, used, reader.problem_structs)
