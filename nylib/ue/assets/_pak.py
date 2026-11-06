@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from nylib.utils import oodle
 from nylib.utils.oodle import OodleError
 from ..errors import CorruptAssetError, InvalidKeyError, UnsupportedContainerError
-from ._iostore import _container_error, _guid_str
+from ._iostore import _MAX_BLOCK_SIZE, _container_error, _guid_str
 
 _BAD = re.compile('[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]')
 _LOWER = str.maketrans('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
@@ -125,7 +125,8 @@ def read_footer(path):
 
 
 def _method(methods, k):
-    return 'None' if not k else methods[k - 1] if k <= len(methods) and methods[k - 1] else f'#{k}'
+    names = ('None',) + tuple(m for m in methods if m)
+    return names[k] if k < len(names) else f'#{k}'
 
 
 def _encoded(data, loc, methods):
@@ -147,7 +148,7 @@ def _encoded(data, loc, methods):
     for s in sizes:
         starts.append(p)
         p += align16(s) if encrypted else s
-    return dict(offset=off, size=size, usize=usize, method=_method(methods, method), encrypted=encrypted,
+    return dict(offset=off, size=size, usize=usize, method=_method(methods, method), method_index=method, encrypted=encrypted,
                 block_size=usize if n == 1 else bs, blocks=tuple(zip(starts, sizes)), header=header, deleted=False)
 
 
@@ -157,7 +158,7 @@ def _serialized(r, methods):
     r.take(20)
     blocks = [(r.number('q'), r.number('q')) for _ in range(r.count(16))] if method else []
     flags, bs = r.number('B'), r.number('I')
-    return dict(offset=off, size=size, usize=usize, method=_method(methods, method), encrypted=bool(flags & 1),
+    return dict(offset=off, size=size, usize=usize, method=_method(methods, method), method_index=method, encrypted=bool(flags & 1),
                 deleted=bool(flags & 2), block_size=bs, blocks=tuple((off + s, e - s) for s, e in blocks),
                 header=53 + (4 + 16 * len(blocks) if method else 0))
 
@@ -239,6 +240,7 @@ def read_index(path, aes_for, check, counters):
             if hashlib.sha1(d).digest() != dhash:
                 raise _Bad('the directory index does not match its SHA-1 hash')
             dr, files, skipped = _Reader(d), [], 0
+            decoded, validated = {}, set()
             for _ in range(dr.count(8)):
                 directory = dr.fstring()
                 for _ in range(dr.count(8)):
@@ -248,7 +250,9 @@ def read_index(path, aes_for, check, counters):
                         continue
                     if loc < 0 and -loc > len(serialized):
                         raise _Bad('serialized entry location outside the index')
-                    e = _encoded(encoded, loc, foot['methods']) if loc >= 0 else serialized[-loc - 1]
+                    if loc not in decoded:
+                        decoded[loc] = _encoded(encoded, loc, foot['methods']) if loc >= 0 else serialized[-loc - 1]
+                    e = decoded[loc]
                     if e['deleted']:
                         skipped += 1
                         continue
@@ -262,20 +266,26 @@ def read_index(path, aes_for, check, counters):
                         skipped += 1
                         continue
                     entry_path = p
-                    if min(e['offset'], e['size'], e['usize']) < 0:
-                        raise _Bad('negative entry size or offset')
-                    if e['method'] == 'None':
-                        ranges = [(e['offset'] + e['header'], e['usize'])]
-                        if e['size'] != e['usize']:
-                            raise _Bad('stored entry size mismatch')
-                    else:
-                        ranges = e['blocks']
-                        bs = e['block_size']
-                        if bs <= 0 or len(ranges) != (e['usize'] + bs - 1) // bs:
-                            raise _Bad('invalid compression block count or size')
-                    for start, size in ranges:
-                        if start < 0 or size < 0 or start + (align16(size) if e['encrypted'] else size) > foot['size']:
-                            raise _Bad('entry block range outside the file')
+                    if loc not in validated:
+                        if min(e['offset'], e['size'], e['usize']) < 0:
+                            raise _Bad('negative entry size or offset')
+                        if not e['method_index']:
+                            ranges = [(e['offset'] + e['header'], e['usize'])]
+                            if e['size'] != e['usize']:
+                                raise _Bad('stored entry size mismatch')
+                        else:
+                            ranges = e['blocks']
+                            bs = e['block_size']
+                            if not 0 <= bs <= _MAX_BLOCK_SIZE or (bs == 0 and (e['usize'] or e['size'] or ranges)):
+                                raise _Bad('invalid compression block count or size')
+                            if bs and len(ranges) != (e['usize'] + bs - 1) // bs:
+                                raise _Bad('invalid compression block count or size')
+                            if any(size > _MAX_BLOCK_SIZE for _, size in ranges):
+                                raise _Bad('invalid compression block count or size')
+                        for start, size in ranges:
+                            if start < 0 or size < 0 or start + (align16(size) if e['encrypted'] else size) > foot['size']:
+                                raise _Bad('entry block range outside the file')
+                        validated.add(loc)
                     info = FileInfo(p, pak, e['usize'], e['size'], e['method'], e['encrypted'])
                     files.append((info, path, foot['guid'], e))
                     entry_path = None
@@ -292,7 +302,7 @@ def read_range(entry, offset, n, aes, check, counters):
     info, path, guid, e = entry
     if not n:
         return b''
-    bs = _PIECE if info.compression == 'None' else e['block_size']
+    bs = e['block_size'] if e['method_index'] else _PIECE
     first, last = offset // bs, (offset + n - 1) // bs
     check.k, check.n = 0, last - first + 1
     out = bytearray(n)
@@ -301,7 +311,7 @@ def read_range(entry, offset, n, aes, check, counters):
             for b in range(first, last + 1):
                 check()
                 lo, hi = max(offset, b * bs), min(offset + n, (b + 1) * bs)
-                if info.compression == 'None':
+                if not e['method_index']:
                     start, end = (lo & ~15, align16(hi)) if aes else (lo, hi)
                     data = _read(f, e['offset'] + e['header'] + start, end - start, counters)
                     if aes:

@@ -762,17 +762,24 @@ class Installation:
             check()
             entry = self._find_file(path, self._load_pak(check, op.counters))
             info = entry[0]
-            if info.compression not in ('None', 'Oodle'):
+            check._file = info.path
+            if entry[3]['method_index'] and info.compression != 'Oodle':
                 raise UnsupportedContainerError(f'{info.container}: {path!r} is compressed with {info.compression}, '
                                                 'which this nylib version does not read', container=info.container,
-                                                file=path, feature=f'compression {info.compression}')
-            aes = self._pak_aes(entry[2], info.container, path) if info.encrypted else None
+                                                file=info.path, feature=f'compression {info.compression}')
+            aes = self._pak_aes(entry[2], info.container, info.path) if info.encrypted else None
             if offset > info.size:
                 raise ValueError(f'offset {offset} is past the end of the {info.size}-byte file')
             n = info.size - offset if limit is None else min(limit, info.size - offset)
             if n > _MAX_RAW:
                 raise ValueError(f'{path!r}: {n} bytes from offset {offset} exceed the 67108864-byte read limit; pass limit=')
-            return _pak.read_range(entry, offset, n, aes, check, op.counters)
+            try:
+                if n and entry[3]['method_index']:
+                    _check_oodle(info.container)
+                return _pak.read_range(entry, offset, n, aes, check, op.counters)
+            except AssetError as e:
+                e.file = info.path
+                raise
 
     # ---- names and lookup --------------------------------------------------------------------------------------
 
