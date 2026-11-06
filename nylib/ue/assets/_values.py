@@ -337,6 +337,7 @@ class Export:
     complete: bool
     problem: AssetError | None
     stats: ReadStats = field(repr=False, compare=False)
+    mapping_changes: tuple['MappingChange', ...] = field(default=(), repr=False, compare=False)
 
     def _fields(self) -> tuple:
         return self.info, self.properties, self.native, self.native_size, self.exact, self.guid, self.complete

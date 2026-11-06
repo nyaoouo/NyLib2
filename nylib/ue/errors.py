@@ -177,7 +177,7 @@ class InvalidKeyError(AssetError):
 class InvalidMappingError(AssetError):
     """Raised when the .usmap mapping is missing, invalid, or does not fit the asset data."""
     _fields = ('usmap', 'class_name', 'property_index', 'property_name', 'reason', 'path', 'property_path', 'property_type',
-               'position', 'struct_name', 'row')
+               'position', 'struct_name', 'row', 'mapping_changes', 'custom_serialization')
 
 
 class BuildMismatchError(InvalidMappingError):
@@ -206,7 +206,7 @@ class UnsupportedContainerError(UnsupportedError):
 class UnsupportedAssetError(UnsupportedError):
     """Raised for an unsupported asset class or native layout."""
     _fields = ('exports', 'class_name', 'property_index', 'property_name', 'property_path', 'property_type', 'position',
-               'struct_name', 'row')
+               'struct_name', 'row', 'mapping_changes', 'custom_serialization')
 
 
 class UnsupportedPixelFormatError(UnsupportedError):

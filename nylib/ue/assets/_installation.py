@@ -18,13 +18,14 @@ from nylib.utils import oodle
 from nylib.utils.oodle import OodleError
 from ..errors import (
     AmbiguousNameError, AssetError, BuildMismatchError, CorruptAssetError, InstallationClosedError, InvalidKeyError,
-    MissingAssetError, ReadCancelledError, RegionOutOfBoundsError, UnsupportedAssetError, UnsupportedContainerError,
+    InvalidMappingError, MissingAssetError, ReadCancelledError, RegionOutOfBoundsError, UnsupportedAssetError, UnsupportedContainerError,
 )
 from . import _iostore, _pe, _texture, _usmap
 from ._bcrypt import Aes256Ecb
 from ._hashes import package_id
 from ._iostore import Container, Toc, check_key, iter_directory_index, read_directory_index
 from ._keys import AesKey, _check_path
+from ._mapping import Usmap, load_usmap
 from ._props import PropertyReader, Schemas
 from ._records import BuildInfo, ContainerInfo, PackageInfo, ReadStats, Region, _Counters
 from ._values import Export, ExportInfo, ObjectRef, SoftObjectRef
@@ -372,20 +373,19 @@ def _identity(engine: str, usmap_sha256: bytes, tocs) -> str:
     return h.hexdigest()[:16]
 
 
-def open_installation(paks_dir: str | os.PathLike, *, engine: str, usmap: str | os.PathLike, build: int | None,
+def open_installation(paks_dir: str | os.PathLike, *, engine: str, usmap: 'str | os.PathLike | Usmap', build: int | None,
                       aes_key: 'AesKey | bytes | bytearray | Sequence[AesKey] | None' = None,
                       exe: str | os.PathLike | None = None,
                       cache_bytes: int | None = None) -> 'Installation':
-    """Open the IoStore containers of an installed UE 5.7 game, read-only.
-
-    Checks the build (when `build` is an int) before any container is read; a failure releases everything opened.
-    """
+    """Open the IoStore containers of an installed UE 5.7 game, read-only."""
     paks = _check_path(paks_dir, 'paks_dir')
     if not isinstance(engine, str):
         raise TypeError(f'engine must be a str, got {type(engine).__name__}')
     if engine not in _ENGINES:
         raise ValueError(f'engine must be one of {_ENGINES}')
-    usmap_path = _check_path(usmap, 'usmap')
+    if not isinstance(usmap, (str, os.PathLike, Usmap)):
+        raise TypeError(f'usmap must be a str, os.PathLike[str] or Usmap, got {type(usmap).__name__}')
+    usmap_path = None if isinstance(usmap, Usmap) else _check_path(usmap, 'usmap')
     if build is not None:
         build = _int_arg(build, 'build')
         if not 0 <= build <= 0xFFFFFFFF:
@@ -403,9 +403,11 @@ def open_installation(paks_dir: str | os.PathLike, *, engine: str, usmap: str | 
     paks_name = os.path.basename(paks)
     if not os.path.isdir(paks):
         raise MissingAssetError(f'paks directory {paks_name!r} not found', path=paks)
-    usmap_name = os.path.basename(usmap_path)
+    usmap_name = usmap.file if usmap_path is None else os.path.basename(usmap_path)
     build_info = _read_build(paks, exe_path, build, usmap_name)
-    mappings, usmap_sha256 = _usmap.read(usmap_path)
+    usmap = usmap if usmap_path is None else load_usmap(usmap_path)
+    mappings = usmap._eff
+    usmap_sha256 = bytes.fromhex(usmap.digest)
     utocs, pak_paths = _scan(paks)
     if not utocs:
         raise MissingAssetError(f'no IoStore container (.utoc) in paks directory {paks_name!r}', path=paks)
@@ -447,7 +449,7 @@ def open_installation(paks_dir: str | os.PathLike, *, engine: str, usmap: str | 
     counters.seconds = time.perf_counter() - t0
     inst = object.__new__(Installation)
     inst._init(engine=engine, build=build_info, checked=build is not None, identity=identity, containers=tuple(rows),
-               usmap_name=usmap_name, mappings=mappings, mounted=mounted, decryptors=tuple(decryptors.values()),
+               usmap_name=usmap_name, mappings=mappings, usmap=usmap, mounted=mounted, decryptors=tuple(decryptors.values()),
                cache_bytes=cache_bytes, project=project, pak_count=len(pak_paths), totals=counters)
     _log.debug('opened %s: engine %s, %d iostore mounted, %d pak not mounted, usmap %s, identity %s', paks_name, engine,
                len(mounted), len(pak_paths), usmap_name, identity)
@@ -524,7 +526,7 @@ class Installation:
     def __new__(cls, *args, **kwargs):
         raise TypeError('Installation cannot be constructed directly: call open_installation()')
 
-    def _init(self, *, engine, build, checked, identity, containers, usmap_name, mappings, mounted, decryptors,
+    def _init(self, *, engine, build, checked, identity, containers, usmap_name, mappings, usmap, mounted, decryptors,
               cache_bytes, project, pak_count, totals):
         self._engine = engine
         self._build = build
@@ -532,6 +534,10 @@ class Installation:
         self._identity = identity
         self._containers = containers
         self._usmap_name = usmap_name
+        self._usmap = usmap
+        self._mapping_index = {}
+        for i, change in enumerate(usmap.changes):
+            self._mapping_index.setdefault(_lower(change.struct), []).append(i)
         self._mappings = mappings
         self._schemas = Schemas(mappings)
         self._mounted = tuple((toc, Container(toc, aes), aes) for toc, aes in mounted)
@@ -555,6 +561,7 @@ class Installation:
     engine = property(lambda self: self._engine)
     build = property(lambda self: self._build)
     identity = property(lambda self: self._identity)
+    usmap = property(lambda self: self._usmap)
     containers = property(lambda self: self._containers)
     closed = property(lambda self: self._closed)
 
@@ -957,11 +964,31 @@ class Installation:
         raise AmbiguousNameError(f'package {pkg!r} has {len(names)} Texture2D exports ({text}): name one as {pkg}.<export>',
                                  package=pkg, exports=names)
 
+    def _mapping_changes(self, used: set) -> tuple:
+        positions = sorted(i for name in used for i in self._mapping_index.get(name, ()))
+        return tuple(self._usmap.changes[i] for i in positions)
+
+    def _mapping_problem(self, error, target, used: set, property_structs: tuple = ()) -> None:
+        if not isinstance(error, (InvalidMappingError, UnsupportedAssetError)):
+            return
+        error.mapping_changes = self._mapping_changes(used)
+        custom = self._usmap.declared_custom(target)
+        if custom is None:
+            names = list(property_structs)
+            names.extend((error.class_name, error.struct_name))
+            entries = {}
+            for entry in self._usmap.custom_serialization:
+                entries.setdefault(_lower(entry), entry)
+            custom = next((entries[_lower(name)] for name in names if name is not None and _lower(name) in entries), None)
+        error.custom_serialization = custom
+
     def texture(self, name: str) -> 'Texture':
         """A new Texture for the package's Texture2D export (the named one, or its only one)."""
         pkg, export = self._parse_name(name)
         with self._op() as op:
             c = None
+            used = set()
+            walking = False
             try:
                 toc, container, idx = self._locate(pkg)
                 c = toc.basename
@@ -975,13 +1002,17 @@ class Installation:
                            if (oi := otoc.find(cid, 0, _texture.OPTIONAL_BULK_DATA)) is not None]
                 optional = holders[0] if len(holders) == 1 else None
                 optional_length = 0 if optional is None else self._mounted[optional[0]][0].chunk_range(optional[1])[1]
-                info, layout, unreadable = _texture.parse_texture2d(header, ei, self._mappings, bulk_length,
+                walking = True
+                info, layout, unreadable = _texture.parse_texture2d(header, ei, self._mappings.view(used), bulk_length,
                                                                    (len(holders), optional_length))
             except AssetError as e:
+                if walking:
+                    self._mapping_problem(e, 'Texture2D', used)
                 _annotate(e, pkg, c)
                 raise
             mi = next(i for i, m in enumerate(self._mounted) if m[1] is container)  # inside the operation: not yet released
-        return Texture._new(self, info, layout, unreadable, mi, c, idx, bulk, optional)
+            changes = self._mapping_changes(used)
+        return Texture._new(self, info, layout, unreadable, mi, c, idx, bulk, optional, changes)
 
     def _read_cooked(self, toc: Toc, container: Container, idx: int, pkg: str, counters, check: '_Check', method: str) -> tuple:
         """(ZenHeader, ScriptObjects tuple) of the package in chunk `idx`, from its cooked header alone."""
@@ -1153,17 +1184,24 @@ class Installation:
                 raise MissingAssetError(f'package {hname!r} has no export with the imported public export hash',
                                         package=hname, container=hcontainer, export=None)
             return name
+        used = set()
         reader = PropertyReader(schemas=self._schemas, names=header.names, ref=ref, resolve=resolve, usmap=self._usmap_name,
-                                package=pkg, export=export, container=c, size=size, class_name=class_name, check=check)
-        schema = reader.schema(class_name)
-        start = header.export_range(i)[0]
-        data = container.read_range(idx, start, size, cache=self._cache, counters=counters, checkpoint=check.blocks(toc, idx, start, size))
-        t0 = time.perf_counter()
+                                package=pkg, export=export, container=c, size=size, class_name=class_name, check=check, used=used)
         try:
-            properties, native, native_size, guid, complete, problem = reader.read(data, schema, info.flags, partial)
-        finally:
-            counters.seconds_decode += time.perf_counter() - t0 - resolving[0]
-        return info, properties, native, native_size, complete and native_size == 0, guid, complete, problem
+            schema = reader.schema(class_name)
+            start = header.export_range(i)[0]
+            data = container.read_range(idx, start, size, cache=self._cache, counters=counters, checkpoint=check.blocks(toc, idx, start, size))
+            t0 = time.perf_counter()
+            try:
+                properties, native, native_size, guid, complete, problem = reader.read(data, schema, info.flags, partial)
+            finally:
+                counters.seconds_decode += time.perf_counter() - t0 - resolving[0]
+        except (InvalidMappingError, UnsupportedAssetError) as e:
+            self._mapping_problem(e, class_name, used, reader.problem_structs)
+            raise
+        if problem is not None:
+            self._mapping_problem(problem, class_name, used, reader.problem_structs)
+        return (info, properties, native, native_size, complete and native_size == 0, guid, complete, problem), self._mapping_changes(used)
 
     def read(self, target: 'str | ExportInfo | ObjectRef | SoftObjectRef', *, partial: bool = False,
              cancel: Callable[[], bool] | None = None) -> Export:
@@ -1177,14 +1215,14 @@ class Installation:
             check()
             toc, container, idx, header, script, i = self._select(self._plan(target), op.counters, check, 'read')
             try:
-                fields = self._read_export(toc, container, idx, header, _Infos(header, script, toc.basename), i, partial,
+                fields, changes = self._read_export(toc, container, idx, header, _Infos(header, script, toc.basename), i, partial,
                                            op.counters, check)
             except AssetError as e:
                 _annotate(e, header.name, toc.basename)
                 raise
             op.finish()
             stats = op.counters.snapshot()
-        return Export(*fields, stats=stats)
+        return Export(*fields, stats=stats, mapping_changes=changes)
 
     def exports(self, name: str, *, cancel: Callable[[], bool] | None = None) -> 'Exports':
         """The package's exports, from its cooked header alone; the name's export part is ignored."""
@@ -1370,14 +1408,14 @@ class Exports(Sequence):
                 check()
                 toc, container, _aes = inst._mounted[self._mi]
                 script = inst._script_objects(op.counters, 'read', check)
-                fields = inst._read_export(toc, container, self._idx, self._header, _Infos(self._header, script, toc.basename), i,
+                fields, changes = inst._read_export(toc, container, self._idx, self._header, _Infos(self._header, script, toc.basename), i,
                                            partial, op.counters, check)
             except AssetError as e:
                 _annotate(e, self._package.name, self._package.container)
                 raise
             op.finish()
             stats = op.counters.snapshot()
-        return Export(*fields, stats=stats)
+        return Export(*fields, stats=stats, mapping_changes=changes)
 
     def raw(self, which: 'int | str | ExportInfo', *, offset: int = 0, limit: int,
             cancel: Callable[[], bool] | None = None) -> bytes:
@@ -1426,7 +1464,7 @@ class Texture:
 
     @classmethod
     def _new(cls, inst: Installation, info, layout, unreadable, mi: int, container: str, header: int,
-             bulk: int | None, optional: tuple | None = None) -> 'Texture':
+             bulk: int | None, optional: tuple | None = None, mapping_changes: tuple = ()) -> 'Texture':
         self = object.__new__(cls)
         self._inst = inst
         self._info = info
@@ -1437,9 +1475,11 @@ class Texture:
         self._header = header
         self._bulk = bulk
         self._optional = optional
+        self._mapping_changes = mapping_changes
         return self
 
     info = property(lambda self: self._info)
+    mapping_changes = property(lambda self: self._mapping_changes)
 
     def __reduce_ex__(self, protocol):
         raise TypeError('Texture cannot be pickled: call open_installation in the other process')

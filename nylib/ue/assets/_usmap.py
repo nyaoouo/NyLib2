@@ -97,13 +97,11 @@ class Mappings:
     def enum(self, name: str) -> 'EnumRecord | None':
         return self._enums.get(name)
 
-    def lookup(self, struct_name: str, index: int):
-        """(owner, name, type) for property `index` of `struct_name`, walking the super chain like CUE4Parse's
-        Struct.TryGetValue (array dims expand); None when no such property exists anywhere in the chain.
+    def view(self, used: set):
+        return _MappingView(self, used)
 
-        A struct named in the chain (including `struct_name` itself) with no record raises InvalidMappingError
-        (reason 'no record'); `_zen.py` is expected to re-raise with the package context the 3.8 template needs.
-        """
+    def lookup(self, struct_name: str, index: int):
+        """Find a property's owner, name and type by chain index, raising for a missing record or cycle."""
         seen = set()
         name = struct_name
         offset = index
@@ -113,7 +111,7 @@ class Mappings:
                 raise InvalidMappingError(f'{self._usmap}: the super chain of {struct_name!r} cycles back to {name!r}',
                                            usmap=self._usmap, class_name=name, reason='super chain cycle')
             seen.add(key)
-            rec = self._structs.get(key)
+            rec = self.record(name)
             if rec is None:
                 raise InvalidMappingError(f'{self._usmap} has no record for {name!r}', usmap=self._usmap,
                                            class_name=name, property_index=offset, reason='no record')
@@ -124,6 +122,20 @@ class Mappings:
                 return None
             offset -= rec.property_count
             name = rec.super
+
+
+class _MappingView(Mappings):
+    def __init__(self, mappings, used):
+        self._mappings = mappings
+        self._usmap = mappings._usmap
+        self._used = used
+
+    def record(self, name):
+        self._used.add(_ascii_lower(name))
+        return self._mappings.record(name)
+
+    def enum(self, name):
+        return self._mappings.enum(name)
 
 
 def parse(path) -> Mappings:

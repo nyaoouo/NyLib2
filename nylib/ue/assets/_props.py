@@ -88,12 +88,11 @@ def _zero_size(t) -> bool:
 
 
 class Schema:
-    """The slots of one struct's whole super chain, own properties first; templates[pos] is
-    (index, element, owner, name, label, type). `kind` is 'DataTable' or 'CurveTable' when the chain holds that
-    record, else None; `row_struct_index` is DataTable's own RowStruct slot, chain-wide, or None."""
-    __slots__ = ('templates', 'where', 'absent', 'zero', 'nones', 'layout', 'kind', 'row_struct_index', '_unread', '_lock', '_counted')
+    """The slots of one struct's whole super chain, own properties first."""
+    __slots__ = ('templates', 'where', 'absent', 'zero', 'nones', 'layout', 'kind', 'row_struct_index', '_unread', '_lock', '_counted', 'records')
 
     def __init__(self, chain: tuple, lock):
+        self.records = tuple(_lower(rec.name) for rec in chain)
         templates = []
         base = 0
         kind = None
@@ -115,8 +114,7 @@ class Schema:
                         label = label or type_label(p.type)
                         local[i] = (base + i, e, rec.name, p.name, label, p.type)
             if is_datatable:
-                # the RowStruct slot comes from the DataTable record's own built slots, not its raw property list:
-                # a malformed index, a duplicate, or array_dim 0 must not reach a slot this schema never builds.
+                # Only built slots can supply RowStruct.
                 row_struct_index = next((local[i][0] for i in sorted(local) if local[i][5].code == 4), None)
             templates.extend(local[i] for i in sorted(local))
             base += rec.property_count
@@ -126,9 +124,9 @@ class Schema:
 
     @classmethod
     def of(cls, templates: tuple, r=None) -> 'Schema':
-        """The schema of slot `templates` in index order, such as a property bag's descriptors; built fresh every
-        time, so when `r` is given its slots are counted and checkpointed as they are built."""
+        """Build a fresh schema of slot templates, counting its slots when a reader is given."""
         self = object.__new__(cls)
+        self.records = ()
         self.kind = None
         self.row_struct_index = None
         self._build(templates, _NO_LOCK, r)
@@ -185,10 +183,12 @@ class Schemas:
         self._enums = {}
         self._layouts = {}
 
-    def get(self, name: str) -> Schema:
+    def get(self, name: str, used: set | None = None) -> Schema:
         """The schema of `name`; _SchemaError when a record of its chain is missing or the chain cycles."""
         key = _lower(name)
         if (s := self._schemas.get(key)) is not None:
+            if used is not None:
+                used.update(s.records)
             return s
         with self._lock:
             if (s := self._schemas.get(key)) is None:
@@ -198,11 +198,15 @@ class Schemas:
                     if k in seen:
                         raise _SchemaError('super chain cycle', name)
                     seen.add(k)
+                    if used is not None:
+                        used.add(k)
                     if (rec := self._mappings.record(n)) is None:
                         raise _SchemaError('no record', n)
                     chain.append(rec)
                     n = rec.super
                 s = self._schemas[key] = Schema(tuple(chain), self._lock)
+            if used is not None:
+                used.update(s.records)
             return s
 
     def enum(self, name):
@@ -244,13 +248,12 @@ def _render(path: list, cls: str) -> str:
 
 
 class PropertyReader:
-    """Reads one export's unversioned property block and object trailer; `ref(v)` maps an FPackageIndex to an ObjectRef,
-    or None when `v` is outside the export and import maps; `resolve(ref)` names the export a package import ref names;
-    `check()` is the closed and cancel checkpoint."""
+    """Read one export's unversioned property block and object trailer."""
 
     def __init__(self, *, schemas: Schemas, names: tuple, ref, resolve, usmap: str, package: str, export: str, container: str,
-                 size: int, class_name: str, check):
+                 size: int, class_name: str, check, used: set | None = None):
         self.schemas = schemas
+        self.used = used
         self.names = names
         self.ref = ref
         self.resolve = resolve
@@ -263,6 +266,7 @@ class PropertyReader:
         self.check = check
         self.ctx = (package, export, container, usmap)
         self.path = []  # (struct, index, name, label) slot steps, element indexes, ('key'|'value'|'row', n) steps
+        self.problem_structs = ()
         self.native = None  # the native struct being read, for failures
         self.row = None
         self.n = 0
@@ -279,6 +283,7 @@ class PropertyReader:
     # ---- failures -----------------------------------------------------------------------------------------------
 
     def _attrs(self, pos, struct_name) -> dict:
+        self.problem_structs = tuple(s[0] for s in self.path if type(s) is tuple and len(s) == 4)
         steps, last = [], None
         for s in self.path:
             if type(s) is tuple and len(s) == 4:
@@ -325,7 +330,7 @@ class PropertyReader:
     def schema(self, name: str) -> Schema:
         """The schema of struct `name`; InvalidMappingError ('no record', 'super chain cycle') otherwise."""
         try:
-            return self.schemas.get(name)
+            return self.schemas.get(name, self.used)
         except _SchemaError as e:
             raise self._schema_error(e) from None
 
