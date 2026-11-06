@@ -62,6 +62,31 @@ with mock.patch.object(Process, 'alloc') as alloc:
 out['root'] = os.path.dirname(os.path.dirname(os.path.abspath(nylib.__file__)))
 print(json.dumps(out))
 '''
+_STALE_HOOK_HOST = '''
+import os
+import sys
+from unittest import mock
+import nylib
+from nylib.process import Process
+from nylib.ue import calls
+from nylib.winutils.inline_call import _find_nylib_hook
+
+assert os.path.normcase(os.path.dirname(os.path.dirname(os.path.abspath(nylib.__file__)))) == os.path.normcase(os.getcwd())
+pid, addr, tid = map(int, sys.argv[1:4])
+process = Process(pid)
+caller = calls.HookCaller(thread_id=tid, trigger=addr)
+caller.bind(calls.CallSite(process, None, 0, addr, lambda: None, 5.0, 'external'))
+if sys.argv[4] == 'far':
+    with mock.patch.object(Process, 'alloc_near', side_effect=ValueError('force far jump')):
+        caller._get_queue()
+else:
+    caller._get_queue()
+hook = _find_nylib_hook(process, addr)
+assert hook is not None and hook.held
+assert bytes(process.read(addr, 1 if sys.argv[4] == 'near' else 6)) == (b'\\xE9' if sys.argv[4] == 'near' else b'\\xFF\\x25\\x00\\x00\\x00\\x00')
+print(hook.page, hook.data_at, flush=True)
+os._exit(0)
+'''
 
 
 def _wait_for(predicate, timeout: float = 30.0) -> None:
@@ -225,6 +250,97 @@ class HookCallerChildTests(_ChildCase):
         _wait_for(closed)
         self.assertTrue(caller.closed)
         self.assertEqual(self.code_at(self.addr), self.original)
+
+
+@_NEEDS_DEPS
+class StaleHookHintTests(_ChildCase):
+    def refused(self, trigger):
+        before = self.code_at(trigger)
+        caller = self.hook_caller(thread_id=self.tid, trigger=trigger)
+        caller.bind(self.site())
+        with self.assertRaises(CallError) as cm:
+            caller.call(self.get_tid(), timeout=5)
+        self.assertEqual(cm.exception.refused, 'prologue')
+        self.assertEqual(cm.exception.state, 'not started')
+        self.assertEqual(self.code_at(trigger), before)
+        return str(cm.exception)
+
+    def ended_host(self, form):
+        env = dict(os.environ, PYTHON_PIP_ALL_REQ_INSTALLED='1')
+        host = subprocess.run([sys.executable, '-B', '-u', '-c', _STALE_HOOK_HOST, str(self.pid), str(self.addr), str(self.tid), form],
+                              cwd=_ROOT, env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(host.returncode, 0, host.stderr)
+        page, data_at = map(int, host.stdout.split())
+        text = self.refused(self.addr)
+        self.assertIn(f'this process does not hold (dispatcher page {page:#x}, queue {data_at:#x})', text)
+        self.assertIn('a close() of its session there removes it', text)
+        self.assertIn('stays until the game restarts', text)
+        self.assertNotIn('this version recognises', text)
+
+    def test_ended_host_near_hook(self):
+        self.ended_host('near')
+
+    def test_ended_host_far_hook(self):
+        self.ended_host('far')
+
+    def test_hook_held_by_this_process(self):
+        from nylib.winutils.inline_call import _find_nylib_hook
+        owner = self.hook_caller(thread_id=self.tid, trigger=self.addr)
+        owner.bind(self.site())
+        owner._get_queue()
+        hook = _find_nylib_hook(self.process, self.addr)
+        self.assertIsNotNone(hook)
+        self.assertTrue(hook.held)
+        text = self.refused(self.addr)
+        self.assertIn(f'this process installed (queue {hook.data_at:#x})', text)
+        self.assertIn('is retried at exit', text)
+        self.assertIn('retried at the next calls-enabled attach', text)
+        self.assertNotIn('does not hold', text)
+        owner.close()
+        self.assertEqual(self.code_at(self.addr), self.original)
+
+    def test_unrecognised_jump_to_an_aligned_nop_page(self):
+        page = self.process.alloc_near(0x1000, self.addr)
+        self.addCleanup(self.process.free, page)
+        self.assertEqual(page & 0xFFF, 0)
+        self.process.write(page, b'\x90' * 0x1000)
+        jumpy = b'\xE9' + (page - self.addr - 5).to_bytes(4, 'little', signed=True) + self.original[5:]
+        self.process.write(self.addr, jumpy)
+        self.addCleanup(self.process.write, self.addr, self.original)
+        text = self.refused(self.addr)
+        self.assertIn('already starts with a jump that is not a nylib game-thread hook this version recognises', text)
+        self.assertIn('only a game restart removes it', text)
+
+
+@_NEEDS_DEPS
+class ExitStateTests(_ChildCase):
+    def test_target_killed_with_a_queued_call_has_unknown_outcome(self):
+        caller = self.hook_caller(thread_id=self.tid, trigger=self.addr)
+        caller.bind(self.site())
+        get_tid = self.get_tid()
+        out = {}
+
+        def run():
+            try:
+                out['value'] = caller.call(get_tid, timeout=60)
+            except BaseException as exc:
+                out['error'] = exc
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        self.addCleanup(worker.join, 70)
+        try:
+            _wait_for(lambda: caller.pending == 1 or 'error' in out)
+            self.assertNotIn('error', out)
+            self.assertEqual(caller.pending, 1)
+        finally:
+            self.child.kill()
+            self.child.wait(30)
+        worker.join(60)
+        self.assertFalse(worker.is_alive(), 'the call did not observe target exit')
+        self.assertIsInstance(out.get('error'), CallError, out)
+        self.assertTrue(out['error'].exited)
+        self.assertEqual(out['error'].state, 'unknown')
 
 
 class HookCallerDependencyTests(unittest.TestCase):

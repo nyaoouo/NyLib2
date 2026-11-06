@@ -66,8 +66,9 @@ def _check_timeout(timeout) -> None:
         return
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
         raise TypeError(f'timeout must be None or a number, got {type(timeout).__name__}')
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError(f'timeout must be greater than 0 and finite, got {timeout!r}')
+    if not 0 < timeout <= threading.TIMEOUT_MAX:
+        shown = repr(timeout) if isinstance(timeout, float) or abs(timeout) < 10**18 else f'an int of {timeout.bit_length()} bits'
+        raise ValueError(f'timeout must be greater than 0 and at most {threading.TIMEOUT_MAX} s, got {shown}')
 
 
 def _check_call_args(function, args, timeout) -> None:
@@ -653,13 +654,20 @@ class HookCaller(Caller):
         return self._queue
 
     def _jump_hint(self) -> str:
+        from ..winutils.inline_call import _find_nylib_hook
+        if (hook := _find_nylib_hook(self.process, self.trigger)) is not None:
+            if hook.held:
+                return (f'; the trigger holds a game-thread hook this process installed (queue {hook.data_at:#x}): it goes with a close() of its '
+                        'session once its calls finish and is retried at exit; one a failed attach parked is also retried at the next calls-enabled attach')
+            return (f'; the trigger holds a nylib game-thread hook that this process does not hold (dispatcher page {hook.page:#x}, queue {hook.data_at:#x}): '
+                    'if another nylib process attached to this game installed it, a close() of its session there removes it; one an ended session left '
+                    '(killed, crashed, or calls still pending) stays until the game restarts')
         try:
             jump = _starts_with_jump(read_target(self.process, self.trigger, 16))
         except (MemoryReadError, ValueError):
             return ''
-        return ('; the trigger already starts with a jump (another hook?); if it is a hook left by another nylib process that exited without removing it '
-                '(killed, crashed, or calls still pending), only a game restart removes it; one this process still holds goes with a close() of its '
-                'session once its calls finish and is retried at exit, and one a failed attach parked is also retried at the next calls-enabled attach') if jump else ''
+        return ('; the trigger already starts with a jump that is not a nylib game-thread hook this version recognises (another tool, or another nylib version); '
+                'if an ended nylib session left it, only a game restart removes it') if jump else ''
 
     def call(self, function: int, *args: int, timeout: float | None) -> int:
         _check_call_args(function, args, timeout)
@@ -686,14 +694,17 @@ class HookCaller(Caller):
         except TimeoutError as exc:
             raise _call_error(f'the call did not return within {timeout} s', timed_out=True, state='unknown') from exc
         except ProcessLookupError as exc:
-            raise _call_error(f'the target exited during the call: {exc}', exited=True, state='finished') from exc
+            raise _call_error(f'the target exited during the call: {exc}', exited=True, state='unknown') from exc
         except (OSError, RuntimeError) as exc:
             raise _call_error(f'the hook call failed: {exc}', state='unknown') from exc
         finally:
             with self._lock:
                 if ticket in self._tickets and ticket.done:
-                    ticket.close()
                     self._tickets.remove(ticket)
+                    try:
+                        ticket.close()
+                    except (OSError, RuntimeError):
+                        pass
 
     def close(self) -> None:
         with self._lock:
@@ -703,10 +714,7 @@ class HookCaller(Caller):
         if self.closed:
             return
         if self._queue is not None:
-            for ticket in tuple(self._tickets):
-                if ticket.done:
-                    ticket.close()
-                    self._tickets.remove(ticket)
+            self._sweep_done_tickets()
             if self._tickets and self.process.still_alive():
                 raise PendingCallsError('inline calls are still pending; retry close after they finish', pending=len(self._tickets))
             self._queue.close()

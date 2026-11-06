@@ -1,5 +1,7 @@
 import contextlib
 import ctypes
+import importlib.util
+from pathlib import Path
 import queue
 import struct
 import subprocess
@@ -50,6 +52,173 @@ for line in sys.stdin:
     if line.strip() == 'hit': print(ctypes.CFUNCTYPE(ctypes.c_uint64)(Process.current.read_ptr(slot))(), flush=True)
     if line.strip() == 'exit': break
 '''
+
+
+@unittest.skipUnless(importlib.util.find_spec('capstone') and importlib.util.find_spec('keystone'), 'requires capstone and keystone')
+class NylibHookTests(unittest.TestCase):
+    def setUp(self):
+        self.process = Process.current
+        self.addr = self.process.alloc(0x1000)
+        self.process.write(self.addr, _TARGET_CODE)
+
+    def tearDown(self):
+        self.process.free(self.addr)
+
+    def test_owned_matrix(self):
+        for far in (False, True):
+            for tid in (None, winapi.GetCurrentThreadId()):
+                for capacity in (1, 16, 64):
+                    with self.subTest(far=far, tid=tid, capacity=capacity), contextlib.ExitStack() as cleanup:
+                        if far: cleanup.enter_context(patch.object(self.process, 'alloc_near', side_effect=ValueError('no near page')))
+                        hook = cleanup.enter_context(InlineCallQueue(self.process, self.addr, capacity=capacity, thread_id=tid))
+                        original = hook.orig_code
+                        key = (self.process.process_id, hook._shared.remote_at)
+                        self.assertGreater(key[1], 0x7FFFFFFF)
+                        self.assertEqual(inline_call._find_nylib_hook(self.process, self.addr),
+                                         inline_call._NylibHook(hook.alloc_at, key[1], capacity, tid, len(original), original, True))
+                        hook.close()
+                        self.assertNotIn(key, inline_call._open_queues)
+                        self.assertIsNone(inline_call._find_nylib_hook(self.process, self.addr))
+
+    @contextlib.contextmanager
+    def plain_hook(self, *, data_at=0x7FFE0000, capacity=16, thread_id=None, original=bytes.fromhex('48 B8 01 00 00 00 00 00 00 00')):
+        page = self.process.alloc_near(0x1000, self.addr)
+        code = inline_call._dispatcher_code(data_at, capacity, thread_id)
+        trigger = b'\xE9' + struct.pack('<i', page - self.addr - 5) + b'\x90' * (len(original) - 5)
+        image = code + original + inline_call._absolute_jump(self.addr + len(original))
+        self.process.write(page, image)
+        self.process.write(self.addr, trigger)
+        try:
+            yield page, code, original, trigger, image
+        finally:
+            self.process.virtual_protect(page, 0x1000, 0x40)
+            self.process.write(self.addr, _TARGET_CODE)
+            self.process.free(page)
+
+    def test_plain_mov_unheld(self):
+        import capstone
+        with self.plain_hook() as (page, code, original, trigger, image):
+            loads = [i for i in capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64).disasm(code, page)
+                     if i.op_str.startswith('rbx,')]
+            self.assertEqual(loads[0].mnemonic, 'mov')
+            self.assertEqual(inline_call._find_nylib_hook(self.process, self.addr),
+                             inline_call._NylibHook(page, 0x7FFE0000, 16, None, len(original), original, False))
+
+    def test_corruption(self):
+        for part in ('dispatcher', 'original', 'return', 'padding'):
+            with self.subTest(part=part), self.plain_hook() as (page, code, original, trigger, image):
+                self.assertIsNotNone(inline_call._find_nylib_hook(self.process, self.addr))
+                if part == 'dispatcher': self.process.write(page, bytes([image[0] ^ 1]))
+                if part == 'original': self.process.write(page + len(code), bytes([original[0] ^ 0x8B]))  # ret
+                if part == 'return': self.process.write(page + len(code) + len(original), b'\xFE')
+                if part == 'padding': self.process.write(self.addr + 5, b'\x91')
+                self.assertIsNone(inline_call._find_nylib_hook(self.process, self.addr))
+
+    def test_invalid_dispatcher_parameters(self):
+        for data, capacity, tid in ((0, 16, None), (0x7FFE0000, 3, None), (0x7FFE0000, 128, None), (0x7FFE0000, 16, 0)):
+            with self.subTest(data=data, capacity=capacity, tid=tid), self.plain_hook(data_at=data, capacity=capacity, thread_id=tid):
+                self.assertIsNone(inline_call._find_nylib_hook(self.process, self.addr))
+
+    def test_unrecognised_pages(self):
+        with self.plain_hook() as (page, code, original, trigger, image):
+            self.process.write(self.addr, b'\xE9' + struct.pack('<i', page + 1 - self.addr - 5))
+            self.assertIsNone(inline_call._find_nylib_hook(self.process, self.addr))
+            self.process.write(self.addr, trigger)
+            self.process.write(page, b'\x90' * 0x1000)
+            self.assertIsNone(inline_call._find_nylib_hook(self.process, self.addr))
+            self.process.write(page, image)
+            for protect in (0x04, 0x120, 0x01):
+                self.process.virtual_protect(page, 0x1000, protect)
+                self.assertIsNone(inline_call._find_nylib_hook(self.process, self.addr))
+                self.assertEqual(self.process.virtual_query(page).Protect, protect)
+
+    def test_unrelocatable_original_is_refused(self):
+        for original in ('E8 00 00 00 00', 'E9 00 00 00 00', 'C3 90 90 90 90', 'CC 90 90 90 90', '48 CF 90 90 90', '48 8B 05 00 00 00 00'):
+            with self.subTest(original=original), self.plain_hook(original=bytes.fromhex(original)):
+                self.assertIsNone(inline_call._find_nylib_hook(self.process, self.addr))
+
+    def test_relocated_jump_is_refused(self):
+        for rel in (0x30 - 5, -5):
+            with self.subTest(rel=rel):
+                self.process.write(self.addr, b'\xE9' + struct.pack('<i', rel) + b'\x90' * 48)
+                with InlineCallQueue(self.process, self.addr, _jmp_support=1):
+                    self.assertIsNone(inline_call._find_nylib_hook(self.process, self.addr))
+
+    def test_no_jump_and_page_end(self):
+        self.assertIsNone(inline_call._find_nylib_hook(self.process, self.addr))
+        process = self.process
+        reads = []
+        class Reader:
+            def read(self, addr, n):
+                reads.append((addr, n))
+                return process.read(addr, n)
+        at = self.addr + 0xFF8
+        self.process.write(at, b'\x90' * 8)
+        self.assertIsNone(inline_call._find_nylib_hook(Reader(), at))
+        self.assertEqual(reads, [(at, 8)])
+
+    def test_invalid_inputs_and_read_failures(self):
+        for addr in ('0x1000', True):
+            with self.subTest(addr=addr), self.assertRaises(TypeError):
+                inline_call._find_nylib_hook(None, addr)
+        for addr in (-1, 0, 1 << 64):
+            self.assertIsNone(inline_call._find_nylib_hook(None, addr))
+        class Reader:
+            def read(self, addr, n):
+                raise OSError(0, 'x', None, 299)
+        self.assertIsNone(inline_call._find_nylib_hook(Reader(), 0x1000))
+        far = b'\xFF\x25\0\0\0\0'
+        for trigger in (b'\xE9' + struct.pack('<i', -0x2000), b'\xE9' + struct.pack('<i', -0x2005), b'\xE9' + struct.pack('<i', -0x1005),
+                        far + struct.pack('<Q', 0x8000_0000_0000) + b'\x90', far + struct.pack('<Q', 0x10000) + b'\x91'):
+            calls = []
+            class Jump:
+                def read(self, addr, n):
+                    calls.append((addr, n))
+                    return trigger
+            with self.subTest(trigger=trigger.hex()):
+                self.assertIsNone(inline_call._find_nylib_hook(Jump(), 0x1000))
+                self.assertEqual(calls, [(0x1000, 32)])
+
+    def test_init_failure_removes_registry_entry(self):
+        keys = set(inline_call._open_queues)
+        with patch.object(inline_call, '_dispatcher_code', side_effect=RuntimeError('assembly failed')):
+            with self.assertRaisesRegex(RuntimeError, 'assembly failed'):
+                InlineCallQueue(self.process, self.addr)
+        self.assertEqual(inline_call._open_queues, keys)
+
+    def test_ended_host_hook_is_unheld(self):
+        root = str(Path(__file__).resolve().parents[1])
+        child_code = "import nylib; print(nylib.__file__, flush=True)\n" + _CHILD
+        child = subprocess.Popen([sys.executable, '-B', '-u', '-c', child_code], cwd=root,
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        process = None
+        try:
+            self.assertEqual(Path(child.stdout.readline().strip()).resolve().parent.parent, Path(root))
+            pid, addr, tid, slot = map(int, child.stdout.readline().split())
+            process = Process(pid)
+            host_code = '''
+import os, sys, nylib
+from pathlib import Path
+from nylib.process import Process
+from nylib.winutils.inline_call import InlineCallQueue
+assert Path(nylib.__file__).resolve().parent.parent == Path.cwd()
+hook = InlineCallQueue(Process(int(sys.argv[1])), int(sys.argv[2]))
+hook.enabled = True
+print(hook.alloc_at, hook._shared.remote_at, len(hook.orig_code), hook.orig_code.hex(), flush=True)
+os._exit(0)
+'''
+            host = subprocess.run([sys.executable, '-B', '-u', '-c', host_code, str(pid), str(addr)], cwd=root,
+                                  capture_output=True, text=True, timeout=30)
+            self.assertEqual(host.returncode, 0, host.stderr)
+            page, data, size, original = host.stdout.split()
+            self.assertEqual(inline_call._find_nylib_hook(process, addr),
+                             inline_call._NylibHook(int(page), int(data), 16, None, int(size), bytes.fromhex(original), False))
+        finally:
+            if child.poll() is None: child.terminate()
+            child.wait(10)
+            if process is not None: process.close()
+            child.stdin.close()
+            child.stdout.close()
 
 
 class InlineCallTests(unittest.TestCase):

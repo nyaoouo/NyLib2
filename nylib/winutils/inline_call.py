@@ -2,9 +2,10 @@ import ctypes
 import struct
 import threading
 import time
+import typing
 
 from .. import winapi
-from .inline_hook import InlineHook, PrologueError, _absolute_jump, _allocate_jump, _read_prologue, _relocate_prologue, asm
+from .inline_hook import InlineHook, PrologueError, _absolute_jump, _allocate_jump, _read_prologue, _relocate_prologue, asm, capstone
 from .vtable_hook import VTableHook
 
 
@@ -16,6 +17,8 @@ _DONE = 3
 _UNSET = object()
 _THREAD_PATCH_ACCESS = 0x080A  # THREAD_QUERY_LIMITED_INFORMATION|GET_CONTEXT|SUSPEND_RESUME
 _PATCH_RETRIES = 32
+_open_queues = set()
+_open_queues_lock = threading.Lock()
 
 _gil_kernel32 = ctypes.PyDLL('kernel32.dll')
 _gil_suspend = _gil_kernel32.SuspendThread
@@ -189,6 +192,72 @@ def _dispatcher_code(data_at: int, capacity: int, thread_id=None) -> bytes:
     return bytes(asm(code)[0])
 
 
+class _NylibHook(typing.NamedTuple):
+    page: int
+    data_at: int
+    capacity: int
+    thread_id: int | None
+    size: int
+    original: bytes
+    held: bool
+
+
+def _find_nylib_hook(process, addr: int) -> _NylibHook | None:
+    """The call-queue hook nylib installed at addr, matched byte for byte, or None."""
+    if not isinstance(addr, int) or isinstance(addr, bool): raise TypeError('addr must be an int')
+    if not 0 < addr < 1 << 64: return None
+    n = min(32, 0x1000 - (addr & 0xFFF))
+    try:
+        trigger = process.read(addr, n)
+        if trigger[:1] == b'\xE9' and len(trigger) >= 5:
+            jlen = 5
+            target = addr + 5 + int.from_bytes(trigger[1:5], 'little', signed=True)
+        elif trigger[:6] == b'\xFF\x25\0\0\0\0' and len(trigger) >= 15 and trigger[14] == 0x90:
+            jlen = 15
+            target = int.from_bytes(trigger[6:14], 'little')
+        else:
+            return None
+        if not 0 < target < 0x8000_0000_0000 or target & 0xFFF: return None
+        mbi = process.virtual_query(target)
+        if (mbi.State != 0x1000 or mbi.Protect & 0xFF not in (0x20, 0x40) or mbi.Protect & 0x100
+                or mbi.BaseAddress + mbi.RegionSize < target + 0x1000): return None
+        page = process.read(target, 0x1000)
+    except (OSError, ValueError):
+        return None
+    cs = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+    cs.detail = True
+    data_at = capacity = thread_id = None
+    teb = False
+    for insn in cs.disasm(page, target, count=64):
+        ops = insn.operands
+        if len(ops) != 2 or ops[0].type != capstone.x86.X86_OP_REG: continue
+        reg = ops[0].reg
+        if insn.mnemonic in ('mov', 'movabs'):
+            if reg == capstone.x86.X86_REG_RBX and ops[1].type == capstone.x86.X86_OP_IMM and data_at is None:
+                data_at = ops[1].imm
+            if (reg == capstone.x86.X86_REG_RAX and ops[1].type == capstone.x86.X86_OP_MEM
+                    and ops[1].mem.segment == capstone.x86.X86_REG_GS and ops[1].mem.disp == 0x48): teb = True
+        elif insn.mnemonic == 'cmp' and ops[1].type == capstone.x86.X86_OP_IMM:
+            if reg == capstone.x86.X86_REG_R14 and capacity is None: capacity = ops[1].imm
+            if reg == capstone.x86.X86_REG_EAX and teb and thread_id is None: thread_id = ops[1].imm & 0xFFFFFFFF
+    if not data_at or capacity is None or not 1 <= capacity <= 64 or capacity & (capacity - 1) or thread_id == 0: return None
+    code = _dispatcher_code(data_at, capacity, thread_id)
+    if page[:len(code)] != code: return None
+    start = len(code)
+    size = 0
+    for insn in cs.disasm(page[start:], target + start):
+        if any(insn.group(group) for group in (capstone.CS_GRP_JUMP, capstone.CS_GRP_CALL, capstone.CS_GRP_RET,
+                                               capstone.CS_GRP_INT, capstone.CS_GRP_IRET)) or any(
+                op.type == capstone.x86.X86_OP_MEM and op.mem.base == capstone.x86.X86_REG_RIP for op in insn.operands): return None
+        size += insn.size
+        if size >= jlen: break
+    if size < jlen or size > n or trigger[jlen:size] != b'\x90' * (size - jlen): return None
+    if page[start + size:start + size + 14] != _absolute_jump(addr + size): return None
+    with _open_queues_lock:
+        held = (process.process_id, data_at) in _open_queues
+    return _NylibHook(target, data_at, capacity, thread_id, size, page[start:start + size], held)
+
+
 def _argument_bits(value) -> int:
     if isinstance(value, (int, bool)):
         if not -(1 << 63) <= value < (1 << 64): raise OverflowError(f'argument {value!r} does not fit in 64 bits')
@@ -271,13 +340,19 @@ class _CallQueue:
         self._lock = threading.Lock()
         self._tickets = {}
         self._next = self._reclaim = 0
+        self._registry_key = None
         self._atomic = _AtomicWord()
         try:
             self._shared = _SharedQueue(process, capacity)
+            self._registry_key = (process.process_id, self._shared.remote_at)
+            with _open_queues_lock:
+                _open_queues.add(self._registry_key)
             code = _dispatcher_code(self._shared.remote_at, capacity, thread_id)
             super().__init__(process, code, addr)
             self.capacity = capacity
         except BaseException:
+            with _open_queues_lock:
+                _open_queues.discard(self._registry_key)
             if hasattr(self, '_shared'): self._shared.close()
             self._atomic.close()
             raise
@@ -329,12 +404,16 @@ class _CallQueue:
                 self.alloc_at = 0
                 self._enabled = False
                 self._closed = True
+                with _open_queues_lock:
+                    _open_queues.discard(self._registry_key)
                 return
             self.enabled = False
             self.free()
             self._shared.close()
             self._atomic.close()
             self._closed = True
+            with _open_queues_lock:
+                _open_queues.discard(self._registry_key)
 
     def __enter__(self):
         self.enabled = True
