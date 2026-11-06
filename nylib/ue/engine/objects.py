@@ -17,6 +17,7 @@ if typing.TYPE_CHECKING:
 _M32 = 0xFFFFFFFF
 _I32 = struct.Struct('<i')
 _U64 = struct.Struct('<Q')
+_STALE_LIMIT = 64
 _ITEM_WINDOW = 0x10000  # A10: bytes of FUObjectItems per read
 # A1 anchors: NumObjects in [0x1000, 0x400000] (fixed rows), NumChunks in [1, 0x14] (chunked rows)
 _RE_FIXED_NUM = re.compile(rb'(?=(?:[\x00-\xff][\x10-\xff]\x00|[\x00-\xff][\x00-\xff][\x01-\x3f]|\x00\x00\x40)\x00)')
@@ -391,10 +392,47 @@ class ObjectArray:
                 yield it.CurrentObject
                 it.increment()
             return
-        for index, ptr, err in self._item_slots(self.num()):
-            obj = self.get_by_index(index) if err else UEObject(self.e, ptr)
-            if obj or index == 0:
-                yield obj
+        e = self.e
+        check = 'Off.UObject.Index' in e.provenance and e.mem.fresh is not e.mem
+        repaired = stale = 0
+        stopped = False
+        if check:
+            index_off = e.off.UObject.Index
+            fields = e.off.UObject
+            span = max((v + 8 for v in (fields.Vft, fields.Flags, fields.Index, fields.Class, fields.Name, fields.Outer) if v >= 0), default=8)
+        try:
+            for index, ptr, err in self._item_slots(self.num()):
+                obj = self.get_by_index(index) if err else UEObject(e, ptr)
+                if obj or index == 0:
+                    if obj and check and not stopped:
+                        try:
+                            stored = e.mem.i32(obj.address + index_off)
+                        except MemoryReadError:
+                            stored = None
+                        if stored != index:
+                            try:
+                                live = e.mem.fresh.i32(obj.address + index_off)
+                            except MemoryReadError:
+                                live = None
+                            if live == index:
+                                e.mem.forget(obj.address, span)
+                                try:
+                                    stored = e.mem.i32(obj.address + index_off)
+                                except MemoryReadError:
+                                    stored = None
+                                if stored == index:
+                                    repaired += 1
+                                else:
+                                    stale += 1
+                            else:
+                                stale += 1
+                            stopped = stale >= _STALE_LIMIT and stale > repaired
+                    yield obj
+        finally:
+            if repaired + stale:
+                tail = '; the check stopped for the rest of this pass, since more headers still differed than matched (Off.UObject.Index may be wrong)' if stopped else ''
+                e.cerr(f'ObjectArray (nylib): {repaired + stale} cached object headers did not match their GObjects slot; '
+                       f'{repaired} matched once their page was read again, {stale} still differ{tail}\n')
 
     def _windowed(self) -> bool:
         """A10: a pass can read its items in windows (a built-in ByIndex and a plausible item size)."""
@@ -406,7 +444,7 @@ class ObjectArray:
 
     def _item_slots(self, num: int) -> Iterator[tuple[int, int, MemoryReadError | None]]:
         """A10: (index, object pointer, None) for slots 0..num-1 of a built-in layout; (index, 0, error) where a read failed."""
-        mem, size, offset = self.e.mem, self.SizeOfFUObjectItem, self.FUObjectItemInitialOffset
+        mem, size, offset = self.e.mem.fresh, self.SizeOfFUObjectItem, self.FUObjectItemInitialOffset
         chunked = self._ByIndex in (self._by_index_chunked, self._by_index_chunked_override)
         per_chunk = self.NumElementsPerChunk if chunked else max(num, 1)
         table, err = 0, None
@@ -479,14 +517,22 @@ class ObjectArray:
         else:
             candidates = found[0] if found else []
         for obj in candidates:
-            if obj.is_a(required_type):
+            try:
+                matches = obj.is_a(required_type)
+            except MemoryReadError:
+                continue
+            if matches:
                 return obj
         return UEObject(self.e, 0)
 
     def find_object_fast(self, name: str, required_type: int = 0) -> UEObject:
         """ObjectArray::FindObjectFast<UEObject> @ ea0dab3 (A6)."""
         for obj in self._lookup('name', name):
-            if obj.is_a(required_type):
+            try:
+                matches = obj.is_a(required_type)
+            except MemoryReadError:
+                continue
+            if matches:
                 return obj
         return UEObject(self.e, 0)
 

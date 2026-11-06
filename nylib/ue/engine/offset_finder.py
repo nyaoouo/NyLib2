@@ -3,7 +3,7 @@ import struct
 import typing
 from typing import Callable, Iterable, Sequence
 
-from ..errors import MemoryReadError
+from ..errors import DetectionError, MemoryReadError
 from ..flags import EClassCastFlags, EFunctionFlags, EObjectFlags, EPropertyFlags
 from .accessor import view
 from .containers import FImplementedInterface, TArray
@@ -23,6 +23,14 @@ _READERS = frozenset({'u8', 'i8', 'u16', 'i16', 'u32', 'i32', 'u64', 'i64', 'ptr
 _F32 = struct.Struct('<f')
 _ARRAY_INNER_ANCHORS = (('GetOverlappingComponents', 'OverlappingComponents'), ('K2_GetComponentsByClass', 'ReturnValue'),
                         ('GetOverlappingActors', 'OverlappingActors'))
+
+
+def _require(e: 'Engine', found, name: str, step: str):
+    """`found` unchanged when it is truthy; else DetectionError(step, ...) naming `name`."""
+    if not found:
+        raise DetectionError(step, f'{name} was not found in GObjects by name; it is missing from this game or was unreadable while the probe ran',
+                             explanations=tuple(getattr(e, 'messages', ())))
+    return found
 
 
 def _i32(value: int) -> int:
@@ -237,9 +245,12 @@ def fixup_hardcoded_offsets(e: 'Engine') -> None:
     if internal.bUseFProperty:
         offset_to_check = off.FField.Owner + 0x8
         objects, mem = e.objects, e.mem
-        possible_next_ptr_or_bool_0 = mem.ptr(objects.find_class_fast('Actor').get_child_properties().get_address() + offset_to_check)
-        possible_next_ptr_or_bool_1 = mem.ptr(objects.find_class_fast('ActorComponent').get_child_properties().get_address() + offset_to_check)
-        possible_next_ptr_or_bool_2 = mem.ptr(objects.find_class_fast('Pawn').get_child_properties().get_address() + offset_to_check)
+        possible_next_ptr_or_bool_0 = mem.ptr(_require(e, objects.find_class_fast('Actor'),
+                                                       'Actor', 'OffsetFinder::FixupHardcodedOffsets').get_child_properties().get_address() + offset_to_check)
+        possible_next_ptr_or_bool_1 = mem.ptr(_require(e, objects.find_class_fast('ActorComponent'),
+                                                       'ActorComponent', 'OffsetFinder::FixupHardcodedOffsets').get_child_properties().get_address() + offset_to_check)
+        possible_next_ptr_or_bool_2 = mem.ptr(_require(e, objects.find_class_fast('Pawn'),
+                                                       'Pawn', 'OffsetFinder::FixupHardcodedOffsets').get_child_properties().get_address() + offset_to_check)
 
         def is_valid_ptr(a: int) -> bool:
             return not e.platform.is_bad_read_ptr(a) and (a & 0x1) == 0
@@ -275,10 +286,17 @@ def init_fname_settings(e: 'Engine') -> None:
 
     def get_num_names_with_number_one_to_four() -> int:
         names_with_number_one_to_four = 0x0
+        skipped = 0
         for obj in e.objects:
-            number = obj.get_fname().get_number()
+            try:
+                number = obj.get_fname().get_number()
+            except MemoryReadError:
+                skipped += 1
+                continue
             if 0x0 < number < 0x5:
                 names_with_number_one_to_four += 1
+        if skipped:
+            e.cerr(f'OffsetFinder::InitFNameSettings: {skipped} unreadable objects skipped\n')
         return names_with_number_one_to_four
 
     fname_number_threashold = _i32(int(_f32(_f32(float(e.objects.num())) * _f32(0.03))))
@@ -318,7 +336,7 @@ def post_init_fname_settings(e: 'Engine') -> None:
     """OffsetFinder::PostInitFNameSettings @ ea0dab3."""
     label = 'auto: OffsetFinder::PostInitFNameSettings'
     off, internal, prov = e.off, e.settings.Internal, e.provenance
-    player_start = e.objects.find_class_fast('PlayerStart')
+    player_start = _require(e, e.objects.find_class_fast('PlayerStart'), 'PlayerStart', 'OffsetFinder::PostInitFNameSettings')
     fname_size = player_start.find_member('PlayerStartTag').get_size()
     if off.InSDK.Name.FNameSize == fname_size:
         return
@@ -369,8 +387,10 @@ def post_init_fname_settings(e: 'Engine') -> None:
 
 def find_ufield_next_offset(e: 'Engine') -> int:
     """OffsetFinder::FindUFieldNextOffset @ ea0dab3."""
-    kismet_system_library_child = e.objects.find_object_fast('KismetSystemLibrary').cast(UEStruct).get_child().get_address()
-    kismet_string_library_child = e.objects.find_object_fast('KismetStringLibrary').cast(UEStruct).get_child().get_address()
+    kismet_system_library_child = _require(e, e.objects.find_object_fast('KismetSystemLibrary'),
+                                           'KismetSystemLibrary', 'OffsetFinder::FindUFieldNextOffset').cast(UEStruct).get_child().get_address()
+    kismet_string_library_child = _require(e, e.objects.find_object_fast('KismetStringLibrary'),
+                                           'KismetStringLibrary', 'OffsetFinder::FindUFieldNextOffset').cast(UEStruct).get_child().get_address()
     uobject = e.off.UObject
     highest_uobject_offset = max(uobject.Index, uobject.Name, uobject.Flags, uobject.Outer, uobject.Class)
     return get_valid_pointer_offset(e, kismet_system_library_child, kismet_string_library_child, align(highest_uobject_offset + 0x4, 8), 0x60)
@@ -380,8 +400,8 @@ def find_ufield_next_offset(e: 'Engine') -> int:
 
 def find_ffield_next_offset(e: 'Engine') -> int:
     """OffsetFinder::FindFFieldNextOffset @ ea0dab3."""
-    guid_children = e.objects.find_struct_fast('Guid').get_child_properties().get_address()
-    vector_children = e.objects.find_struct_fast('Vector').get_child_properties().get_address()
+    guid_children = _require(e, e.objects.find_struct_fast('Guid'), 'Guid', 'OffsetFinder::FindFFieldNextOffset').get_child_properties().get_address()
+    vector_children = _require(e, e.objects.find_struct_fast('Vector'), 'Vector', 'OffsetFinder::FindFFieldNextOffset').get_child_properties().get_address()
     return get_valid_pointer_offset(e, guid_children, vector_children, e.off.FField.Owner + 0x8, 0x48)
 
 
@@ -389,8 +409,8 @@ def find_ffield_name_offset(e: 'Engine') -> int:
     """OffsetFinder::FindFFieldNameOffset @ ea0dab3."""
     label = 'auto: OffsetFinder::FindFFieldNameOffset'
     ffield = e.off.FField
-    guid_child = e.objects.find_struct_fast('Guid').get_child_properties()
-    vector_child = e.objects.find_struct_fast('Vector').get_child_properties()
+    guid_child = _require(e, e.objects.find_struct_fast('Guid'), 'Guid', 'OffsetFinder::FindFFieldNameOffset').get_child_properties()
+    vector_child = _require(e, e.objects.find_struct_fast('Vector'), 'Vector', 'OffsetFinder::FindFFieldNameOffset').get_child_properties()
 
     def names_match() -> bool:
         try:
@@ -424,8 +444,8 @@ def new_find_ffield_name_offset(e: 'Engine') -> int:
 
 def find_ffield_class_offset(e: 'Engine') -> int:
     """OffsetFinder::FindFFieldClassOffset @ ea0dab3."""
-    guid_child = e.objects.find_struct_fast('Guid').get_child_properties()
-    vector_child = e.objects.find_struct_fast('Vector').get_child_properties()
+    guid_child = _require(e, e.objects.find_struct_fast('Guid'), 'Guid', 'OffsetFinder::FindFFieldClassOffset').get_child_properties()
+    vector_child = _require(e, e.objects.find_struct_fast('Vector'), 'Vector', 'OffsetFinder::FindFFieldClassOffset').get_child_properties()
     return get_valid_pointer_offset(e, guid_child.get_address(), vector_child.get_address(), 0x8, 0x30, True, check_for_vft=False)
 
 
@@ -437,7 +457,7 @@ _MEMBER_PROBES = (('Guid', 4), ('Vector', 3))  # a struct and its member count
 def _member_probes(e: 'Engine') -> list[tuple[int, int, int]]:
     out = []
     for name, count in _MEMBER_PROBES:
-        struct = e.objects.find_struct_fast(name)
+        struct = _require(e, e.objects.find_struct_fast(name), name, 'OffsetFinder::FFieldLayoutCheck (nylib)')
         out.append((struct.get_address(), struct.get_child_properties().get_address(), count))
     return out
 
@@ -563,7 +583,8 @@ def find_enum_names_offset(e: 'Engine') -> int:
         infos[0] = (objects.find_object_fast('EAlphaBlendOption', EClassCastFlags.Enum).get_address(), 0x10)
         infos[1] = (objects.find_object_fast('EUpdateRateShiftBucket', EClassCastFlags.Enum).get_address(), 0x8)
         uenum_num_values_offset = find_offset(e, infos)
-    inialize_uenum_settings(e, infos[0][0], uenum_num_values_offset)
+    enum_obj = _require(e, infos[0][0], 'ENetRole' if infos[0][1] == 0x5 else 'EAlphaBlendOption', 'OffsetFinder::FindEnumNamesOffset')
+    inialize_uenum_settings(e, enum_obj, uenum_num_values_offset)
     return _i32(uenum_num_values_offset - 8)
 
 
@@ -637,11 +658,14 @@ def find_function_flags_offset(e: 'Engine') -> int:
 def find_function_native_func_offset(e: 'Engine') -> int:
     """OffsetFinder::FindFunctionNativeFuncOffset @ ea0dab3."""
     objects, mem, in_process_range = e.objects, e.mem, e.platform.is_address_in_process_range
-    was_input_key_just_pressed = objects.find_object_fast('WasInputKeyJustPressed', EClassCastFlags.Function).get_address()
-    toggle_speaking = objects.find_object_fast('ToggleSpeaking', EClassCastFlags.Function).get_address()
+    was_input_key_just_pressed = _require(e, objects.find_object_fast('WasInputKeyJustPressed', EClassCastFlags.Function),
+                                          'WasInputKeyJustPressed', 'OffsetFinder::FindFunctionNativeFuncOffset').get_address()
+    toggle_speaking = _require(e, objects.find_object_fast('ToggleSpeaking', EClassCastFlags.Function),
+                               'ToggleSpeaking', 'OffsetFinder::FindFunctionNativeFuncOffset').get_address()
     switch_level_or_fov = objects.find_object_fast('SwitchLevel', EClassCastFlags.Function).get_address()
     if switch_level_or_fov == 0:
         switch_level_or_fov = objects.find_object_fast('FOV', EClassCastFlags.Function).get_address()
+    switch_level_or_fov = _require(e, switch_level_or_fov, 'SwitchLevel or FOV', 'OffsetFinder::FindFunctionNativeFuncOffset')
     for i in range(0x30, 0x140, 8):
         if (in_process_range(mem.ptr(was_input_key_just_pressed + i)) and in_process_range(mem.ptr(toggle_speaking + i))
                 and in_process_range(mem.ptr(switch_level_or_fov + i))):
@@ -670,7 +694,7 @@ def find_default_object_offset(e: 'Engine') -> int:
 def find_implemented_interfaces_offset(e: 'Engine') -> int:
     """OffsetFinder::FindImplementedInterfacesOffset @ ea0dab3."""
     interface_asset_user_data_class = e.objects.find_class_fast('Interface_AssetUserData')
-    actor_component_class_ptr = e.objects.find_class_fast('ActorComponent').get_address()
+    actor_component_class_ptr = _require(e, e.objects.find_class_fast('ActorComponent'), 'ActorComponent', 'OffsetFinder::FindImplementedInterfacesOffset').get_address()
     for i in range(e.off.UClass.ClassDefaultObject, (0x350 - 0x10) + 1, 8):
         actor_array = view(TArray, actor_component_class_ptr + i, e.acc)
         if actor_array.is_valid() and not e.platform.is_bad_read_ptr(actor_array.get_data_ptr()):
@@ -899,12 +923,19 @@ def find_level_actors_offset(e: 'Engine') -> int:
     """OffsetFinder::FindLevelActorsOffset @ ea0dab3."""
     level = UEObject(e, 0)
     lvl = 0x0
+    skipped = 0
     for obj in e.objects:
-        if obj.has_any_flags(EObjectFlags.ClassDefaultObject) or not obj.is_a(EClassCastFlags.Level):
+        try:
+            if obj.has_any_flags(EObjectFlags.ClassDefaultObject) or not obj.is_a(EClassCastFlags.Level):
+                continue
+        except MemoryReadError:
+            skipped += 1
             continue
         level = obj
         lvl = obj.get_address()
         break
+    if skipped:
+        e.cerr(f'OffsetFinder::FindLevelActorsOffset: {skipped} unreadable objects skipped\n')
     if lvl == 0x0:
         return OffsetNotFound
     uobject_class = e.objects.find_class_fast('Object')
@@ -941,8 +972,8 @@ def find_datatable_row_map_offset(e: 'Engine') -> int:
 def find_field_class_cast_flags_offset(e: 'Engine') -> int:
     """OffsetFinder::FindFieldClassCastFlagsOffset @ dd8fe34 (Q23 = A); 0x10 when not found."""
     flags = EClassCastFlags
-    guid_child = e.objects.find_struct_fast('Guid').get_child_properties()
-    colour_child = e.objects.find_struct_fast('Color').get_child_properties()
+    guid_child = _require(e, e.objects.find_struct_fast('Guid'), 'Guid', 'OffsetFinder::FindFieldClassCastFlagsOffset').get_child_properties()
+    colour_child = _require(e, e.objects.find_struct_fast('Color'), 'Color', 'OffsetFinder::FindFieldClassCastFlagsOffset').get_child_properties()
     infos = [(guid_child.get_class().get_address(), int(flags.Field | flags.Property | flags.NumericProperty | flags.IntProperty)),
              (colour_child.get_class().get_address(), int(flags.Field | flags.Property | flags.NumericProperty | flags.ByteProperty))]
     offset = find_offset(e, infos, 8, 0x30, reader='u64')
