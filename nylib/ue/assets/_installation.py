@@ -564,6 +564,7 @@ class Installation:
         self._releasing = False
         self._released = False
         self._script_lock = threading.Lock()
+        self._script_thread = None
         self._script = None  # (ScriptObjects, Texture2D global index or None)
         self._listing_lock = threading.Lock()
         self._listing = None  # [(package name, mounted index, TOC index)], sorted
@@ -572,6 +573,7 @@ class Installation:
         self._pak_decryptors = {}
         self._pak_aes_lock = threading.Lock()
         self._pak_lock = threading.Lock()
+        self._pak_thread = None
         self._pak_index = None
 
     engine = property(lambda self: self._engine)
@@ -697,8 +699,12 @@ class Installation:
     def _load_pak(self, check, counters):
         if self._pak_index is not None:
             return self._pak_index
+        me = threading.get_ident()
+        if self._pak_thread == me:
+            raise RuntimeError('re-entrant call during the .pak index load')
         while not self._pak_lock.acquire(timeout=0.05):
             check()
+        self._pak_thread = me
         try:
             check()
             if self._pak_index is None:
@@ -712,6 +718,7 @@ class Installation:
                 self._pak_index = (by_path, tuple(entries))
             return self._pak_index
         finally:
+            self._pak_thread = None
             self._pak_lock.release()
 
     def _find_file(self, path, index):
@@ -998,21 +1005,22 @@ class Installation:
                                     container=toc.basename, detail=e.detail) from None
 
     def _script_objects(self, counters, *how) -> tuple:
-        """(ScriptObjects, the Texture2D global index or None, its container), loaded once from global.utoc.
-
-        `how` is (public method name, _Check) for a method other than texture(); while another call loads the table,
-        that _Check keeps being called.
-        """
+        """Load (ScriptObjects, Texture2D global index or None, container) once, checking `how` while waiting."""
+        me = threading.get_ident()
+        if self._script_thread == me:
+            raise RuntimeError('re-entrant call during the ScriptObjects load')
         if not how:
             self._script_lock.acquire()
         else:
             while not self._script_lock.acquire(timeout=0.05):
                 how[1]()
+        self._script_thread = me
         try:
             if self._script is None:
                 self._script = self._load_script_objects(counters, *how)
             return self._script
         finally:
+            self._script_thread = None
             self._script_lock.release()
 
     def _load_script_objects(self, counters, method: str = 'texture', check: '_Check | None' = None) -> tuple:
@@ -1119,7 +1127,9 @@ class Installation:
                 holders = [(mi, oi) for mi, (otoc, _c, _a) in enumerate(self._mounted)
                            if (oi := otoc.find(cid, 0, _texture.OPTIONAL_BULK_DATA)) is not None]
                 optional = holders[0] if len(holders) == 1 else None
-                optional_length = 0 if optional is None else self._mounted[optional[0]][0].chunk_range(optional[1])[1]
+                optional_length = 0
+                if optional is not None and any(e.flags & _texture._BULK_OPTIONAL_PAYLOAD for e in header.bulk_data_map):
+                    optional_length = self._mounted[optional[0]][0].chunk_range(optional[1])[1]
                 walking = True
                 info, layout, unreadable = _texture.parse_texture2d(header, ei, self._mappings.view(used), bulk_length,
                                                                    (len(holders), optional_length))
