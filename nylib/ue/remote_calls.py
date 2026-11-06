@@ -2,8 +2,8 @@
 import contextlib
 import dataclasses
 import logging
-import math
 import struct
+import threading
 import time
 from typing import NamedTuple
 
@@ -18,7 +18,9 @@ logger = logging.getLogger('nylib.ue.remote_calls')
 FEATURES = ('append-string', 'game-info', 'text')  # the accepted names
 RUN_ORDER = ('text', 'game-info', 'append-string')  # the order run() calls them in
 TEXT_KEYS = ('Off.InSDK.Text.TextDatOffset', 'Off.InSDK.Text.InTextDataStringOffset')
-CALL_EXEMPT = TEXT_KEYS + ('Settings.Generator.GameName', 'Settings.Generator.GameVersion')  # a copy of runtime.session.CALL_EXEMPT
+# a copy of runtime.session.CALL_EXEMPT
+CALL_EXEMPT = TEXT_KEYS + ('Settings.Generator.GameName', 'Settings.Generator.GameVersion',
+                          'Off.FFieldClass.Id', 'Off.FFieldClass.ClassFlags', 'Off.FFieldClass.SuperClass')
 CONV_STRING_TO_TEXT = '/Script/Engine.KismetTextLibrary:Conv_StringToText'
 PROBE_TEXT = 'ThisIsAGoodString!'  # 19 units with its NUL, 38 bytes compared
 TEXT_SCAN_END = 0x50  # InitTextOffsets' MaxOffset
@@ -73,8 +75,9 @@ def _check_timeout(timeout) -> None:
         return
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
         raise TypeError(f'timeout must be None or a number, got {type(timeout).__name__}')
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError(f'timeout must be greater than 0 and finite, got {timeout!r}')
+    if not 0 < timeout <= threading.TIMEOUT_MAX:
+        shown = repr(timeout) if isinstance(timeout, float) or abs(timeout) < 10**18 else f'an int of {timeout.bit_length()} bits'
+        raise ValueError(f'timeout must be greater than 0 and at most {threading.TIMEOUT_MAX} s, got {shown}')
 
 
 def parse_features(value) -> tuple[str, ...]:

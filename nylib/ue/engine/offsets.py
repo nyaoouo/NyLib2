@@ -1,4 +1,5 @@
 """Offsets.cpp of Dumper-7 @ ea0dab3 over an Engine: Off::Init, PropertySizes, ProcessEvent, GWorld and FText (up to its call)."""
+import logging
 import time
 import typing
 from collections.abc import Mapping
@@ -10,6 +11,8 @@ from .unreal import UEClass, UEFunction, UEObject, UEProperty, _PARENT_LINKS, _C
 
 if typing.TYPE_CHECKING:
     from .core import Engine
+
+_log = logging.getLogger('nylib.ue.engine')
 
 _M32 = 0xFFFFFFFF
 
@@ -285,6 +288,10 @@ def off_init(e: 'Engine', *, pins: Mapping[str, int] | None = None) -> None:
                 _assign(e, 'Off.FFieldClass.Name', value, 'auto: OffsetFinder::FindFFieldClassNameOffset (nylib)', pins)
             else:
                 e.provenance['Off.FFieldClass.Name'] = 'not found: no FFieldClass offset names IntProperty and ByteProperty'
+            for field in ('Id', 'ClassFlags', 'SuperClass'):
+                key = f'Off.FFieldClass.{field}'
+                if key not in pins:
+                    e.provenance[key] = f'default: {_hexs(getattr(off.FFieldClass, field))} (FFieldClass.Name moved; header layout unchecked)'
             e.cerr(f'Off::FFieldClass::Name: 0x{off.FFieldClass.Name:X}\n\n')
 
     _find(e, pins, 'Off.UClass.ClassDefaultObject', 'FindDefaultObjectOffset', OffsetFinder.find_default_object_offset)
@@ -554,6 +561,7 @@ def init_gworld(e: 'Engine') -> None:
         for obj in rest:
             yield obj, hits[obj.get_address()]
 
+    candidates: dict[int, None] = {}
     for obj, results in world_hits():
         result = 0
         if results:
@@ -578,7 +586,10 @@ def init_gworld(e: 'Engine') -> None:
                     result = results[1]
                     e.cerr(f'Filter GActiveLogWorld at 0x{possible_gworld:X}\n\n')
             else:
-                e.cerr(f'Detected {len(results)} GWorld \n\n')
+                rvas = [e.platform.get_offset(address) for address in results]
+                candidates.update(dict.fromkeys(rvas))
+                listed = ', '.join(f'rva 0x{r:X}' for r in rvas)
+                e.cerr(f'Detected {len(results)} GWorld candidates for UWorld 0x{obj.get_address():X}: {listed}\n\n')
 
         if result:
             e.off.InSDK.World.GWorld = _i32(e.platform.get_offset(result))
@@ -587,7 +598,14 @@ def init_gworld(e: 'Engine') -> None:
             break
 
     if e.off.InSDK.World.GWorld == 0x0:
-        e.provenance['Off.InSDK.World.GWorld'] = 'not found: no pointer to a UWorld in the image'
+        if candidates:
+            rvas = list(candidates)
+            listed = ', '.join(f'rva 0x{r:X}' for r in rvas[:8]) + (', ...' if len(rvas) > 8 else '')
+            e.provenance['Off.InSDK.World.GWorld'] = f'not found: {len(rvas)} UWorld references, none unique ({listed})'
+            _log.warning('GWorld not found: %d image slots point at a UWorld (%s); pin the right one as [offsets] "Off.InSDK.World.GWorld"',
+                         len(rvas), listed)
+        else:
+            e.provenance['Off.InSDK.World.GWorld'] = 'not found: no pointer to a UWorld in the image'
         e.cerr('\nGWorld WAS NOT FOUND!!!!!!!!!\n\n')
 
 

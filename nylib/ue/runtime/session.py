@@ -1,7 +1,6 @@
 """Runtime sessions (RT8): Unreal.attach / attach_current, the session context (RT0), policies and lookups."""
 import enum
 import logging
-import math
 import os
 import re
 import threading
@@ -38,7 +37,8 @@ _orphaned_lock = threading.Lock()  # guards _orphaned_callers; taken before any 
 
 _SUPER_STEPS = 256
 _TEXT_KEYS = ('Off.InSDK.Text.TextDatOffset', 'Off.InSDK.Text.InTextDataStringOffset')
-WRITE_EXEMPT = ('Settings.Generator.GameName', 'Settings.Generator.GameVersion')  # they only name the output folder
+UNREAD_EXEMPT = ('Off.FFieldClass.Id', 'Off.FFieldClass.ClassFlags', 'Off.FFieldClass.SuperClass')  # no write or call path reads them
+WRITE_EXEMPT = ('Settings.Generator.GameName', 'Settings.Generator.GameVersion') + UNREAD_EXEMPT  # stem keys only name the output folder
 CALL_EXEMPT = _TEXT_KEYS + WRITE_EXEMPT
 _KNOWN_LABELS = ('auto:', 'profile:')
 _PYTHON_EXE_RE = re.compile(r'pythonw?[0-9.]*\.exe', re.IGNORECASE)
@@ -81,8 +81,20 @@ def _check_timeout(timeout) -> None:
         return
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
         raise TypeError(f'call_timeout must be None or a number, got {type(timeout).__name__}')
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError(f'call_timeout must be greater than 0 and finite, got {timeout!r}')
+    if not 0 < timeout <= threading.TIMEOUT_MAX:
+        shown = repr(timeout) if isinstance(timeout, float) or abs(timeout) < 10**18 else f'an int of {timeout.bit_length()} bits'
+        raise ValueError(f'call_timeout must be greater than 0 and at most {threading.TIMEOUT_MAX} s, got {shown}')
+
+
+def _check_cache_bytes(cache_bytes) -> int | None:
+    """None, 0 (uncached) or a page-cache cap in bytes of at least 0x10000."""
+    if cache_bytes is None:
+        return None
+    if not isinstance(cache_bytes, int) or isinstance(cache_bytes, bool):
+        raise TypeError(f'cache_bytes must be an int or None, got {type(cache_bytes).__name__}')
+    if cache_bytes != 0 and cache_bytes < 0x10000:
+        raise ValueError(f'cache_bytes must be 0 (uncached) or >= 0x10000, got {cache_bytes:#x}')
+    return cache_bytes
 
 
 class RuntimeContext:
@@ -270,7 +282,7 @@ def _warn_degraded_quality(quality, where: str) -> None:
                        '; '.join(map(str, reasons)) if isinstance(reasons, (list, tuple)) else '')
 
 
-def _policy_warning(calls: str) -> None:
+def _policy_warning(calls: str, caller=None) -> None:
     """The calls session's crash-risk WARNING, logged once per session before its first call."""
     if calls == 'remote-thread':
         _info.warning("calls='remote-thread': each UFunction call runs ProcessEvent on a new thread in the game "
@@ -283,8 +295,11 @@ def _policy_warning(calls: str) -> None:
                       "engine-allocated out values are not freed; UE skips some calls without a sign, so zero outputs can "
                       'mean "not run"')
     elif calls == 'game-thread':
-        _info.warning("calls='game-thread': ProcessEvent is patched and calls wait for a natural entry on the selected "
-                      'thread; a call can time out if that entry never occurs, and engine-allocated out values are not freed')
+        function = (f'the function at {caller.trigger:#x} (the HookCaller trigger)'
+                    if isinstance(caller, _calls.HookCaller) and caller._site is not None and
+                    caller.trigger != caller._site.process_event_address else 'ProcessEvent')
+        _info.warning("calls='game-thread': %s is patched and calls wait for a natural entry on the selected "
+                      'thread; a call can time out if that entry never occurs, and engine-allocated out values are not freed', function)
     elif calls == 'apc':
         _info.warning("calls='apc': the selected thread must enter an alertable wait; a timed-out APC can still run later, "
                       'and its call memory remains allocated')
@@ -313,7 +328,7 @@ def _text_call(keys, engine, opened, *, function, write, calls, caller, allow_un
     transport = text_call = result = None
     if engine.off.InSDK.ProcessEvent.PEIndex > 0:
         transport = _bind_caller(caller, engine, opened, timeout)
-        _policy_warning(calls)
+        _policy_warning(calls, transport)
         r = _remote_calls.resolve_text_offsets(engine, transport, function=function, timeout=timeout,
                                                label='attach FText call', raise_refused=True)
         text_call = None if r.ok else r.detail
@@ -382,7 +397,7 @@ class Unreal:
     @classmethod
     def attach(cls, target: int | str, *, dump=None, profile=None, write: bool = False, calls: str | _calls.Caller | None = None,
                allow_unverified: bool = False, out=None, call_timeout: float | None = _calls.DEFAULT_TIMEOUT,
-               dump_exports: list[str] | tuple[str, ...] | None = None, _open_target=None) -> 'Unreal':
+               dump_exports: list[str] | tuple[str, ...] | None = None, cache_bytes: int | None = None, _open_target=None) -> 'Unreal':
         """Attach to a running game from outside (external) or to a capture through `_open_target`."""
         if target is None:
             raise TypeError('Unreal.attach needs a target; inside the game use Unreal.attach_current()')
@@ -393,6 +408,7 @@ class Unreal:
         dump = _check_dump_profile(dump, profile)
         exports = _check_dump_exports(dump_exports)
         _check_timeout(call_timeout)
+        cache_bytes = _check_cache_bytes(cache_bytes)
         caller = _calls.resolve_caller(calls)
         if isinstance(calls, str) and calls == 'any-thread':
             raise ValueError("calls='any-thread' runs ProcessEvent on the calling thread, which exists only inside the game: "
@@ -401,16 +417,17 @@ class Unreal:
         root = store.resolve_out_root(out)
         return cls._attach(target, root, dump=dump, profile=profile, write=write, calls=caller.policy if caller else None,
                            caller=caller, allow_unverified=allow_unverified,
-                           call_timeout=call_timeout, dump_exports=exports, open_target=_open_target)
+                           call_timeout=call_timeout, dump_exports=exports, cache_bytes=cache_bytes, open_target=_open_target)
 
     @classmethod
     def attach_current(cls, *, dump=None, profile=None, write: bool = False, calls: str | _calls.Caller | None = None,
                        allow_unverified: bool = False, out=None, call_timeout: float | None = _calls.DEFAULT_TIMEOUT,
-                       dump_exports: list[str] | tuple[str, ...] | None = None, _open_target=None) -> 'Unreal':
+                       dump_exports: list[str] | tuple[str, ...] | None = None, cache_bytes: int | None = None, _open_target=None) -> 'Unreal':
         """Attach to the game this code runs inside (injected)."""
         dump = _check_dump_profile(dump, profile)
         exports = _check_dump_exports(dump_exports)
         _check_timeout(call_timeout)
+        cache_bytes = _check_cache_bytes(cache_bytes)
         caller = _calls.resolve_caller(calls)
         if isinstance(calls, str) and calls == 'remote-thread':
             raise ValueError("calls='remote-thread' starts a thread in another process; inside the game use calls='any-thread'")
@@ -424,10 +441,10 @@ class Unreal:
                 root = None
         return cls._attach(None, root, dump=dump, profile=profile, write=write, calls=caller.policy if caller else None,
                            caller=caller, allow_unverified=allow_unverified,
-                           call_timeout=call_timeout, dump_exports=exports, open_target=_open_target)
+                           call_timeout=call_timeout, dump_exports=exports, cache_bytes=cache_bytes, open_target=_open_target)
 
     @classmethod
-    def _attach(cls, target, root, *, dump, profile, write, calls, caller, allow_unverified, call_timeout, dump_exports, open_target) -> 'Unreal':
+    def _attach(cls, target, root, *, dump, profile, write, calls, caller, allow_unverified, call_timeout, dump_exports, cache_bytes, open_target) -> 'Unreal':
         write = bool(write)
         snap = opened = None
         dumped = False
@@ -440,7 +457,7 @@ class Unreal:
             elif dump is None and isinstance(profile, (str, os.PathLike)):
                 profile = profiles.load_profile(profile)
             opened = (open_target or pipeline.open_target)(target, write=write,
-                                                            remote_calls=(calls is not None and target is not None), cache_bytes=None)
+                                                            remote_calls=(calls is not None and target is not None), cache_bytes=cache_bytes)
             info = opened.info
             if calls is not None:
                 _retry_parked(info.pid)
@@ -485,7 +502,7 @@ class Unreal:
             if calls is not None:
                 ctx.invoker = Invoker(ctx, transport or _bind_caller(caller, ectx.engine, opened, call_timeout))
                 if transport is None:  # else _text_call logged it before the attach-time call
-                    _policy_warning(calls)
+                    _policy_warning(calls, ctx.invoker.transport)
 
             if snap is not None:
                 _info.info('snapshot %s matches the running build (pe %s / %s)', os.path.basename(snap.path), hexs(info.pe_timestamp),
@@ -687,6 +704,19 @@ class Unreal:
         except MemoryReadError:
             return None
 
+    def struct_at(self, struct, address: int) -> StructView | None:
+        """A typed view of `struct` (a path, or a struct class from ue.type()) at `address`; nothing is read until a member is."""
+        ctx = self._live()
+        if not isinstance(struct, str) and not (isinstance(struct, type) and issubclass(struct, StructView)
+                                               and getattr(struct, '_ue_ctx_', None) is ctx and struct._ue_path_ is not None):
+            raise TypeError(f'struct must be a struct path or a struct class of this session, got {type(struct).__name__}')
+        if not _is_int(address):
+            raise TypeError(f'address must be an int, got {type(address).__name__}')
+        if not 0 <= address <= 0xFFFF_FFFF_FFFF_FFFF:
+            raise ValueError(f'address must be in 0..0xFFFFFFFFFFFFFFFF, got {address:#x}')
+        cls = ctx.factory.struct_for(struct) if isinstance(struct, str) else struct
+        return None if address == 0 else view(cls, address, ctx.acc)
+
     def find_class(self, name: str) -> UObjectProxy | None:
         ctx = self._live()
         if not isinstance(name, str):
@@ -767,6 +797,15 @@ class Unreal:
         """Game-thread calls that keep close() from finishing (the caller's `pending`); 0 without calls or once closed."""
         ctx = self._ctx
         return 0 if ctx.closed or ctx.invoker is None else ctx.invoker.transport.pending
+
+    @property
+    def call_thread_id(self) -> int | None:
+        """The thread id the session's HookCaller is bound to; None without one or once closed."""
+        ctx = self._ctx
+        if ctx.closed or ctx.invoker is None:
+            return None
+        caller = ctx.invoker.transport
+        return caller.thread_id if isinstance(caller, _calls.HookCaller) else None
 
     def enum(self, path: str) -> type[enum.IntEnum] | None:
         return self._live().enum_class(path)
