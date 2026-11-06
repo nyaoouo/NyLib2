@@ -310,7 +310,7 @@ class UEEnum(UEField):
         is_names_ptr_tagged = (tagged_names_ptr & 0x1) != 0
         names_ptr = tagged_names_ptr & (~0x1 & _U64)
         if not is_names_ptr_tagged:
-            text = 'Dumper-7 [UEEnum::GetNameValuePairs()]: UEnum::Names pointer is tagged! This is not supported yet!'
+            text = 'Dumper-7 [UEEnum::GetNameValuePairs()]: UEnum::Names pointer is not tagged; this layout is not supported yet'
             self.e.cerr(text + '\n')
             raise DetectionError('UEEnum::GetNameValuePairs', text, explanations=tuple(self.e.messages))
         values = mem.u64(self.address + enum_names_offset + 0x8) & (~0x1 & _U64)

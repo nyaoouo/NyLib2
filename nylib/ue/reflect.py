@@ -1,6 +1,7 @@
 """The reflection core: stage-4 wrappers to F8 records, and the streaming three-pass snapshot walk (stage 6, R2)."""
 import dataclasses
 import itertools
+import logging
 import time
 import typing
 from typing import Callable, Iterable
@@ -23,6 +24,8 @@ from .snapshot import write_snapshot
 if typing.TYPE_CHECKING:
     from .engine.context import EngineContext
     from .engine.core import Engine
+
+logger = logging.getLogger('nylib.ue.reflect')
 
 ISSUE_KINDS = ('unreadable_object', 'index_mismatch', 'unresolved_class', 'unresolved_outer', 'cyclic_outer', 'unreadable_fields',
                'unreadable_type', 'duplicate_path', 'unresolved_reference', 'enum_names_unsupported', 'enum_size_invalid', 'orphan_function',
@@ -189,10 +192,11 @@ class Reflection:
         self.e = e
         self.resolver = resolver
         self._issue = issue
+        self._issue_prefix = ''
 
     def _report(self, kind: str, sample: str) -> None:
         if self._issue is not None:
-            self._issue(kind, sample)
+            self._issue(kind, self._issue_prefix + sample)
 
     def _path(self, obj) -> str | None:
         return self.resolver.path(obj.address)
@@ -226,7 +230,8 @@ class Reflection:
             enum = p.get_enum()
             t.enum, t.underlying = self._path(enum), self._nested(p.get_underlaying_property(), depth)
             if t.enum is None:
-                self._report('unresolved_reference', f'EnumProperty {prop.get_name()!r} at {prop.address:#x}: enum {enum.address:#x} does not resolve')
+                detail = f'enum {enum.address:#x} does not resolve' if enum.address else 'enum is null in the game'
+                self._report('unresolved_reference', f'EnumProperty {prop.get_name()!r} at {prop.address:#x}: {detail}')
         elif kind == 'ByteProperty':
             t.enum = self._path(prop.cast(UEByteProperty).get_enum())
         elif kind == 'BoolProperty':
@@ -290,7 +295,12 @@ class Reflection:
         for fn in cls.get_functions():
             name = fn.get_fname().to_raw_string()
             if name not in functions:
-                functions[name] = self.function_record(fn)
+                prefix = self._issue_prefix
+                self._issue_prefix = f'function {name}: '
+                try:
+                    functions[name] = self.function_record(fn)
+                finally:
+                    self._issue_prefix = prefix
                 listed.append(fn.address)
         record = ClassRecord(**fields, cast_flags=cls.get_cast_flags(), cdo=self._path(cls.get_default_object()),
                              interfaces=interfaces, functions=functions)
@@ -353,6 +363,7 @@ class _Issues:
 
     def add(self, kind: str, index: int, name: str, detail) -> None:
         sample = f'{index} {name}: {detail}'.replace('\r', ' ').replace('\n', ' ')[:_SAMPLE_LIMIT]
+        logger.debug('issue %s: %s', kind, sample)
         if (entry := self.entries.get(kind)) is None:
             self.entries[kind] = {'kind': kind, 'count': 1, 'first': sample, 'last': sample}
         else:
