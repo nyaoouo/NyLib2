@@ -50,6 +50,16 @@ Process.current.virtual_protect(slot, 0x1000, 0x02)
 print(os.getpid(), addr, winapi.GetCurrentThreadId(), slot, flush=True)
 for line in sys.stdin:
     if line.strip() == 'hit': print(ctypes.CFUNCTYPE(ctypes.c_uint64)(Process.current.read_ptr(slot))(), flush=True)
+    if line.startswith('exitcall '):
+        flag = int(line.split()[1])
+        ntdll = ctypes.WinDLL('ntdll')
+        ntdll.NtTerminateProcess.argtypes = (ctypes.c_void_p, ctypes.c_long)
+        status = ntdll.NtTerminateProcess(None, 7)
+        if status: raise OSError(f'NtTerminateProcess failed: {status:#x}')
+        while not ctypes.c_uint64.from_address(flag).value: pass
+        ctypes.CFUNCTYPE(ctypes.c_uint64)(Process.current.read_ptr(slot))()
+        ctypes.c_uint64.from_address(flag + 8).value = 1
+        os._exit(7)
     if line.strip() == 'exit': break
 '''
 
@@ -950,6 +960,284 @@ class RemoteInlineCallTests(unittest.TestCase):
             child.wait(5)
             child.stdin.close()
             child.stdout.close()
+
+
+class _WithdrawTarget:
+    def __init__(self, *, child=False, vtable=False, capacity=1):
+        self.child = None
+        self.handle = None
+        self.replies = queue.Queue()
+        self.vtable = vtable
+        if child:
+            root = str(Path(__file__).resolve().parents[1])
+            source = "import nylib; print(nylib.__file__, flush=True)\n" + _CHILD
+            self.child = subprocess.Popen([sys.executable, '-B', '-u', '-c', source], cwd=root,
+                                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            assert Path(self.child.stdout.readline().strip()).resolve().parent.parent == Path(root)
+            pid, self.addr, _, self.slot = map(int, self.child.stdout.readline().split())
+            self.process = Process(pid)
+            self.reader = threading.Thread(target=lambda: [self.replies.put(line.strip()) for line in self.child.stdout], daemon=True)
+            self.reader.start()
+        else:
+            self.process = Process.current
+            self.addr = self.process.alloc(0x1000)
+            self.process.write(self.addr, _TARGET_CODE)
+            self.slot = self.process.alloc(0x1000, protect=0x04)
+            self.process.write_ptr(self.slot, self.addr)
+        self.mapping = self.process.map_shared(0x1000)
+        self.words = (ctypes.c_uint64 * 3).from_address(self.mapping.local_at)
+        self.words[2] = 1
+        self.callee = self.process.alloc(0x1000)
+        code = bytes(ks_.asm('lock inc qword ptr [rcx]; mov qword ptr [rcx+8], 1; spin: pause; '
+                             'cmp qword ptr [rcx+16], 0; je spin; mov rax, qword ptr [rcx]; ret')[0])
+        self.process.write(self.callee, code)
+        winapi.FlushInstructionCache(self.process.handle, self.callee, len(code))
+        cls = VTableCallQueue if vtable else InlineCallQueue
+        self.hook = cls(self.process, self.slot if vtable else self.addr, capacity=capacity)
+        self.hook.enabled = True
+
+    def submit(self):
+        return self.hook.submit(self.callee, self.mapping.remote_at)
+
+    def hit(self):
+        if self.child:
+            self.child.stdin.write('hit\n')
+            self.child.stdin.flush()
+        else:
+            addr = self.process.read_ptr(self.slot) if self.vtable else self.addr
+            self.handle = _kernel32.CreateThread(None, 0, addr, None, 0, None)
+            if not self.handle: raise ctypes.WinError()
+
+    def join(self):
+        if self.child:
+            assert self.replies.get(timeout=10) == '42'
+        elif self.handle:
+            assert _kernel32.WaitForSingleObject(self.handle, 10000) == 0
+            _kernel32.CloseHandle(self.handle)
+            self.handle = None
+
+    def kill(self):
+        self.child.terminate()
+        self.child.wait(10)
+
+    def close(self):
+        self.words[2] = 1
+        if self.child:
+            if self.child.poll() is None: self.kill()
+            self.reader.join(10)
+        elif self.handle:
+            self.join()
+        self.hook.close()
+        self.mapping.close()
+        if self.child:
+            self.process.close()
+            self.child.stdin.close()
+            self.child.stdout.close()
+        else:
+            for at in (self.callee, self.slot, self.addr): self.process.free(at)
+
+    def __enter__(self): return self
+    def __exit__(self, *args): self.close()
+
+
+class WithdrawTests(unittest.TestCase):
+    def until(self, condition):
+        deadline = time.monotonic() + 10
+        while not condition():
+            if time.monotonic() >= deadline: self.fail('native operation did not finish')
+            time.sleep(0.001)
+
+    def test_withdraw_before_entry_and_capacity_one_release(self):
+        for child in (False, True):
+            for vtable in (False, True):
+                with self.subTest(child=child, vtable=vtable), _WithdrawTarget(child=child, vtable=vtable) as target:
+                    ticket = target.submit()
+                    self.assertTrue(ticket.withdraw())
+                    self.assertTrue(ticket.withdraw())
+                    self.assertTrue(ticket.withdrawn)
+                    self.assertTrue(ticket.done)
+                    self.assertIsNone(ticket.exit_slot)
+                    self.assertFalse(target.hook._tickets)
+                    with self.assertRaises(BufferError): target.submit()
+                    for method in (ticket.wait, ticket.close):
+                        with self.assertRaisesRegex(RuntimeError, '^inline call was withdrawn$'): method()
+                    target.hit()
+                    target.join()
+                    self.assertEqual(target.words[0], 0)
+                    self.assertEqual(target.hook._atomic.load(target.hook._shared.local_at + 8), 1)
+                    self.assertEqual(target.hook._atomic.load(target.hook._slot_at(0)), 4)
+                    next_ticket = target.submit()
+                    self.assertEqual(target.hook._reclaim, 1)
+                    target.hit()
+                    target.join()
+                    self.assertEqual(next_ticket.wait(1000), 1)
+                    self.assertFalse(next_ticket.withdraw())
+                    self.assertIsNone(next_ticket.exit_slot)
+
+    def test_running_and_done_are_not_withdrawn(self):
+        for child in (False, True):
+            for vtable in (False, True):
+                with self.subTest(child=child, vtable=vtable), _WithdrawTarget(child=child, vtable=vtable) as target:
+                    target.words[2] = 0
+                    ticket = target.submit()
+                    target.hit()
+                    try:
+                        self.until(lambda: target.words[1] == 1)
+                        self.assertFalse(ticket.withdraw())
+                        self.assertFalse(ticket.done)
+                        self.assertIsNone(ticket.exit_slot)
+                    finally:
+                        target.words[2] = 1
+                        target.join()
+                    self.assertFalse(ticket.withdraw())
+                    self.assertEqual(ticket.wait(1000), 1)
+
+    def test_waiter_wakes_on_withdraw(self):
+        with _WithdrawTarget() as target:
+            ticket = target.submit()
+            started = threading.Event()
+            outcome = queue.Queue()
+            def wait():
+                started.set()
+                try: ticket.wait(5000)
+                except RuntimeError as exc: outcome.put(str(exc))
+            worker = threading.Thread(target=wait)
+            worker.start()
+            self.assertTrue(started.wait(5))
+            self.assertTrue(ticket.withdraw())
+            worker.join(10)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(outcome.get_nowait(), 'inline call was withdrawn')
+
+    def test_close_with_only_withdrawn_restores_trigger(self):
+        for vtable in (False, True):
+            with self.subTest(vtable=vtable), _WithdrawTarget(vtable=vtable) as target:
+                ticket = target.submit()
+                self.assertTrue(ticket.withdraw())
+                target.hook.enabled = False
+                target.hook.free()
+                target.hook.close()
+                self.assertEqual(target.process.read(target.addr, len(_TARGET_CODE)), _TARGET_CODE)
+                self.assertEqual(target.process.read_ptr(target.slot), target.addr)
+                with patch.object(target.hook._atomic, 'load', side_effect=AssertionError('freed view read')):
+                    self.assertTrue(ticket.done)
+                    self.assertTrue(ticket.withdraw())
+                    for method in (ticket.wait, ticket.close):
+                        with self.assertRaisesRegex(RuntimeError, 'inline call was withdrawn'): method()
+
+    def test_dead_target_exit_slots_and_closed_queue_guard(self):
+        for vtable in (False, True):
+            for state in (1, 2, 3):
+                for close_first in (False, True):
+                    with self.subTest(vtable=vtable, state=state, close_first=close_first), _WithdrawTarget(child=True, vtable=vtable) as target:
+                        target.words[2] = int(state != 2)
+                        ticket = target.submit()
+                        if state != 1:
+                            target.hit()
+                            self.until(lambda: target.words[1] == 1)
+                            if state == 3: target.join()
+                        target.kill()
+                        if close_first or state == 3: target.hook.close()
+                        with self.assertRaises(ProcessLookupError): ticket.wait(1000)
+                        self.assertEqual(ticket.exit_slot, state)
+                        with self.assertRaises(ProcessLookupError): ticket.withdraw()
+                        target.hook.close()
+                        self.assertEqual(ticket.exit_slot, state)
+                        ticket._error = None
+                        with patch.object(target.hook._atomic, 'load', side_effect=AssertionError('freed view read')):
+                            self.assertTrue(ticket.done)
+                            with self.assertRaisesRegex(RuntimeError, '^inline call queue is closed$'): ticket.close()
+
+    def test_timeout_has_no_exit_slot(self):
+        with _WithdrawTarget() as target:
+            ticket = target.submit()
+            with self.assertRaises(TimeoutError): ticket.wait(0)
+            self.assertIsNone(ticket.exit_slot)
+            self.assertTrue(ticket.withdraw())
+
+    def test_exit_wait_withdraws_before_exiting_thread_enters_trigger(self):
+        self._exit_before_entry(close_first=False)
+
+    def test_exit_close_keeps_target_view_for_exiting_thread(self):
+        self._exit_before_entry(close_first=True)
+
+    def _exit_before_entry(self, *, close_first):
+        for vtable in (False, True):
+            with self.subTest(vtable=vtable), _WithdrawTarget(child=True, vtable=vtable) as target:
+                flag = target.process.map_shared(0x1000)
+                words = (ctypes.c_uint64 * 2).from_address(flag.local_at)
+                try:
+                    ticket = target.submit()
+                    local_at, remote_at = target.hook._shared.local_at, target.hook._shared.remote_at
+                    trigger_at = target.slot if vtable else target.addr
+                    hooked = target.process.read(trigger_at, 8)
+                    target.child.stdin.write(f'exitcall {flag.remote_at}\n')
+                    target.child.stdin.flush()
+                    self.until(lambda: not target.process.still_alive())
+                    try:
+                        if close_first:
+                            target.hook.close()
+                            local_state = Process.current.virtual_query(local_at).State
+                            remote_state = target.process.virtual_query(remote_at).State
+                            trigger = target.process.read(trigger_at, 8)
+                        else:
+                            with self.assertRaises(ProcessLookupError): ticket.wait(1000)
+                            slot_word = target.hook._atomic.load(target.hook._slot_at(ticket.sequence))
+                    finally:
+                        words[0] = 1
+                    target.child.wait(10)
+                    self.assertEqual(target.child.returncode, 7)
+                    self.assertEqual(words[1], 1)
+                    self.assertEqual(target.words[0], 0)
+                    self.assertEqual(ticket.exit_slot, 1)
+                    self.assertFalse(ticket.withdrawn)
+                    if close_first:
+                        self.assertEqual(local_state, 0x10000)  # MEM_FREE
+                        self.assertEqual(remote_state, 0x1000)  # MEM_COMMIT
+                        self.assertEqual(trigger, hooked)
+                    else:
+                        self.assertEqual(slot_word, 4)
+                        self.assertEqual(target.hook._atomic.load(target.hook._shared.local_at + 8), 1)
+                        self.assertIn(ticket.sequence, target.hook._tickets)
+                        self.assertFalse(target.hook._withdrawn)
+                    for method in (ticket.wait, ticket.close, ticket.withdraw):
+                        with self.assertRaises(ProcessLookupError): method()
+                    target.hook.close()
+                    self.assertEqual(ticket.exit_slot, 1)
+                finally:
+                    words[0] = 1
+                    if target.child.poll() is None: target.kill()
+                    flag.close()
+
+    def test_compare_exchange_and_unexpected_slot(self):
+        with _WithdrawTarget() as target:
+            ticket = target.submit()
+            atomic = target.hook._atomic
+            at = target.hook._slot_at(ticket.sequence)
+            self.assertEqual(atomic.compare_exchange(at, 2, 4), 1)
+            self.assertEqual(atomic.load(at), 1)
+            atomic.exchange(at, 7)
+            with self.assertRaisesRegex(RuntimeError, 'unexpected state 7'): ticket.withdraw()
+            atomic.exchange(at, 1)
+            self.assertTrue(ticket.withdraw())
+
+    def test_v1_page_is_recognised(self):
+        for far in (False, True):
+            for tid in (None, winapi.GetCurrentThreadId()):
+                with self.subTest(far=far, tid=tid), contextlib.ExitStack() as cleanup:
+                    process = Process.current
+                    addr = process.alloc(0x1000)
+                    cleanup.callback(process.free, addr)
+                    process.write(addr, _TARGET_CODE)
+                    if far: cleanup.enter_context(patch.object(process, 'alloc_near', side_effect=ValueError('no near page')))
+                    with patch.object(inline_call, '_dispatcher_code', inline_call._dispatcher_code_v1):
+                        hook = InlineCallQueue(process, addr, thread_id=tid, _jmp_support=0)
+                        hook.enabled = True
+                    cleanup.callback(hook.close)
+                    found = inline_call._find_nylib_hook(process, addr)
+                    self.assertIsNotNone(found)
+                    self.assertEqual(found.page, hook.alloc_at)
+                    self.assertEqual(found.thread_id, tid)
 
 
 if __name__ == '__main__':

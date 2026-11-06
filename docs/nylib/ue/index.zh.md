@@ -44,19 +44,19 @@ with Unreal.attach(exe, dump=result.path) as ue:  # read-only session, types fro
 
 快照在没有游戏运行的情况下依然可用：[加载它](dump.md#load-a-snapshot)、将其导入 [IDA](ida.md)，或用它生成 [stubs](stubs.md)。
 
-<!-- dt:section id="safety-0" hash="d89527537698" -->
+<!-- dt:section id="safety-0" hash="0f54e8dfd900" -->
 ## 安全性
 
-- 默认只读。转储器和默认会话仅以读取权限打开游戏,从不在其中运行代码。
+- 默认只读。转储器和默认会话仅以读取权限打开游戏，从不在其中运行代码。
 - 写入需要在 `Unreal.attach` 上设置 `write=True`。写入会直接进入游戏内存。
-- UFunction 调用需要在 `Unreal.attach` 上设置 `calls=`:`'game-thread'` 通过经过过滤的 `ProcessEvent` 钩子排队,`'remote-thread'` 创建一个线程,`'any-thread'` 可在游戏内部使用。自定义 `Caller` 可以使用其他调用机制。转储器自身的调用需要 `allow_calls=`(CLI:`--allow-calls`)。
-- 在新线程或任意线程上调用可能与游戏线程及其垃圾回收器发生竞争,导致游戏崩溃或状态损坏。游戏线程钩子需要一次自然发生的 `ProcessEvent` 入口,并且会一直留在游戏中,直到 `close()`、解释器正常退出或游戏重启。
+- UFunction 调用需要在 `Unreal.attach` 上设置 `calls=`:`'game-thread'` 通过经过过滤的 `ProcessEvent` 钩子排队，`'remote-thread'` 创建一个线程，`'any-thread'` 可在游戏内部使用。自定义 `Caller` 可以使用其他调用机制。转储器自身的调用需要 `allow_calls=`(CLI:`--allow-calls`)。
+- 在新线程或任意线程上调用可能与游戏线程及其垃圾回收器发生竞争，导致游戏崩溃或状态损坏。游戏线程钩子需要一次自然发生的 `ProcessEvent` 入口，并且会一直留在游戏中，直到 `close()`、解释器正常退出或游戏重启，或者直到此进程结束后，由之后的某个会话通过 `calls.HookCaller(replace_stale=True)` 将其移除。
 - 延迟函数(接受 `FLatentActionInfo` 的函数)会被拒绝。
-- 转储器无法验证的偏移会阻止写入和调用,但两个游戏名称键以及 `Off.FFieldClass.Id`、`Off.FFieldClass.ClassFlags`、`Off.FFieldClass.SuperClass` 除外(对于调用,还有两个 FText 键除外);错误信息会列出它们以及修复方法。
+- 转储器无法验证的偏移会阻止写入和调用，但两个游戏名称键以及 `Off.FFieldClass.Id`、`Off.FFieldClass.ClassFlags`、`Off.FFieldClass.SuperClass` 除外(对于调用，还有两个 FText 键除外);错误信息会列出它们以及修复方法。
 - 配置文件的钩子是转储器运行的 Python 代码(在内部模式下于游戏内运行):仅使用你信任的配置文件。
-- 一次调用可能在游戏中遗留内存:引擎为输出参数分配的内存,以及调用超时或被中断时调用自身的内存。
+- 一次调用可能在游戏中遗留内存:引擎为输出参数分配的内存，以及调用超时或被中断时调用自身的内存。
 - 在远程线程调用期间按 Ctrl+C 可能使游戏崩溃。
-- 向已加载同一 `python3XY.dll` 的游戏注入 Python 会使其崩溃。在冻结应用之外,缺失的 `python_loader.dll` 会在首次使用时构建,这需要 MSVC,并且当它缺失时会下载并安装 Visual Studio Build Tools;请事先用 `python -m nylib.winutils.python_loader build` 构建一次。在冻结应用中,对于缺失的 DLL,`ensure_loader_dll()` 会改为抛出 `FileNotFoundError`。
+- 向已加载同一 `python3XY.dll` 的游戏注入 Python 会使其崩溃。在冻结应用之外，缺失的 `python_loader.dll` 会在首次使用时构建，这需要 MSVC,并且当它缺失时会下载并安装 Visual Studio Build Tools;请事先用 `python -m nylib.winutils.python_loader build` 构建一次。在冻结应用中，对于缺失的 DLL,`ensure_loader_dll()` 会改为抛出 `FileNotFoundError`。
 
 <!-- dt:section id="tested-with-0" hash="86be06e7399b" -->
 ## 测试环境

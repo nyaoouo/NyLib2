@@ -193,7 +193,7 @@ class _Calls:
         except CallError as exc:
             if getattr(exc, 'exited', None):
                 self.exited = True
-            elif getattr(exc, 'timed_out', None):
+            elif getattr(exc, 'timed_out', None) and getattr(exc, 'state', None) != 'not started':
                 self.keep = f'a call did not return within {self.timeout} s'
             elif getattr(exc, 'state', None) not in _SETTLED:
                 self.keep = f'a call ended in an unknown state ({exc})'

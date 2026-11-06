@@ -460,6 +460,10 @@ class Caller(abc.ABC):
         """Calls that keep close() from finishing; 0 for a caller that tracks none."""
         return 0
 
+    def withdraw_pending(self) -> int:
+        """Withdraw the calls that have not started; returns how many. 0 for a caller that tracks none."""
+        return 0
+
     @abc.abstractmethod
     def arena(self) -> CallArena: ...
 
@@ -568,7 +572,9 @@ class HookCaller(Caller):
     """Run calls through ProcessEvent from a thread-filtered detour on the trigger (ProcessEvent unless trigger= is set)."""
     policy = 'game-thread'
 
-    def __init__(self, thread_id=None, trigger=None, capacity=16):
+    def __init__(self, thread_id=None, trigger=None, capacity=16, *, replace_stale: bool = False):
+        if not isinstance(replace_stale, bool): raise TypeError('replace_stale must be a bool')
+        self.replace_stale = replace_stale
         super().__init__()
         self.thread_id, self.trigger, self.capacity = thread_id, trigger, capacity
         self._lock = threading.Lock()
@@ -624,6 +630,23 @@ class HookCaller(Caller):
             raise _closed_error()
         return CallArena(self.process)
 
+    def withdraw_pending(self) -> int:
+        with self._lock:
+            if self._site is None or self.closed or self._queue is None:
+                return 0
+            count = 0
+            for ticket in tuple(self._tickets):
+                if ticket.done:
+                    continue
+                try:
+                    withdrawn = ticket.withdraw()
+                except OSError:
+                    continue
+                if withdrawn:
+                    self._tickets.remove(ticket)
+                    count += 1
+            return count
+
     def _sweep_done_tickets(self) -> None:
         for ticket in tuple(self._tickets):
             if ticket.done:
@@ -637,12 +660,36 @@ class HookCaller(Caller):
         if self._broken:
             raise RuntimeError('hook installation failed and cleanup is pending')
         if self._queue is None:
-            from ..winutils.inline_call import InlineCallQueue
+            from ..winutils import inline_call
+            from ..winutils.inline_call import InlineCallQueue, PrologueError
             queue = InlineCallQueue(self.process, self.trigger, self.capacity, self.thread_id, quiescent_patch=True)
             self._queue = queue
             _track(self)
             try:
-                queue.enabled = True
+                try:
+                    queue.enabled = True
+                except PrologueError as exc:
+                    if not self.replace_stale: raise
+                    hook = inline_call._find_nylib_hook(self.process, self.trigger)
+                    if hook is None or hook.held: raise
+                    owner = inline_call._hook_owner(self.process, hook)
+                    running = inline_call._owner_running(owner)
+                    if running is True:
+                        raise _call_error(f'the hook refused the trigger prologue: {exc}; the nylib game-thread hook there belongs to process {owner.pid}, '
+                                          'which still runs; a close() of its session there removes it', refused='prologue', state='not started') from exc
+                    if running is None:
+                        who = f'process {owner.pid}' if owner is not None and 0 < owner.pid <= 0xFFFF_FFFF else 'an unknown process'
+                        raise _call_error(f'the hook refused the trigger prologue: {exc}; the nylib game-thread hook there belongs to {who}, '
+                                          'which could not be checked, so it was not removed; a close() of the session that installed it removes it, '
+                                          'as does a game restart', refused='prologue', state='not started') from exc
+                    try:
+                        count = inline_call._remove_nylib_hook(self.process, self.trigger, hook)
+                    except (OSError, RuntimeError) as err:
+                        raise _call_error(f'the hook refused the trigger prologue: {exc}; a stale nylib hook was found but could not be removed: {err}',
+                                          refused='prologue', state='not started') from err
+                    logger.warning(f'removed a stale nylib game-thread hook at {self.trigger:#x} in process {self.process.process_id} '
+                                   f'(dispatcher page {hook.page:#x}); {count} queued calls of the earlier session were dropped')
+                    queue.enabled = True
             except BaseException:
                 try:
                     queue.close()
@@ -660,8 +707,7 @@ class HookCaller(Caller):
                 return (f'; the trigger holds a game-thread hook this process installed (queue {hook.data_at:#x}): it goes with a close() of its '
                         'session once its calls finish and is retried at exit; one a failed attach parked is also retried at the next calls-enabled attach')
             return (f'; the trigger holds a nylib game-thread hook that this process does not hold (dispatcher page {hook.page:#x}, queue {hook.data_at:#x}): '
-                    'if another nylib process attached to this game installed it, a close() of its session there removes it; one an ended session left '
-                    '(killed, crashed, or calls still pending) stays until the game restarts')
+                    'a close() of the session that installed it removes it; calls.HookCaller(replace_stale=True) removes it once the process that installed it has ended')
         try:
             jump = _starts_with_jump(read_target(self.process, self.trigger, 16))
         except (MemoryReadError, ValueError):
@@ -690,12 +736,35 @@ class HookCaller(Caller):
                 raise _call_error(f'the hook could not queue the call: {exc}', state='not started') from exc
             self._tickets.append(ticket)
         try:
-            return ticket.wait(-1 if timeout is None else math.ceil(timeout * 1000))
-        except TimeoutError as exc:
-            raise _call_error(f'the call did not return within {timeout} s', timed_out=True, state='unknown') from exc
+            try:
+                return ticket.wait(-1 if timeout is None else math.ceil(timeout * 1000))
+            except TimeoutError as exc:
+                with self._lock:
+                    withdraw = getattr(ticket, 'withdraw', None)
+                    if withdraw is None:
+                        raise _call_error(f'the call did not return within {timeout} s', timed_out=True, state='unknown') from exc
+                    try:
+                        withdrawn = withdraw()
+                        if not withdrawn and ticket.done:
+                            return ticket.close()
+                    except ProcessLookupError:
+                        raise
+                    except (OSError, RuntimeError) as err:
+                        raise _call_error(f'the call did not return within {timeout} s; withdrawing it failed: {err}',
+                                          timed_out=True, state='unknown') from err
+                    if withdrawn:
+                        if ticket in self._tickets:
+                            self._tickets.remove(ticket)
+                        raise _call_error(f'the call did not return within {timeout} s; it was withdrawn and will not run',
+                                          timed_out=True, state='not started') from exc
+                    raise _call_error(f'the call did not return within {timeout} s; it has started', timed_out=True, state='unknown') from exc
         except ProcessLookupError as exc:
-            raise _call_error(f'the target exited during the call: {exc}', exited=True, state='unknown') from exc
+            slot = getattr(ticket, 'exit_slot', None)
+            state = 'not started' if slot in (1, 4) else 'finished' if slot == 3 else 'unknown'  # 1 WAITING, 4 WITHDRAWN, 3 DONE
+            raise _call_error(f'the target exited during the call: {exc}', exited=True, state=state) from exc
         except (OSError, RuntimeError) as exc:
+            if isinstance(exc, RuntimeError) and getattr(ticket, 'withdrawn', False):
+                raise _call_error('the call was withdrawn before it started', state='not started') from exc
             raise _call_error(f'the hook call failed: {exc}', state='unknown') from exc
         finally:
             with self._lock:

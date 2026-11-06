@@ -850,10 +850,20 @@ class Unreal:
         if ctx.invoker is not None:
             ctx.invoker.refresh()
 
-    def close(self) -> None:
+    def withdraw_pending_calls(self) -> int:
+        ctx = self._ctx
+        return 0 if ctx.closed or ctx.invoker is None else ctx.invoker.transport.withdraw_pending()
+
+    def close(self, *, withdraw_pending: bool = False) -> None:
+        if not isinstance(withdraw_pending, bool):
+            raise TypeError('withdraw_pending must be a bool')
         ctx = self._ctx
         if ctx.closed:
             return
+        if withdraw_pending:
+            n = self.withdraw_pending_calls()
+            if n > 0:
+                logger.info('close: withdrew %s pending game-thread calls', n)
         if ctx.invoker is not None:
             ctx.invoker.close()
         ctx.closed = True
