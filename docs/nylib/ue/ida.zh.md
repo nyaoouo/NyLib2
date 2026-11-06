@@ -27,11 +27,11 @@
   选项：`--types all|referenced|none`、`--roots A,B`（配合 `referenced`）、`--no-exec`、`--no-vtables`、`--no-globals`、`--no-core-types`、`--no-enums`、`--no-comments`、`--overwrite`、`--force`、`-v`。退出码：0 完成，1 错误，2 用法错误，3 拒绝构建。
 - 在 IDA 的 Python 控制台中，把脚本所在文件夹加入 `sys.path`：`import ue_dumper_import as uei; uei.run(r'<snapshot folder>')`。
 
-<!-- dt:section id="what-it-applies-0" hash="7c4fbe9bc911" -->
-## 它应用了什么
+<!-- dt:section id="what-it-applies-0" hash="0d15048563a8" -->
+## 它应用什么
 
-- 名称：原生 UFunction 的执行函数、虚表，以及全局变量 `GObjects`、`GNames`、`GWorld`、`ProcessEvent`、`AppendString`。
-- 类型：引擎核心类型、枚举，以及类和结构体（全部、仅根引用到的、或不包含任何）。
-- 注释：在每个 UFunction 的执行函数上标注其签名和标志。
+- 名称:原生 UFunction 的 exec 函数、vtable,以及全局变量 `GObjects`、`GNames`、`GWorld`、`ProcessEvent`、`AppendString`。
+- 类型:引擎核心类型、枚举,以及类和结构体(全部、仅根所引用的,或不导入)。即使 `offsets.json` 将 `Off.FFieldClass.Id`、`Off.FFieldClass.ClassFlags` 和 `Off.FFieldClass.SuperClass` 标记为未验证,导入器仍会按它们布局 `FFieldClass` 的成员 `Id`、`ClassFlags` 和 `SuperClass`,因此这些成员可能位于错误的偏移处。
+- 注释:每个 UFunction 的签名和标志,写在其 exec 函数上。
 
-它首先检查数据库是否由快照的 exe 构建而成（SHA-256，或 PE 时间戳和大小），除非你确认（`--force`），否则会拒绝另一个构建。再次运行会保留你手动修改过的名称、类型和注释，并列出这些内容；`--overwrite`（对话框中的"覆盖我手动修改的内容"）会替换它们。
+它首先检查数据库是否由快照的 exe 构建(SHA-256,或 PE 时间戳和大小),除非你确认(`--force`),否则拒绝其他构建。第二次运行会保留你手工修改过的名称、类型和注释,并列出它们;`--overwrite`(对话框中的“overwrite what I changed by hand”)会替换它们。

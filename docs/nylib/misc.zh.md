@@ -89,11 +89,11 @@ root.mainloop()
 `BorderlessWindow` 包装一个 `Tk` 或 `Toplevel`，隐藏原生框架，并添加带有最小化/最大化/关闭按钮的可拖动标题栏。
 所有小部件通过一个 `GroupDelegate` 发出事件，你可以在其上注册回调。
 
-<!-- dt:section id="nylib-pyinstaller-0" hash="8fa9a64e30d5" -->
+<!-- dt:section id="nylib-pyinstaller-0" hash="967c71829fb8" -->
 ## nylib.__pyinstaller
 
 PyInstaller 钩子包，将 C 扩展（`nylib.pyimgui` 及其前端后端）和 ctypes 库（`keystone`、`capstone`）捆绑到冻结的捆绑包中。
-通过入口点获取钩子目录：
+获取钩子目录：
 
 ```python
 import nylib.__pyinstaller as h
@@ -101,12 +101,8 @@ dirs = h.get_hook_dirs()
 print(dirs[0])
 ```
 
-对于已安装的包，在 `pyproject.toml` 中声明入口点：
-
-```toml
-[project.entry-points."pyinstaller40"]
-hook-dirs = "nylib.__pyinstaller:get_hook_dirs"
-```
+通过 pip 安装的 nylib（普通安装或可编辑安装）会被 PyInstaller 自行找到；通过 `.pth` 文件、`PYTHONPATH` 或 `sys.path` 引入的源码检出通常找不到，需要像下面这样使用 `--additional-hooks-dir`（详情见 [README](../../nylib/__pyinstaller/README.md)）。
+pyimgui 钩子只打包被冻结的解释器对应的前端，以及 `esp.py` 等纯 Python 模块。
 
 对于树内使用，在 PyInstaller 命令行中传递 `--additional-hooks-dir`：
 

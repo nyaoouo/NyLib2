@@ -891,6 +891,6 @@ class Invoker:
             self._resolved.clear()
 
     def close(self) -> None:
-        self.closed = True
         if self.transport is not None:
             self.transport.close()
+        self.closed = True

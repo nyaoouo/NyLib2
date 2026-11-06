@@ -44,6 +44,7 @@ nylib/                       importable package
   tkinter_/                  small tkinter extras
   ue/                        Unreal Engine reflection: dumper, snapshots, runtime API
   utils/                     pip bootstrap, eventloop, threading, web, ...
+    imagecodec/              JPEG (WIC, ctypes) and PNG (zlib) encoding of RGBA8
     oodle/                   Oodle Data/Network 1 bindings (ctypes) + bundled DLLs
   vmware_wp/                 VMware Workstation Pro backend (own README.md)
   winapi/                    typed ctypes for kernel32 / ntdll / user32 / ...
@@ -89,18 +90,20 @@ canonical entry points.
 | `nylib.pdb` | Read PDB files via Microsoft DIA; write PDB files from a model | PDB, DIA, Session, find_symbols, find_type, export_pdb, write_pdb | [docs/nylib/pdb.md](docs/nylib/pdb.md) |
 | `nylib.ctype` | Declarative C-like structures with local or remote-process accessors | CData, Struct, Pointer, Accessor, bit field, remote memory | [docs/nylib/ctype.md](docs/nylib/ctype.md) |
 | `nylib.winapi` | Typed ctypes wrappers for kernel32 / ntdll / user32 / ... | Win32 API, ctypes, kernel32, ntdll, OpenProcess, ReadProcessMemory, NTSTATUS | [docs/nylib/winapi.md](docs/nylib/winapi.md) |
-| `nylib.winutils` | High-level Win32 helpers: process, PE, pipes, RPC, drivers, toolchain | process, PE exports, PE unmap, PE map, pipe, RPC, driver, inline hook, MSVC | [docs/nylib/winutils/index.md](docs/nylib/winutils/index.md) |
+| `nylib.winutils` | High-level Win32 helpers: process, PE, pipes, RPC, drivers, toolchain | process, PE exports, PE unmap, PE map, pipe, RPC, driver, inline hook, vtable hook, MSVC | [docs/nylib/winutils/index.md](docs/nylib/winutils/index.md) |
 | `nylib.winutils.pe_map` | Pure PE image planning, host contracts, local or cross-process DLL mapping, and optional post-attach block discard | parse_image, MapHost, Process.current, RemoteProcessHost, InstallTier, SectSkip, LoadedImage | [docs/nylib/winutils/pe_map.md](docs/nylib/winutils/pe_map.md) |
 | `nylib.winutils.breakpoint` | x64 HW/SW breakpoint primitive (VEH + debugger backends) | hardware breakpoints, debug registers, memory trap, BP_E, BreakPoint, VEH | [docs/nylib/winutils/breakpoint.md](docs/nylib/winutils/breakpoint.md) |
 | `nylib.winutils.sign` | Authenticode signing/verification, driver cross-cert signing | SigningService, VerificationService, Authenticode, driver signing, cross-cert, MSCVStore | [docs/nylib/winutils/sign.md](docs/nylib/winutils/sign.md) |
 | `nylib.winutils.python_loader` | In-process Python loader injected via named pipe | inject, python, remote process, PyConfig, pipe RPC | [docs/nylib/winutils/python_loader.md](docs/nylib/winutils/python_loader.md) |
 | `nylib.winutils.python_hijack` | Proxy DLL that runs Python when a hijacked DLL loads | DLL proxy, DLL hijacking, export forwarding, pefile, create_src | [docs/nylib/winutils/python_hijack.md](docs/nylib/winutils/python_hijack.md) |
+| `nylib.winutils.inline_call` | Bounded call queues that run requested calls when a target thread next enters a hooked function or vtable slot; a waiting call can be withdrawn | InlineCallQueue, VTableCallQueue, CallTicket, call queue, batch call, vtable hook, game thread, thread_id, withdraw, withdrawn, exit_slot | [docs/nylib/winutils/inline_call.md](docs/nylib/winutils/inline_call.md) |
 | `nylib.hook` | Microsoft Detours wrapper for function hooking | Hook, create_hook, detour, trampoline, function interception, Win32 API hooking | [docs/nylib/hook.md](docs/nylib/hook.md) |
 | `nylib.pyimgui` | Direct Dear ImGui bindings (standalone windows + injected overlays) | Dear ImGui, imgui, Dx11Window, Dx11Inbound, overlay, DirectX, Vulkan, texture, CreateTextureFromPixels, DecodeImage, UpdatePixels, sampler, BGRA, premultiplied alpha, SetTextureBlend, dirty rect | [docs/nylib/pyimgui/index.md](docs/nylib/pyimgui/index.md) |
 | `nylib.imguiutils` | Dear ImGui widgets: alerts, file dialog, window manager, debug view | message box, file dialog, window manager, Dear ImGui widgets, memory debugger, debug view | [docs/nylib/imguiutils.md](docs/nylib/imguiutils.md) |
 | `nylib.mono` | Runtime inspector for Mono / IL2CPP games | mono, il2cpp, unity, MonoClass, MonoMethod, runtime inspection | [docs/nylib/mono.md](docs/nylib/mono.md) |
 | `nylib.utils` | Catch-all: lazy pip install, asm, event loop, downloads, archive packing | pip, install, keystone, capstone, event loop, download, pack, archive | [docs/nylib/utils.md](docs/nylib/utils.md) |
 | `nylib.utils.oodle` | Oodle Data compression and Oodle Network 1 UDP/TCP packet codecs over bundled 2.9.14 DLLs | oodle, compress, decompress, Kraken, OodleLZ, UdpCodec, TcpCodec, Oodle Network | [docs/nylib/utils/oodle.md](docs/nylib/utils/oodle.md) |
+| `nylib.utils.imagecodec` | JPEG encoding through Windows WIC and PNG encoding through zlib, of RGBA8 pixels | JPEG, PNG, encode_jpeg, encode_png, WIC, zlib, RGBA, alpha | [docs/nylib/utils/imagecodec.md](docs/nylib/utils/imagecodec.md) |
 | `nylib.logging` | Color console logging with file rotation and custom verbosity levels | install, std2file, color console, log to file, file rotation, custom log levels | [docs/nylib/logging.md](docs/nylib/logging.md) |
 | `nylib.vmware_wp` | Control VMware Workstation Pro (power, snapshots, guest, REST) | Vmrun, Vmcli, WorkstationRest, VmwareConfig, snapshot, guest command | [docs/nylib/vmware_wp.md](docs/nylib/vmware_wp.md) |
 | `nylib.ue` | Unreal Engine reflection dumper + runtime object access | Unreal Engine, UE4, UE5, reflection, dump, Unreal.attach, GObjects | [docs/nylib/ue/index.md](docs/nylib/ue/index.md) |
@@ -157,6 +160,8 @@ High-level Win32 helpers; subpackages are loaded lazily.
 | `winutils.llvm_pdb` | PDB symbol helpers via LLVM |
 | `winutils.driver` | service-control (`SCManager`, `Service`) helpers for loading kernel drivers |
 | `winutils.inline_hook` | hot-patch trampoline based on `keystone-engine` + `capstone` |
+| `winutils.vtable_hook` | `VTableHook` swaps a vtable pointer slot to run hook code, then jumps to the original function |
+| `winutils.inline_call` | `InlineCallQueue` / `VTableCallQueue` run a bounded batch of requested calls on the next entry to a chosen function or vtable slot; `CallTicket.withdraw()` stops a call before it starts, and `exit_slot` records its state when a target exit ends the ticket; see [inline_call.md](docs/nylib/winutils/inline_call.md) |
 | `winutils.pe_unmap` | rebuild an in-memory PE back to its on-disk layout |
 | `winutils.pe_map` | parse/plan a PE without process access; map an AMD64 DLL from bytes with a local or remote `Process` host (`MINIMAL`/`RUNTIME`/`STRICT`); optionally request post-attach block discard with `SectSkip` - see [pe_map.md](docs/nylib/winutils/pe_map.md) |
 | `winutils.pe_exports` | PE export-table reader: `ExportTable` over any `Process` (backs `Process.get_proc_address` / `enum_exports`); `read_exports(base)` for this process, never raises |
@@ -347,7 +352,10 @@ Higher-level pyimgui widgets that depend on the user having a working
   breakpoint manager, module list, pattern scan, dump, Python console,
   pinned/history nav). Public API:
   `DebugViewState` + `render_debug_view(state)`, called inside a window
-  begun with `ImGuiWindowFlags_MenuBar`.
+  begun with `ImGuiWindowFlags_MenuBar`. `nylib.imguiutils` loads both
+  lazily on first access; a star import gives them only once something has
+  loaded the debug view, so import them from `nylib.imguiutils.debug_view`
+  (a frozen app must).
 
 ### `nylib.mono`
 
@@ -380,6 +388,8 @@ Catch-all for non-Win32 helpers. The notable ones:
   builder (used by `python_loader`).
 - `template`, `preprocessor`, `yaml2json`, `prime`, `simple` - small
   text / data utilities.
+- `imagecodec/` - JPEG encoding through Windows WIC and PNG encoding through
+  zlib, of RGBA8; own page, [imagecodec.md](docs/nylib/utils/imagecodec.md).
 - `oodle/` - Oodle Data compression and Oodle Network 1 UDP/TCP packet
   codecs over the bundled 2.9.14 DLLs; own page, [oodle.md](docs/nylib/utils/oodle.md).
 
@@ -430,11 +440,12 @@ with Unreal.attach('TRIANGLE_STRATEGY-Win64-Shipping.exe', dump=result.path) as 
 - Read-only by default (`PROCESS_QUERY_INFORMATION | PROCESS_VM_READ`); writes need
   `Unreal.attach(..., write=True)`; UFunction calls need `calls=`.
 - The dumper's own calls need `allow_calls=` / CLI `--allow-calls [append-string,game-info,text]`:
-  never from a profile, blocked while an unverified offset other than the two FText and the two
-  stem keys is present, what ran is listed in `meta.json`'s `remote_calls` and
-  `DumpResult.remote_calls`, a failing feature degrades to a warning, and a call can crash the
-  game. A calls-enabled attach resolves the two FText offsets first, so `write=True` then needs
-  no `allow_unverified=True` for them.
+  never from a profile, blocked while an unverified offset other than the two FText, the two
+  stem keys and `Off.FFieldClass.Id`, `Off.FFieldClass.ClassFlags`, `Off.FFieldClass.SuperClass`
+  is present, what ran is listed in `meta.json`'s `remote_calls` and `DumpResult.remote_calls`,
+  a failing feature degrades to a warning, and a call can crash the game. A calls-enabled attach
+  resolves the two FText offsets first, so `write=True` then needs no `allow_unverified=True` for
+  them.
 - Output root: `out=` / `--out`, else env `NYLIB_UE_OUT`, else `.\ue_dumps` under the current
   directory (internal/injected mode needs one set explicitly).
 - Snapshot folder: `meta.json`, `offsets.json`, `objects.jsonl`, `fields.jsonl`, `types.jsonl` and
@@ -449,6 +460,8 @@ with Unreal.attach('TRIANGLE_STRATEGY-Win64-Shipping.exe', dump=result.path) as 
   gated by `NYLIB_UE_CAPTURES`, `NYLIB_UE_EXES` and `NYLIB_UE_R0_ORACLE` (skipped when unset; a set
   variable naming a missing path fails). Target memory only through `nylib.process` wrappers in
   `nylib/ue/memory.py` - no `nylib.winapi`, no third-party imports (`nylib/ue/tests/test_hygiene.py`).
+  One exception is tracked: `tests/test_ue_hook_caller.py` binds a real `HookCaller` against a
+  child process (needs capstone and keystone; run `.\.venv\Scripts\python.exe -m unittest tests.test_ue_hook_caller`).
 - **WARNING:** `git clean -fdX` / `-fdx` deletes `ue_dumps/`, including captures under
   `ue_dumps/_captures/`.
 
@@ -534,23 +547,40 @@ exposes them through the standard `pyinstaller40` entry point in
 hook-dirs = "nylib.__pyinstaller:get_hook_dirs"
 ```
 
-What this gives you for free, once `nylib` is `pip install`ed:
+What this gives you for free, once `nylib` is `pip install`ed (regular or
+editable):
 
-- `hook-nylib.pyimgui.py` - bundles every `pyimgui/*.pyd` sibling
-  next to the core `pyimgui.pyd` and registers them as hidden imports
-  (`nylib.pyimgui.dx9` plus the short alias `pyimgui.dx9`, etc.).
+- `hook-nylib.pyimgui.py` - bundles the `pyimgui/*.pyd` siblings of the
+  core `pyimgui.pyd` whose ABI tag the interpreter being frozen accepts,
+  and registers them as hidden imports (`nylib.pyimgui.dx9` plus the short
+  alias `pyimgui.dx9`, etc.). Frontends of other CPython versions are
+  skipped. The pure-Python modules there (`esp.py`), top-level `.pyi` files,
+  and stubs under `imgui/` and collected frontends are bundled as data;
+  other frontend stub folders are skipped.
 - `hook-pyimgui.py` - same, for top-level `import pyimgui`.
-- `hook-keystone.py` - collects `keystone.dll`.
-- `hook-capstone.py` - collects `capstone.dll` (defensive; usually
-  already covered by `pyinstaller-hooks-contrib`).
+- `hook-keystone.py` - collects `keystone.dll` and keeps keystone's
+  `distutils` fallback out of analysis; imports of `distutils` elsewhere remain.
+- `hook-capstone.py` - collects `capstone.dll`. PyInstaller runs one hook
+  per module, so whenever it finds nylib's hooks, this one replaces the
+  lower-priority `pyinstaller-hooks-contrib` hook.
 - `hook-nylib.imguiutils.icons.py` - collects the Font Awesome TTFs
   and pins every icon-set submodule as a hidden import.
 - `hook-nylib.winutils.sign.py` - bundles the cross-cert store
   (`MSCVStore.p7b`) so driver-mode signing works when frozen.
 - `hook-nylib.winutils.breakpoint.py` - bundles the breakpoint backend
-  sources / DLLs.
+  DLLs only.
 - `hook-nylib.winutils.python_loader.py` - bundles the in-process Python
-  loader C source.
+  loader DLL only.
+
+  Both hooks build a missing DLL at freeze time only when MSVC is already
+  installed; otherwise they log one WARNING per missing DLL. Sources are not
+  bundled, so a frozen app cannot build these DLLs; prebuild them before
+  freezing with
+  `nylib.winutils.breakpoint.veh.build_backend()`,
+  `nylib.winutils.breakpoint.debugger.build_backend()` and
+  `nylib.winutils.python_loader.build_loader()`. In a frozen app
+  `ensure_backend_dll()` and `ensure_loader_dll()` never build: a missing DLL
+  raises `FileNotFoundError`, `rebuild=True` raises `RuntimeError`.
 - `hook-nylib.utils.oodle.py` - collects the bundled Oodle Data/Network
   DLLs (`oo2core_9_win64.dll`, `oo2net_9_win64.dll`) via
   `collect_dynamic_libs`.
@@ -564,8 +594,19 @@ needed. PyInstaller discovers the hooks automatically:
 pyinstaller your_app.py
 ```
 
-**B. `nylib` used in-tree (no install step).** Point PyInstaller at the
-hooks directory yourself:
+**B. `nylib` used in-tree (no install step).** A checkout reached
+through a `.pth` file, `PYTHONPATH` or `sys.path` usually has no
+dist-info, so it counts as in-tree even though `import nylib` works (one
+holding a `nylib.egg-info`, which setuptools writes when it is built, is
+found). Check with
+`python -c "import importlib.metadata as m; print([e.value for e in m.entry_points(group='pyinstaller40', name='hook-dirs')])"`:
+the hooks are found when the list holds `nylib.__pyinstaller:get_hook_dirs`
+(other packages' entries do not count). If not, point PyInstaller at the
+hooks directory yourself (or `hookspath=nylib.__pyinstaller.get_hook_dirs()`
+in a spec). Without it the freeze succeeds, but the app fails at run time
+where it first needs a hooked file (e.g. its first frontend import), and
+the keystone and Oodle DLLs, TTFs, `MSCVStore.p7b` and loader DLLs are
+missing too:
 
 ```bash
 pyinstaller --additional-hooks-dir nylib\__pyinstaller your_app.py
@@ -596,8 +637,10 @@ if os.environ.get('PYTHON_PIP_ALL_REQ_INSTALLED') or getattr(sys, 'frozen', Fals
 
 This is because pip's `dist-info` metadata is not bundled by
 PyInstaller, so the lazy `is_installed` check would always return
-False and try to `pip install` from inside a frozen exe - which then
-fails because `pip._internal` is not bundled either.
+False and try to `pip install` from inside a frozen exe. nylib imports `pip` and
+`ensurepip` only through `importlib`, which PyInstaller's analysis does not see,
+so freezing an app that imports nylib does not bundle them through nylib (an app
+that imports `pip` itself does).
 
 The practical consequence: **the build-time venv must already have the
 native packages installed**, so PyInstaller can pick them up. Run
@@ -611,23 +654,30 @@ before freezing, or `pip install ".[full]"`.
 
 ### Expected bundle layout
 
-After a successful freeze the bundle should contain:
+After a successful onedir freeze (the PyInstaller 6 default puts everything
+except the exe under `_internal\`) the bundle should contain, with `cp3XX`
+the ABI tag of the interpreter that froze it:
 
 ```
-<bundle>\nylib\pyimgui.cp3XX-win_amd64.pyd
-<bundle>\nylib\pyimgui\dx9.cp3XX-win_amd64.pyd
-<bundle>\nylib\pyimgui\dx10.cp3XX-win_amd64.pyd
-<bundle>\nylib\pyimgui\dx11.cp3XX-win_amd64.pyd
-<bundle>\nylib\pyimgui\dx12.cp3XX-win_amd64.pyd
-<bundle>\nylib\imguiutils\icons\fa\resources\*.ttf
-<bundle>\keystone\keystone.dll
-<bundle>\capstone\lib\capstone.dll
-<bundle>\nylib\utils\oodle\oo2core_9_win64.dll
-<bundle>\nylib\utils\oodle\oo2net_9_win64.dll
+<dist>\<app>\_internal\nylib\pyimgui.cp3XX-win_amd64.pyd
+<dist>\<app>\_internal\nylib\pyimgui\dx9.cp3XX-win_amd64.pyd
+<dist>\<app>\_internal\nylib\pyimgui\dx10.cp3XX-win_amd64.pyd
+<dist>\<app>\_internal\nylib\pyimgui\dx11.cp3XX-win_amd64.pyd
+<dist>\<app>\_internal\nylib\pyimgui\dx12.cp3XX-win_amd64.pyd
+<dist>\<app>\_internal\nylib\pyimgui\esp.py
+<dist>\<app>\_internal\nylib\imguiutils\icons\fa\resources\*.ttf
+<dist>\<app>\_internal\keystone\keystone.dll
+<dist>\<app>\_internal\capstone\lib\capstone.dll
+<dist>\<app>\_internal\nylib\utils\oodle\oo2core_9_win64.dll
+<dist>\<app>\_internal\nylib\utils\oodle\oo2net_9_win64.dll
 ```
+
+A onefile build has no bundle folder to inspect. List its archive with
+`pyi-archive_viewer -l -r -b <app>.exe`, or read `build\<app>\PKG-00.toc`;
+the same paths appear without the `<dist>\<app>\_internal\` prefix.
 
 Missing frontend `.pyd` files mean the pyimgui hook did not run -
-check that `nylib` is installed (entry-point mode) or that
+check that `nylib` is pip-installed (entry-point mode) or that
 `--additional-hooks-dir` is set (in-tree mode).
 
 ---

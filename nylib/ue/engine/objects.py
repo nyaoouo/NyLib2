@@ -7,7 +7,8 @@ from typing import Callable, Iterator
 
 from ..errors import DetectionError, MemoryReadError
 from ..flags import EClassCastFlags
-from .state import FChunkedFixedUObjectArrayLayout, FChunkedFixedUObjectArrayLayouts, FFixedUObjectArrayLayout, FFixedUObjectArrayLayouts
+from .state import (FChunkedFixedUObjectArrayLayout, FChunkedFixedUObjectArrayLayouts, FFixedUObjectArrayLayout, FFixedUObjectArrayLayouts,
+                    NYLIB_CHUNKED_LAYOUTS)
 from .unreal import UEClass, UEObject, UEProperty, UEStruct
 
 if typing.TYPE_CHECKING:
@@ -16,6 +17,7 @@ if typing.TYPE_CHECKING:
 _M32 = 0xFFFFFFFF
 _I32 = struct.Struct('<i')
 _U64 = struct.Struct('<Q')
+_STALE_LIMIT = 64
 _ITEM_WINDOW = 0x10000  # A10: bytes of FUObjectItems per read
 # A1 anchors: NumObjects in [0x1000, 0x400000] (fixed rows), NumChunks in [1, 0x14] (chunked rows)
 _RE_FIXED_NUM = re.compile(rb'(?=(?:[\x00-\xff][\x10-\xff]\x00|[\x00-\xff][\x00-\xff][\x01-\x3f]|\x00\x00\x40)\x00)')
@@ -111,16 +113,29 @@ def _is_address_valid_gobjects_chunked(e: 'Engine', address: int, layout: FChunk
     return True
 
 
+def _readable_candidate(check, e: 'Engine', address: int, layout) -> bool:
+    """check(e, address, layout); a MemoryReadError means the candidate is not GObjects."""
+    try:
+        return check(e, address, layout)
+    except MemoryReadError:  # IsBadReadPtr probes one byte; a later read can still cross into an unreadable page
+        return False
+
+
+def _data_sections_first(section) -> tuple[bool, bool]:
+    """Section sort key: writable data, then read-only data, then executable sections; GObjects is a writable global."""
+    return section.executable, not section.writable
+
+
 def _layout_window(layout) -> int:
     return max(layout.ObjectsOffset + 8, *(o + 4 for o in dataclasses.astuple(layout)))
 
 
-def _gobjects_candidates(address: int, data) -> list[int]:
+def _gobjects_candidates(address: int, data, fixed_layouts=FFixedUObjectArrayLayouts, chunked_layouts=FChunkedFixedUObjectArrayLayouts) -> list[int]:
     """A1 provider: every address of the chunk where an IsAddressValidGObjects overload can pass its integer checks."""
     n = len(data)
     out = set()
     fixed_anchors = [m.start() for m in _RE_FIXED_NUM.finditer(data)]
-    for layout in FFixedUObjectArrayLayouts:
+    for layout in fixed_layouts:
         window = _layout_window(layout)
         for anchor in fixed_anchors:
             p = anchor - layout.NumObjectsOffset
@@ -129,7 +144,7 @@ def _gobjects_candidates(address: int, data) -> list[int]:
             if _fixed_counts_valid(_I32.unpack_from(data, p + layout.MaxObjectsOffset)[0], _I32.unpack_from(data, anchor)[0]):
                 out.add(address + p)
     chunked_anchors = [m.start() for m in _RE_CHUNKED_NUM_CHUNKS.finditer(data)]
-    for layout in FChunkedFixedUObjectArrayLayouts:
+    for layout in chunked_layouts:
         window = _layout_window(layout)
         for anchor in chunked_anchors:
             p = anchor - layout.NumChunksOffset
@@ -141,7 +156,7 @@ def _gobjects_candidates(address: int, data) -> list[int]:
             if _chunked_counts_valid(_I32.unpack_from(data, p + layout.MaxElementsOffset)[0], _I32.unpack_from(data, p + layout.NumElementsOffset)[0],
                                      max_chunks, _I32.unpack_from(data, anchor)[0]):
                 out.add(address + p)
-    tail = max(_layout_window(layout) for layout in (*FFixedUObjectArrayLayouts, *FChunkedFixedUObjectArrayLayouts))
+    tail = max(_layout_window(layout) for layout in (*fixed_layouts, *chunked_layouts))
     out.update(range(address + max(0, n - tail + 1), address + n))  # windows past the end of data cannot be ruled out
     return sorted(out)
 
@@ -200,14 +215,14 @@ class ObjectArray:
         def matches_any_layout(layouts, address: int) -> bool:
             for layout in layouts:
                 if isinstance(layout, FFixedUObjectArrayLayout):
-                    if not _is_address_valid_gobjects_fixed(e, address, layout):
+                    if not _readable_candidate(_is_address_valid_gobjects_fixed, e, address, layout):
                         continue
                     e.off.FUObjectArray.bIsChunked = False
                     e.provenance['Off.FUObjectArray.bIsChunked'] = 'auto: ObjectArray::Init'
                     e.off.FUObjectArray.FixedLayout = layout
                     e.provenance['Off.FUObjectArray.FixedLayout'] = 'auto: ObjectArray::Init'
                 else:
-                    if not _is_address_valid_gobjects_chunked(e, address, layout):
+                    if not _readable_candidate(_is_address_valid_gobjects_chunked, e, address, layout):
                         continue
                     e.off.FUObjectArray.bIsChunked = True
                     e.provenance['Off.FUObjectArray.bIsChunked'] = 'auto: ObjectArray::Init'
@@ -217,19 +232,26 @@ class ObjectArray:
             return False
 
         is_gobjects_chunked = False
+        fixed_layouts, chunked_layouts = FFixedUObjectArrayLayouts, FChunkedFixedUObjectArrayLayouts
 
         def is_address_valid_gobjects(current_address: int) -> bool:
             nonlocal is_gobjects_chunked
-            if matches_any_layout(FFixedUObjectArrayLayouts, current_address):
+            if matches_any_layout(fixed_layouts, current_address):
                 is_gobjects_chunked = False
                 return True
-            elif matches_any_layout(FChunkedFixedUObjectArrayLayouts, current_address):
+            elif matches_any_layout(chunked_layouts, current_address):
                 is_gobjects_chunked = True
                 return True
             return False
 
         if scan_all_memory:
-            gobjects_address = e.platform.iterate_all_sections_with_callback(is_address_valid_gobjects, 0x4, 0x50, candidates=_gobjects_candidates)
+            gobjects_address = e.platform.iterate_all_sections_with_callback(is_address_valid_gobjects, 0x4, 0x50, candidates=_gobjects_candidates,
+                                                                             key=_data_sections_first)
+            if not gobjects_address:  # layouts outside Dumper-7's table, tried only once its rows found nothing
+                fixed_layouts, chunked_layouts = (), NYLIB_CHUNKED_LAYOUTS
+                gobjects_address = e.platform.iterate_all_sections_with_callback(
+                    is_address_valid_gobjects, 0x4, 0x50, key=_data_sections_first,
+                    candidates=lambda address, data: _gobjects_candidates(address, data, fixed_layouts, chunked_layouts))
         else:
             gobjects_address = e.platform.iterate_section_with_callback(e.platform.get_section_info('.data'), is_address_valid_gobjects, 0x4, 0x50,
                                                                         candidates=_gobjects_candidates)
@@ -370,10 +392,47 @@ class ObjectArray:
                 yield it.CurrentObject
                 it.increment()
             return
-        for index, ptr, err in self._item_slots(self.num()):
-            obj = self.get_by_index(index) if err else UEObject(self.e, ptr)
-            if obj or index == 0:
-                yield obj
+        e = self.e
+        check = 'Off.UObject.Index' in e.provenance and e.mem.fresh is not e.mem
+        repaired = stale = 0
+        stopped = False
+        if check:
+            index_off = e.off.UObject.Index
+            fields = e.off.UObject
+            span = max((v + 8 for v in (fields.Vft, fields.Flags, fields.Index, fields.Class, fields.Name, fields.Outer) if v >= 0), default=8)
+        try:
+            for index, ptr, err in self._item_slots(self.num()):
+                obj = self.get_by_index(index) if err else UEObject(e, ptr)
+                if obj or index == 0:
+                    if obj and check and not stopped:
+                        try:
+                            stored = e.mem.i32(obj.address + index_off)
+                        except MemoryReadError:
+                            stored = None
+                        if stored != index:
+                            try:
+                                live = e.mem.fresh.i32(obj.address + index_off)
+                            except MemoryReadError:
+                                live = None
+                            if live == index:
+                                e.mem.forget(obj.address, span)
+                                try:
+                                    stored = e.mem.i32(obj.address + index_off)
+                                except MemoryReadError:
+                                    stored = None
+                                if stored == index:
+                                    repaired += 1
+                                else:
+                                    stale += 1
+                            else:
+                                stale += 1
+                            stopped = stale >= _STALE_LIMIT and stale > repaired
+                    yield obj
+        finally:
+            if repaired + stale:
+                tail = '; the check stopped for the rest of this pass, since more headers still differed than matched (Off.UObject.Index may be wrong)' if stopped else ''
+                e.cerr(f'ObjectArray (nylib): {repaired + stale} cached object headers did not match their GObjects slot; '
+                       f'{repaired} matched once their page was read again, {stale} still differ{tail}\n')
 
     def _windowed(self) -> bool:
         """A10: a pass can read its items in windows (a built-in ByIndex and a plausible item size)."""
@@ -385,7 +444,7 @@ class ObjectArray:
 
     def _item_slots(self, num: int) -> Iterator[tuple[int, int, MemoryReadError | None]]:
         """A10: (index, object pointer, None) for slots 0..num-1 of a built-in layout; (index, 0, error) where a read failed."""
-        mem, size, offset = self.e.mem, self.SizeOfFUObjectItem, self.FUObjectItemInitialOffset
+        mem, size, offset = self.e.mem.fresh, self.SizeOfFUObjectItem, self.FUObjectItemInitialOffset
         chunked = self._ByIndex in (self._by_index_chunked, self._by_index_chunked_override)
         per_chunk = self.NumElementsPerChunk if chunked else max(num, 1)
         table, err = 0, None
@@ -458,14 +517,22 @@ class ObjectArray:
         else:
             candidates = found[0] if found else []
         for obj in candidates:
-            if obj.is_a(required_type):
+            try:
+                matches = obj.is_a(required_type)
+            except MemoryReadError:
+                continue
+            if matches:
                 return obj
         return UEObject(self.e, 0)
 
     def find_object_fast(self, name: str, required_type: int = 0) -> UEObject:
         """ObjectArray::FindObjectFast<UEObject> @ ea0dab3 (A6)."""
         for obj in self._lookup('name', name):
-            if obj.is_a(required_type):
+            try:
+                matches = obj.is_a(required_type)
+            except MemoryReadError:
+                continue
+            if matches:
                 return obj
         return UEObject(self.e, 0)
 

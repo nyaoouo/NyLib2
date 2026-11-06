@@ -23,3 +23,4 @@ PyInstaller at ``nylib/__pyinstaller`` (entry point or
 from PyInstaller.utils.hooks import collect_dynamic_libs
 
 binaries = collect_dynamic_libs('keystone')
+excludedimports = ['distutils']

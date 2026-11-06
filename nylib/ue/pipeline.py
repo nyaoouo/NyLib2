@@ -19,6 +19,7 @@ from . import remote_calls
 from . import scan
 from . import store
 from .exports import EXPORT_SPECS
+from .exports.usmap import export_warnings
 from ..winutils import process as winutils_process
 from ..winutils.version import get_file_version_info
 
@@ -130,7 +131,7 @@ class TargetRow:
     engine_hint: str | None  # e.g. '++UE5+Release-5.1'
     note: str  # '' or why the process could not be inspected
     profile: str | None  # file name of the matching profile
-    profile_status: str  # '-' | 'build matches' | 'build differs' | 'no rva pins' | 'ambiguous (<n> profiles)'
+    profile_status: str  # '-' | 'build matches' | 'build differs' | 'no rva pins' | 'ambiguous (<n> profiles)' | 'invalid'
 
 
 @dataclasses.dataclass
@@ -164,13 +165,14 @@ def _check_target(target):
     raise TypeError(f'target must be None, int or str, got {type(target).__name__}')
 
 
-def _check_cache_bytes(cache_bytes):
+def _check_cache_bytes(cache_bytes) -> int | None:
+    """None, 0 (uncached) or a page-cache cap in bytes of at least 0x10000."""
     if cache_bytes is None:
         return None
     if not isinstance(cache_bytes, int) or isinstance(cache_bytes, bool):
         raise TypeError(f'cache_bytes must be an int or None, got {type(cache_bytes).__name__}')
-    if cache_bytes < 0x10000:
-        raise ValueError(f'cache_bytes must be >= 0x10000, got {cache_bytes:#x}')
+    if cache_bytes != 0 and cache_bytes < 0x10000:
+        raise ValueError(f'cache_bytes must be 0 (uncached) or >= 0x10000, got {cache_bytes:#x}')
     return cache_bytes
 
 
@@ -287,7 +289,8 @@ def _resolve_pid(name: str) -> int:
 def _open_external(pid: int, *, write: bool, remote_calls: bool, cache_bytes) -> OpenedTarget:
     process = memory.open_process(pid, write=write, remote_calls=remote_calls)
     try:
-        source = memory.ProcessSource(process, max_cache_bytes=cache_bytes or CACHE_CAP_EXTERNAL)
+        source = (memory.ProcessSource(process, cache=False) if cache_bytes == 0 else
+                  memory.ProcessSource(process, max_cache_bytes=CACHE_CAP_EXTERNAL if cache_bytes is None else cache_bytes))
         info = target_info(source, mode='external', pid=pid)
     except Exception:
         process.close()
@@ -297,7 +300,8 @@ def _open_external(pid: int, *, write: bool, remote_calls: bool, cache_bytes) ->
 
 def _open_internal(cache_bytes) -> OpenedTarget:
     process = memory.current_process()
-    source = memory.ProcessSource(process, max_cache_bytes=cache_bytes or CACHE_CAP_INTERNAL)
+    source = (memory.ProcessSource(process, cache=False) if cache_bytes == 0 else
+              memory.ProcessSource(process, max_cache_bytes=CACHE_CAP_INTERNAL if cache_bytes is None else cache_bytes))
     info = target_info(source, mode='internal', pid=process.process_id)
     return OpenedTarget(source=source, info=info, process=process, check_alive=None, closer=lambda: None)
 
@@ -318,30 +322,30 @@ def open_target(target=None, *, write: bool = False, remote_calls: bool = False,
 def _rva_pin(prof, name: str, pin, info: TargetInfo, warnings: list):
     if pin.build != info.pe_timestamp or (pin.image_size is not None and pin.image_size != info.size_of_image):
         built = f'{pin.build:#x}' + (f' / {pin.image_size:#x}' if pin.image_size is not None else '')
-        msg = (f'profile {prof.path}: [globals] {name} is pinned for build {built}; '
+        msg = (f'profile {profiles.display_path(prof)}: [globals] {name} is pinned for build {built}; '
                f'the target is {info.pe_timestamp:#x} / {info.size_of_image:#x}; ignored')
         warnings.append(msg)
         logger.warning(msg)
         return None
     if pin.rva >= info.size_of_image:
-        raise errors.ProfileError(prof.path, f'[globals] {name} rva {pin.rva:#x} lies outside the image '
-                                              f'(SizeOfImage {info.size_of_image:#x})')
+        raise errors.ProfileError(profiles.display_path(prof), f'[globals] {name} rva {pin.rva:#x} lies outside the image '
+                                                               f'(SizeOfImage {info.size_of_image:#x})')
     return pin.rva
 
 
 def _sig_pin(prof, name: str, pin, source, image):
     found = scan.Scanner(source, image).find_pattern(pin.sig, executable=True)
     if len(found) != 1:
-        raise errors.ProfileError(prof.path, f'[globals] {name} sig matches {len(found)} sites; it must match exactly one')
+        raise errors.ProfileError(profiles.display_path(prof), f'[globals] {name} sig matches {len(found)} sites; it must match exactly one')
     addr, stored = found[0]
     if stored:
         value = stored[0]
         if not isinstance(value, int):
-            raise errors.ProfileError(prof.path, f'[globals] {name} sig: its first stored value is not a reference')
+            raise errors.ProfileError(profiles.display_path(prof), f'[globals] {name} sig: its first stored value is not a reference')
     else:
         value = addr
     if not (image.base <= value < image.base + image.size):
-        raise errors.ProfileError(prof.path, f'[globals] {name} sig resolves outside the main module')
+        raise errors.ProfileError(profiles.display_path(prof), f'[globals] {name} sig resolves outside the main module')
     return value - image.base
 
 
@@ -366,7 +370,7 @@ def _resolve_pins(prof, info: TargetInfo, opened: OpenedTarget, warnings: list) 
     offsets_pins = {}
     for key, value in prof.offsets.items():
         if key not in PINNABLE_KEYS:
-            raise errors.ProfileError(prof.path, f'[offsets] unknown key {key!r}')
+            raise errors.ProfileError(profiles.display_path(prof), f'[offsets] unknown key {key!r}')
         offsets_pins[key] = value
 
     pe_pin = prof.pins.get('process_event')
@@ -397,10 +401,10 @@ def _run_bootstrap(e, prof, pins: '_Pins | None', steps: list):
             e.objects.init_chunked(pins.gobjects_rva, pin.elements_per_chunk or 0x10000, layout)
             num, maxn = e.objects.num(), e.objects.max()
         except errors.MemoryReadError as err:
-            raise errors.DetectionError('ObjectArray::Init', f'the GObjects value pinned by {prof.path} cannot be read: {err}',
+            raise errors.DetectionError('ObjectArray::Init', f'the GObjects value pinned by {profiles.display_path(prof)} cannot be read: {err}',
                                         tuple(e.messages)) from err
         if not (0 < num <= maxn):
-            raise errors.DetectionError('ObjectArray::Init', f'the GObjects value pinned by {prof.path} does not hold an object '
+            raise errors.DetectionError('ObjectArray::Init', f'the GObjects value pinned by {profiles.display_path(prof)} does not hold an object '
                                         f'array (Num {num}, Max {maxn})', tuple(e.messages))
         e.provenance['Off.InSDK.ObjArray.GObjects'] = pins.gobjects_label
         if pin.elements_per_chunk is not None:
@@ -415,7 +419,7 @@ def _run_bootstrap(e, prof, pins: '_Pins | None', steps: list):
         try:
             e.fname.init_override(pins.gnames_rva, 'GNames', True)
         except errors.DetectionError as err:
-            raise errors.DetectionError('FName::Init', f'the GNames value pinned by {prof.path} could not be initialised',
+            raise errors.DetectionError('FName::Init', f'the GNames value pinned by {profiles.display_path(prof)} could not be initialised',
                                         tuple(e.messages)) from err
         e.provenance['Off.InSDK.NameArray.GNames'] = pins.gnames_label
     else:
@@ -472,13 +476,17 @@ def probe_opened(opened: OpenedTarget, *, profile=None, out_root=None) -> ProbeR
 
     prof = _check_profile(profile)
     if prof is not None:
+        if not profiles._build_matches(prof, info.pe_timestamp, info.size_of_image):
+            raise errors.ProfileError(profiles.display_path(prof),
+                                      profiles._build_mismatch(prof, info.pe_timestamp, info.size_of_image) +
+                                      '; this profile is for another build')
         note = 'explicit'
         if prof.exe is not None and prof.exe.casefold() != info.exe.casefold():
-            msg = f'profile {prof.path} is for {prof.exe}; the target is {info.exe}'
+            msg = f'profile {profiles.display_path(prof)} is for {prof.exe}; the target is {info.exe}'
             warnings.append(msg)
             logger.warning(msg)
     elif out_root is not None:
-        matches = profiles.find_profiles(out_root, info.exe)
+        matches = profiles.find_profiles(out_root, info.exe, build=info.pe_timestamp, image_size=info.size_of_image or None)
         if not matches:
             note = 'none'
         elif len(matches) == 1:
@@ -499,6 +507,8 @@ def probe_opened(opened: OpenedTarget, *, profile=None, out_root=None) -> ProbeR
         e = Engine(opened.source)
         context = _run_bootstrap(e, prof, pins, steps)
     except errors.DetectionError as err:
+        if opened.check_alive is not None and not opened.check_alive():
+            raise errors.TargetError(opened.info.pid, 'process exited during the probe') from err
         error = err
     except errors.ProfileError:
         raise
@@ -576,8 +586,8 @@ def _report_after_calls(report: ProbeReport) -> ProbeReport:
     )
 
 
-def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, allow_calls=None, log_file=None,
-         cache_bytes=None, progress=None, strict: bool = False, _open_target=None) -> DumpResult:
+def _check_exports(exports) -> tuple[str, ...]:
+    """The distinct export formats of `exports`, in order; raises TypeError or ValueError on a bad value."""
     if not isinstance(exports, (list, tuple)):
         raise TypeError(f'exports must be a list or tuple, got {type(exports).__name__}')
     fmts = []
@@ -588,6 +598,12 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, a
             raise ValueError(f'unknown export format {fmt!r}')
         if fmt not in fmts:
             fmts.append(fmt)
+    return tuple(fmts)
+
+
+def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, allow_calls=None, log_file=None,
+         cache_bytes=None, progress=None, strict: bool = False, _open_target=None) -> DumpResult:
+    fmts = list(_check_exports(exports))
     features = remote_calls.parse_features(allow_calls)  # errors before any root or target access
     if log_file is not None and not isinstance(log_file, (str, os.PathLike)):
         raise TypeError(f'log_file must be str, os.PathLike or None, got {type(log_file).__name__}')
@@ -687,7 +703,7 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, a
             if progress is not None:
                 progress('snapshot', wr.counts)
 
-            warning_list = list(report.warnings)  # order: the report's, the calls', the image's (7-c), the unreadable share's, the quality verdict's
+            warning_list = list(report.warnings)  # order: the report's, the calls', the image's (7-c), the unreadable share's, the quality verdict's, the usmap export's
             warning_list.extend(f'--allow-calls {r.feature}: {r.detail}' for r in results if not r.ok)
             if img is not None:
                 warning_list.extend(img.warnings)
@@ -711,7 +727,11 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, a
 
             image_written = img is not None and img.skipped is None
             written_fmts = tuple(f for f in fmts if f != IMAGE_EXPORT or image_written)
-            paths = store.publish(folder, [f for f in fmts if f != IMAGE_EXPORT])  # (7-c) publish never sees image
+            token = export_warnings.set(warning_list)
+            try:
+                paths = store.publish(folder, [f for f in fmts if f != IMAGE_EXPORT])  # (7-c) publish never sees image
+            finally:
+                export_warnings.reset(token)
             paths_iter = iter(paths)
             export_paths = tuple(os.path.join(folder, *img.rel_path.split('/')) if f == IMAGE_EXPORT else next(paths_iter)
                                  for f in written_fmts)
@@ -734,6 +754,12 @@ def dump(target=None, *, profile=None, out=None, exports=DEFAULT_DUMP_EXPORTS, a
 # --------------------------------------------------------------------------------------------
 # write_profile / list_targets
 # --------------------------------------------------------------------------------------------
+
+def _auto_int(row, lo: int, hi: int) -> int | None:
+    """The row's value when it is an int in [lo, hi) detected by an `auto:` finder, else None."""
+    v = row.value if row is not None else None
+    return v if row is not None and row.how.startswith('auto:') and isinstance(v, int) and not isinstance(v, bool) and lo <= v < hi else None
+
 
 def write_profile(report: ProbeReport, *, out=None):
     if not isinstance(report, ProbeReport):
@@ -764,8 +790,11 @@ def write_profile(report: ProbeReport, *, out=None):
         if gnames is not None and isinstance(gnames.value, int):
             pins.append(profiles.Pin('gnames', rva=gnames.value, build=info.pe_timestamp, image_size=info.size_of_image))
 
+    pe_hint = _auto_int(rows.get('Off.InSDK.ProcessEvent.PEIndex'), 1, 0x10000)
+    gworld = _auto_int(rows.get('Off.InSDK.World.GWorld'), 1, 2 ** 31)
     name = report.game_name or _exe_stem(info.exe)
-    text = profiles.render_profile(info.exe, name, pins, when=datetime.datetime.now().astimezone())
+    text = profiles.render_profile(info.exe, name, pins, when=datetime.datetime.now().astimezone(), process_event_hint=pe_hint,
+                                   offset_hints={'Off.InSDK.World.GWorld': gworld} if gworld is not None else None)
     try:
         path = profiles.write_profile_file(os.path.join(root, store.PROFILES_DIR, f'{store.safe_dir_name(name)}.toml'), text)
     except FileExistsError as e:
@@ -793,13 +822,24 @@ def _find_engine_hint(source, image) -> str | None:
 
 
 def _profile_status(root: str, exe: str, image):
-    matches = profiles.find_profiles(root, exe)
+    try:
+        matches = profiles.find_profiles(root, exe)
+    except errors.ProfileError as e:
+        logger.warning('skipping profile %s: %s', e.path, e.reason)
+        return os.path.basename(e.path), 'invalid'
     if not matches:
         return None, '-'
+    unfiltered = matches
+    matches = [p for p in matches if profiles._build_matches(p, image.timestamp, image.size)]
+    if not matches:
+        name = os.path.basename(unfiltered[0].path) if len(unfiltered) == 1 and unfiltered[0].path else None
+        return name, 'build differs'
     if len(matches) > 1:
         return None, f'ambiguous ({len(matches)} profiles)'
     prof = matches[0]
     name = os.path.basename(prof.path) if prof.path else None
+    if prof.build is not None:
+        return name, 'build matches'
     rva_pins = [p for p in prof.pins.values() if p.rva is not None]
     if not rva_pins:
         return name, 'no rva pins'

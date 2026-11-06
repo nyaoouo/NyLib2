@@ -144,6 +144,16 @@ class MemorySource:
         self._write(address, bytes(data))
         return None
 
+    def forget(self, address: int, size: int) -> None:
+        """Drop any cached bytes of [address, address + size), so the next read of them reaches the backend."""
+        _check_address_size(address, size)
+        if size == 0 or not _in_range(address, size):
+            return None
+        self._forget(address, size)
+
+    def _forget(self, address: int, size: int) -> None:
+        pass
+
     def u8(self, address: int) -> int: return int.from_bytes(self.read(address, 1), 'little', signed=False)
     def u16(self, address: int) -> int: return int.from_bytes(self.read(address, 2), 'little', signed=False)
     def u32(self, address: int) -> int: return int.from_bytes(self.read(address, 4), 'little', signed=False)
@@ -503,6 +513,14 @@ class ProcessSource(MemorySource):
             for pbase in stale:
                 st.pages.pop(pbase, None)
 
+    def _forget(self, address: int, size: int) -> None:
+        st, ps, end = self._state, self.page_size, address + size
+        with st.lock:
+            first = address & -ps
+            stale = range(first, end, ps) if (end - first + ps - 1) // ps <= len(st.pages) else [p for p in st.pages if first <= p < end]
+            for pbase in stale:
+                st.pages.pop(pbase, None)
+
     def regions(self) -> list[Region]:
         with self._state.lock:
             self._ensure_map()
@@ -671,6 +689,15 @@ class PagedSource(MemorySource):
                 stale = range(first, end, ps) if (end - first + ps - 1) // ps <= len(self._pages) else [p for p in self._pages if first <= p < end]
                 for pbase in stale:
                     self._pages.pop(pbase, None)
+
+    def _forget(self, address: int, size: int) -> None:
+        ps, end = self.page_size, address + size
+        with self._lock:
+            first = address & -ps
+            stale = range(first, end, ps) if (end - first + ps - 1) // ps <= len(self._pages) else [p for p in self._pages if first <= p < end]
+            for pbase in stale:
+                self._pages.pop(pbase, None)
+            self.inner.forget(address, size)
 
     def regions(self) -> list[Region]:
         return self.inner.regions()

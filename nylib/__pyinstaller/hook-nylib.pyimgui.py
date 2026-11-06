@@ -14,11 +14,12 @@ follow that runtime ``__path__`` rewrite, so without this hook:
 This hook locates the sibling ``pyimgui/`` directory next to the loaded
 ``nylib.pyimgui`` extension and:
 
-1. registers every ``*.pyd`` it contains as a binary, placed next to the
-   core ``.pyd`` inside the bundle so the runtime ``__path__`` logic still
-   resolves them; and
-2. exposes them as hidden imports so PyInstaller's collect phase keeps
-   them around.
+1. registers each ``*.pyd`` built for this interpreter's ABI as a binary,
+   placed next to the core ``.pyd`` inside the bundle so the runtime
+   ``__path__`` logic still resolves them (other ABIs are skipped and logged);
+2. adds the top-level ``*.py`` modules (``esp.py``) as data; and
+3. lists the frontends as hidden imports (PyInstaller logs them as not
+   found, which is harmless: the binaries carry the files).
 
 The hook is intentionally tolerant: if a particular backend wasn't built
 (``dx12.pyd`` missing on a dx9-only build), it simply isn't bundled. The
@@ -31,6 +32,7 @@ using the package's own ``__name__`` at runtime — which is
 
 from __future__ import annotations
 
+import importlib.machinery
 import os
 import pathlib
 
@@ -42,6 +44,13 @@ from PyInstaller.utils.hooks import (  # type: ignore[import-not-found]
 binaries: list[tuple[str, str]] = []
 datas: list[tuple[str, str]] = []
 hiddenimports: list[str] = []
+
+_EXT_SUFFIXES = tuple(importlib.machinery.EXTENSION_SUFFIXES)
+
+
+def _is_native_ext(name: str) -> bool:
+    """True when the file's ABI tag is accepted by the interpreter being frozen."""
+    return '.' + name.lower().partition('.')[2] in _EXT_SUFFIXES
 
 
 def _collect() -> None:
@@ -59,25 +68,30 @@ def _collect() -> None:
         )
         return
 
-    # Destination inside the frozen bundle. ``pyimgui.pyd`` is bundled under
-    # ``nylib/`` so its sibling ``pyimgui/`` directory must end up at the
-    # same place.
     dest = os.path.join('nylib', 'pyimgui')
 
-    for entry in sorted(package_dir.iterdir()):
+    entries = sorted(package_dir.iterdir())
+    collected_stems = set()
+    for entry in entries:
         if entry.is_file() and entry.suffix.lower() == '.pyd':
+            if not _is_native_ext(entry.name):
+                logger.info('hook-nylib.pyimgui: skipping %s, built for another Python ABI', entry.name)
+                continue
             binaries.append((str(entry), dest))
-            # ``dx9.cp313-win_amd64.pyd`` -> ``dx9``
             stem = entry.name.split('.', 1)[0]
+            collected_stems.add(stem.lower())
             hiddenimports.append(f'nylib.pyimgui.{stem}')
             hiddenimports.append(f'pyimgui.{stem}')
-        elif entry.is_file() and entry.suffix.lower() in {'.pyi'}:
-            # Stubs are only useful at type-check time, but PyInstaller users
-            # occasionally ship them for IDE-friendly bundles; keep them as
-            # datas so they round-trip without bloating binaries.
+        elif entry.is_file() and entry.suffix.lower() == '.py':
             datas.append((str(entry), dest))
-        elif entry.is_dir():
-            # Per-frontend stub subpackages (``pyimgui/dx9/__init__.pyi`` etc.).
+        elif entry.is_file() and entry.suffix.lower() in {'.pyi'}:
+            datas.append((str(entry), dest))
+
+    for entry in entries:
+        if entry.is_dir():
+            if entry.name.lower() != 'imgui' and entry.name.lower() not in collected_stems:
+                logger.debug('hook-nylib.pyimgui: skipping stub folder %s, its frontend was not collected', entry.name)
+                continue
             for sub in entry.rglob('*'):
                 if sub.is_file() and sub.suffix.lower() in {'.pyi'}:
                     rel_parent = sub.parent.relative_to(package_dir)
