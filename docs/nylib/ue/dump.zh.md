@@ -103,7 +103,7 @@ with load_snapshot(r'ue_dumps\TRIANGLE_STRATEGY\20261002-024137') as snap:
 
 该文件夹包含 `meta.json`、`offsets.json`、`objects.jsonl`、`fields.jsonl`、`types.jsonl` 和 `types.idx.json`，以及导出文件。类型在首次使用时才会加载。快照包含类型、布局和对象列表，但不包含属性值，甚至不包含类默认值；属性值需从实时会话中读取（`ue.cdo(...)`、`ue.find(...)`）。
 
-<!-- dt:section id="command-line-0" hash="d2b53fc2ac99" -->
+<!-- dt:section id="command-line-0" hash="d8690a4b1bd9" -->
 ## 命令行
 
 ```text
@@ -116,7 +116,14 @@ python -m nylib.ue info <snapshot>
 
 `list`、`probe` 和 `dump` 需要一个正在运行的游戏。`list` 会打印每个进程匹配的配置文件及其状态：`build matches`、`build differs`、`no rva pins`、`ambiguous (N profiles)` 或 `invalid`（未知的 `[offsets]` 键；日志会指出它）。`[match] build` 和 `image_size` 用于为 `list` 筛选配置文件：一个匹配报告 `build matches`，多个匹配报告 `ambiguous (N profiles)`，只有不匹配时才报告 `build differs`；没有 `[match] build` 时，状态仍取决于 rva 固定值。当三个或更多镜像槽位指向同一个 UWorld 时，`--explain` 会列出 GWorld 候选 rva。如果没有唯一的候选，未验证的 GWorld 标签和一条 WARNING 最多会列出八个不同的 rva，以帮助选择配置文件固定值；它们并不验证其中任何一个。不带值的 `--allow-calls` 表示全部三项。`--json`（除 `export` 外都支持）输出机器可读的结果。日志写入 `<out>/_logs/<command>.log`，除非给出了 `--log-file`。退出码：0 成功，1 错误，2 用法错误，3 检测失败，4 无法打开目标或目标已退出，130 被中断。
 
-<!-- dt:section id="own-memory-backend-0" hash="401a834c7488" -->
+探测正在运行的游戏时：
+
+- 默认情况下，probe 和 dump 的遍历通过 64 KiB 页缓存读取。页会保留其首次读取的字节，直到被刷新、被逐出或失效；游戏在此期间创建的对象可能使其过时。probe 从不调用 `refresh()`；`dump` 在遍历前调用一次。attach 之后通过 `ue` 的读取不使用缓存。
+- GObjects 槽位窗口不使用缓存读取，dump 期间也是如此。一旦 probe 解析出 `Off.UObject.Index`（找到、固定或取默认值），它在缓存源上的对象遍历会将每个对象存储的索引与其槽位比较。若缓存的对象头不一致而不使用缓存的读取一致，遍历会丢弃该对象头的缓存页并重新读取。`--explain`（以及 `report.explanations`）在 `ObjectArray (nylib):` 行上显示计数。在 64 个仍不一致且多于已修复数量的对象头之后，遍历会在该轮其余部分停止检查（`Off.UObject.Index` 可能有误；请固定它）；它从不从遍历中移除对象。不检查：item 大小在 8 到 0x1000 字节之外的 GObjects 布局。dump 自己的对象遍历在 `refresh()` 之后开始，没有这种检查；存储索引与其槽位不同的对象头计为 `index_mismatch`（上文的“质量”）。
+- 数组维度、level 候选和 FName 编号的遍历会跳过相关读取引发 `MemoryReadError` 的对象，并在 `--explain` 中报告计数；对象查找也会跳过类不可读的候选，且没有单独计数。读取槽位本身的错误仍会向上传播。`bUseUint8ArrayDim` 标签包含其跳过计数；如果跳过导致没有完整读取的结构体且结果为 False，它会变为 `fallback:`（未验证），因此会话写入和调用需要 `allow_unverified=True`，且 dump 不会进行任何 `allow_calls` 调用。
+- 需要知名引擎对象（例如 `KismetSystemLibrary` 或 `Guid`）的查找器，在找不到该对象时会报告 `DetectionError`，并指明对象和步骤。固定该步骤所查找的 `[offsets]` 键可让探测继续（例如，`OffsetFinder::FindFunctionNativeFuncOffset` 查找 `Off.UFunction.ExecFunction`）；步骤 `OffsetFinder::FixupHardcodedOffsets`、`OffsetFinder::PostInitFNameSettings` 和 `OffsetFinder::FFieldLayoutCheck (nylib)` 没有这样的固定项。对于瞬时读取问题，重试 probe 可能有帮助；`probe(..., cache_bytes=0)`（没有 CLI 选项）可避免使用页缓存，代价是上文所述的更高开销。
+
+<!-- dt:section id="own-memory-backend-0" hash="e02917574f61" -->
 ## 自有内存后端
 
 私有的 `_open_target=` 工厂让 `probe`、`dump` 和 `Unreal.attach` 使用你自己的类 `nylib.process.Process` 对象（`read`、`write`、`iter_memory_region`、`virtual_query`、`enum_ldr_data`、`process_id`、`still_alive`），而不是自行打开目标：
@@ -141,4 +148,6 @@ report = probe(proc.process_id, _open_target=factory)
 
 `_readable_ranges` 必须只报告你的后端确实能读取的内存；不确定时就不要报告。dump 器信任它来选择要解引用的指针和要读取的范围，因此多报会使探测失败，或悄悄丢掉一个被扫描的区段。对于无法读取的字节，`_read` 会抛出 `nylib.ue.errors.MemoryReadError`。
 
-当对你的源的每次读取都是一次缓慢的调用时，例如驱动，请在工厂中包装它：`source = memory.PagedSource(my_source)`。该包装器以 64 KiB 页读取你的源。某页读取失败时，它改以 4 KiB 小块读取该页；某个小块也失败时，它会用原始地址和大小调用你的 `_read`。因此，只要你的源能读取它整体可读取的跨度中的任意一部分，一次读取要么返回这些字节，要么抛出你的源本会抛出的错误。页会保留其首次读取的字节，直到 `refresh()`，`dump` 在遍历前会调用一次它。`fresh` 不经缓存地读取你的源，写入会丢弃其触及的页。`page_size=` 接受 0x1000 到 0x100000 之间的 2 的幂，`max_cache_bytes=` 是 LRU 上限：默认 1 GiB，`None` 表示无上限。`ProcessSource` 已经缓存了其读取，而 capture 读取的是本地文件，因此包装其中任何一个都没有收益。
+当对你的源的每次读取都是一次缓慢的调用时，例如驱动，请在工厂中包装它：`source = memory.PagedSource(my_source)`。该包装器以 64 KiB 页读取你的源。某页读取失败时，它改以 4 KiB 小块读取该页；某个小块也失败时，它会用原始地址和大小调用你的 `_read`。因此，只要你的源能读取它整体可读取的跨度中的任意一部分，一次读取要么返回这些字节，要么抛出你的源本会抛出的错误。页会保留其首次读取的字节，直到 `refresh()`、逐出或失效；`dump` 在遍历前会调用一次 `refresh()`。`fresh` 不使用缓存地读取你的源，写入会丢弃其触及的页。`page_size=` 接受 0x1000 到 0x100000 之间的 2 的幂，`max_cache_bytes=` 是 LRU 上限：默认 1 GiB，`None` 表示无上限。`ProcessSource` 已经缓存了其读取，而 capture 读取的是本地文件，因此包装其中任何一个都没有收益。
+
+`ProcessSource` 以同样的方式保留已缓存的页。槽位窗口通过 `fresh` 读取；带窗口的 `e.objects` 遍历仅在存在独立的 `fresh` 视图且 `Off.UObject.Index` 已标注时才检查头部。如果你的源缓存字节，请从 `fresh` 返回一个不使用缓存的视图，并重写 `_forget(address, size)` 以丢弃该跨度的已缓存字节，且不读取或写入目标、不抛出异常：遍历不会捕获其错误。`PagedSource` 两者都做到了：其 `fresh` 是 `inner.fresh`，它会丢弃自己的页并把 `forget` 转发给内部源。使用基类的空操作 `_forget` 时，过期的头部只会被计数而不会被修复；若 `fresh` 返回源本身，则不检查头部。
