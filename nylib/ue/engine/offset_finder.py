@@ -583,6 +583,8 @@ def find_enum_names_offset(e: 'Engine') -> int:
         infos[0] = (objects.find_object_fast('EAlphaBlendOption', EClassCastFlags.Enum).get_address(), 0x10)
         infos[1] = (objects.find_object_fast('EUpdateRateShiftBucket', EClassCastFlags.Enum).get_address(), 0x8)
         uenum_num_values_offset = find_offset(e, infos)
+    if uenum_num_values_offset == OffsetNotFound:
+        return OffsetNotFound
     enum_obj = _require(e, infos[0][0], 'ENetRole' if infos[0][1] == 0x5 else 'EAlphaBlendOption', 'OffsetFinder::FindEnumNamesOffset')
     inialize_uenum_settings(e, enum_obj, uenum_num_values_offset)
     return _i32(uenum_num_values_offset - 8)
