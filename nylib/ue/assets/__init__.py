@@ -12,6 +12,7 @@ from ..errors import (
 )
 
 if TYPE_CHECKING:
+    from ._locres import parse_locres, parse_locmeta, Locres, LocresEntry, Locmeta
     from ._pak import FileInfo
     from ._installation import open_installation, Installation, Texture, Exports
     from ._keys import AesKey
@@ -27,7 +28,7 @@ __all__ = [
     'DataTable', 'CurveTable',
     'load_usmap', 'Usmap', 'RecordInfo', 'PropertyInfo', 'MappingChange', 'Requirement', 'RequirementResult', 'FamilyResult',
     'MappingReport', 'DumpInfo', 'index_and_type_fallback', 'unique_prefix_fallback',
-    'FileInfo',
+    'FileInfo', 'parse_locres', 'parse_locmeta', 'Locres', 'LocresEntry', 'Locmeta',
     'AssetError', 'InvalidKeyError', 'InvalidMappingError', 'BuildMismatchError', 'MissingAssetError', 'MissingTileError',
     'UnsupportedError', 'UnsupportedContainerError', 'UnsupportedAssetError', 'UnsupportedPixelFormatError',
     'CorruptAssetError', 'RegionOutOfBoundsError', 'ReadCancelledError', 'InstallationClosedError', 'AbsentPropertyError',
@@ -35,6 +36,7 @@ __all__ = [
 ]
 
 _LAZY = {
+    'parse_locres': '_locres', 'parse_locmeta': '_locres', 'Locres': '_locres', 'LocresEntry': '_locres', 'Locmeta': '_locres',
     'FileInfo': '_pak',
     'open_installation': '_installation', 'Installation': '_installation', 'Texture': '_installation', 'AesKey': '_keys',
     'ContainerInfo': '_records', 'BuildInfo': '_records', 'PackageInfo': '_records', 'MipInfo': '_records',
