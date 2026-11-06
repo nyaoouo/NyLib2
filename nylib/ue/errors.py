@@ -156,7 +156,7 @@ class MarshalError(UeError, TypeError):
 
 class AssetError(UeError):
     """Base for every nylib.ue.assets failure except argument-type errors; .package, .container, .export."""
-    _fields = ('package', 'container', 'export')
+    _fields = ('package', 'container', 'export', 'file')
 
     def __init__(self, message: str, **details):
         for cls in type(self).__mro__:

@@ -12,6 +12,7 @@ from ..errors import (
 )
 
 if TYPE_CHECKING:
+    from ._pak import FileInfo
     from ._installation import open_installation, Installation, Texture, Exports
     from ._keys import AesKey
     from ._records import ContainerInfo, BuildInfo, PackageInfo, MipInfo, VirtualTextureInfo, TextureInfo, Region, ReadStats
@@ -26,6 +27,7 @@ __all__ = [
     'DataTable', 'CurveTable',
     'load_usmap', 'Usmap', 'RecordInfo', 'PropertyInfo', 'MappingChange', 'Requirement', 'RequirementResult', 'FamilyResult',
     'MappingReport', 'DumpInfo', 'index_and_type_fallback', 'unique_prefix_fallback',
+    'FileInfo',
     'AssetError', 'InvalidKeyError', 'InvalidMappingError', 'BuildMismatchError', 'MissingAssetError', 'MissingTileError',
     'UnsupportedError', 'UnsupportedContainerError', 'UnsupportedAssetError', 'UnsupportedPixelFormatError',
     'CorruptAssetError', 'RegionOutOfBoundsError', 'ReadCancelledError', 'InstallationClosedError', 'AbsentPropertyError',
@@ -33,6 +35,7 @@ __all__ = [
 ]
 
 _LAZY = {
+    'FileInfo': '_pak',
     'open_installation': '_installation', 'Installation': '_installation', 'Texture': '_installation', 'AesKey': '_keys',
     'ContainerInfo': '_records', 'BuildInfo': '_records', 'PackageInfo': '_records', 'MipInfo': '_records',
     'VirtualTextureInfo': '_records', 'TextureInfo': '_records', 'Region': '_records', 'ReadStats': '_records',

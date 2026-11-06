@@ -20,7 +20,8 @@ from ..errors import (
     AmbiguousNameError, AssetError, BuildMismatchError, CorruptAssetError, InstallationClosedError, InvalidKeyError,
     InvalidMappingError, MissingAssetError, ReadCancelledError, RegionOutOfBoundsError, UnsupportedAssetError, UnsupportedContainerError,
 )
-from . import _iostore, _pe, _texture, _usmap
+from . import _iostore, _pak, _pe, _texture, _usmap
+from ._pak import FileInfo
 from ._bcrypt import Aes256Ecb
 from ._hashes import package_id
 from ._iostore import Container, Toc, check_key, iter_directory_index, read_directory_index
@@ -184,19 +185,20 @@ def _by_hash(header: ZenHeader, target: int, container: str) -> int:
 
 class _Check:
     """One call's closed and cancel checkpoint; `k` of `n` counts the blocks of the range being read."""
-    __slots__ = ('_inst', '_cancel', '_what', 'k', 'n')
+    __slots__ = ('_inst', '_cancel', '_what', '_file', 'k', 'n')
 
-    def __init__(self, inst: 'Installation', cancel, what: str):
+    def __init__(self, inst: 'Installation', cancel, what: str, file=None):
         self._inst = inst
         self._cancel = cancel
         self._what = what
+        self._file = file
         self.k = self.n = 0
 
     def __call__(self) -> None:
         if self._inst._closed:
             raise InstallationClosedError(_CLOSED)
         if self._cancel is not None and self._cancel():
-            raise ReadCancelledError(f'{self._what} cancelled after {self.k} of {self.n} blocks')
+            raise ReadCancelledError(f'{self._what} cancelled after {self.k} of {self.n} blocks', file=self._file)
 
     def blocks(self, toc: Toc, idx: int, offset: int, length: int):
         """The per-block checkpoint for reading [offset, offset + length) of chunk `idx`."""
@@ -351,15 +353,21 @@ def _check_oodle(container: str) -> None:
 def _pak_row(path: str) -> ContainerInfo:
     name = os.path.basename(path)
     try:
-        foot = _iostore.read_pak_footer(path)
-    except CorruptAssetError:
+        legacy = _iostore.read_pak_footer(path)
+        if legacy is not None:
+            reason = 'legacy .pak: loose files only, through read_file()' if legacy.version in (11, 12) else _PAK_REASON
+            return ContainerInfo(file=name, kind='pak', mounted=False, version=legacy.version, compression=legacy.compression,
+                                 encrypted=legacy.encrypted, chunks=None, reason=reason)
+        foot = _pak.read_footer(path)
+    except (OSError, CorruptAssetError):
         return ContainerInfo(file=name, kind='pak', mounted=False, version=0, compression=(), encrypted=False, chunks=None,
                              reason='the .pak file cannot be read')
     if foot is None:
         return ContainerInfo(file=name, kind='pak', mounted=False, version=0, compression=(), encrypted=False, chunks=None,
                              reason='not a recognised .pak file')
-    return ContainerInfo(file=name, kind='pak', mounted=False, version=foot.version, compression=foot.compression,
-                         encrypted=foot.encrypted, chunks=None, reason=_PAK_REASON)
+    reason = 'legacy .pak: loose files only, through read_file()' if foot['length'] == 221 and foot['version'] in (11, 12) else _PAK_REASON
+    return ContainerInfo(file=name, kind='pak', mounted=False, version=foot['version'], compression=tuple(m for m in foot['methods'] if m),
+                         encrypted=foot['encrypted'], chunks=None, reason=reason)
 
 
 def _identity(engine: str, usmap_sha256: bytes, tocs) -> str:
@@ -451,6 +459,8 @@ def open_installation(paks_dir: str | os.PathLike, *, engine: str, usmap: 'str |
     inst._init(engine=engine, build=build_info, checked=build is not None, identity=identity, containers=tuple(rows),
                usmap_name=usmap_name, mappings=mappings, usmap=usmap, mounted=mounted, decryptors=tuple(decryptors.values()),
                cache_bytes=cache_bytes, project=project, pak_count=len(pak_paths), totals=counters)
+    inst._pak_keys = keys
+    inst._pak_paths = tuple(os.path.join(paks, r.file) for r in rows if r.kind == 'pak' and r.version != 0)
     _log.debug('opened %s: engine %s, %d iostore mounted, %d pak not mounted, usmap %s, identity %s', paks_name, engine,
                len(mounted), len(pak_paths), usmap_name, identity)
     return inst
@@ -557,6 +567,12 @@ class Installation:
         self._script = None  # (ScriptObjects, Texture2D global index or None)
         self._listing_lock = threading.Lock()
         self._listing = None  # [(package name, mounted index, TOC index)], sorted
+        self._pak_keys = {}
+        self._pak_paths = ()
+        self._pak_decryptors = {}
+        self._pak_aes_lock = threading.Lock()
+        self._pak_lock = threading.Lock()
+        self._pak_index = None
 
     engine = property(lambda self: self._engine)
     build = property(lambda self: self._build)
@@ -653,6 +669,11 @@ class Installation:
                 container.close()
             for aes in self._decryptors:
                 aes.close()
+            for aes in self._pak_decryptors.values():
+                aes.close()
+            self._pak_decryptors.clear()
+            self._pak_keys.clear()
+            self._pak_index = None
             if self._cache is not None:
                 self._cache.clear()
         finally:
@@ -662,6 +683,96 @@ class Installation:
             with self._state:
                 self._released = True
                 self._state.notify_all()
+
+    def _pak_aes(self, guid, pak, file=None):
+        with self._pak_aes_lock:
+            key = self._pak_keys.get(guid)
+            if key is None:
+                raise InvalidKeyError(f'{pak} is encrypted with key guid {guid}; no aes_key has that guid',
+                                      key_guid=guid, container=pak, file=file)
+            if (aes := self._pak_decryptors.get(guid)) is None:
+                aes = self._pak_decryptors[guid] = Aes256Ecb(key)
+            return aes
+
+    def _load_pak(self, check, counters):
+        if self._pak_index is not None:
+            return self._pak_index
+        while not self._pak_lock.acquire(timeout=0.05):
+            check()
+        try:
+            check()
+            if self._pak_index is None:
+                entries = []
+                for path in self._pak_paths:
+                    entries.extend(_pak.read_index(path, self._pak_aes, check, counters))
+                entries.sort(key=lambda e: (_lower(e[0].path), e[0].path, e[0].container))
+                by_path = {}
+                for entry in entries:
+                    by_path.setdefault(_lower(entry[0].path), []).append(entry)
+                self._pak_index = (by_path, tuple(entries))
+            return self._pak_index
+        finally:
+            self._pak_lock.release()
+
+    def _find_file(self, path, index):
+        found = index[0].get(_lower(path), ())
+        if not found:
+            hint = '; packages are read with package() and exports()' if _lower(path).endswith(('.uasset', '.umap')) else ''
+            raise MissingAssetError(f'file {path!r} is not in the {len(self._pak_paths)} .pak files{hint}', file=path)
+        if len(found) > 1:
+            names = ', '.join(e[0].container for e in found)
+            raise UnsupportedContainerError(f'file {path!r} is in {len(found)} .pak entries ({names}): '
+                                            'patch containers are not supported by this nylib version',
+                                            feature='patch containers', file=path)
+        return found[0]
+
+    def has_file(self, path: str) -> bool:
+        path = _pak.check_path(path)
+        with self._op() as op:
+            check = _Check(self, None, f'read of {path!r}')
+            return _lower(path) in self._load_pak(check, op.counters)[0]
+
+    def file(self, path: str) -> FileInfo:
+        path = _pak.check_path(path)
+        with self._op() as op:
+            check = _Check(self, None, f'read of {path!r}')
+            return self._find_file(path, self._load_pak(check, op.counters))[0]
+
+    def list_files(self, prefix: str = '', *, match: str | None = None) -> list[FileInfo]:
+        if not isinstance(prefix, str) or (match is not None and not isinstance(match, str)):
+            raise TypeError('prefix must be a str and match must be a str or None')
+        with self._op() as op:
+            check = _Check(self, None, 'file listing')
+            return [e[0] for e in self._load_pak(check, op.counters)[1] if _lower(e[0].path).startswith(_lower(prefix))
+                    and (match is None or fnmatch.fnmatchcase(_lower(e[0].path), _lower(match)))]
+
+    def read_file(self, path: str | FileInfo, *, offset: int = 0, limit: int | None = None,
+                  cancel: Callable[[], bool] | None = None) -> bytes:
+        path = _pak.check_path(path, record=True)
+        offset = _int_arg(offset, 'offset')
+        if offset < 0:
+            raise ValueError('offset must be >= 0')
+        if limit is not None:
+            limit = _int_arg(limit, 'limit')
+            if not 0 <= limit <= _MAX_RAW:
+                raise ValueError(f'limit must be in 0..{_MAX_RAW}')
+        _cancel_arg(cancel)
+        with self._op(reads=1) as op:
+            check = _Check(self, cancel, f'read of {path!r}', file=path)
+            check()
+            entry = self._find_file(path, self._load_pak(check, op.counters))
+            info = entry[0]
+            if info.compression not in ('None', 'Oodle'):
+                raise UnsupportedContainerError(f'{info.container}: {path!r} is compressed with {info.compression}, '
+                                                'which this nylib version does not read', container=info.container,
+                                                file=path, feature=f'compression {info.compression}')
+            aes = self._pak_aes(entry[2], info.container, path) if info.encrypted else None
+            if offset > info.size:
+                raise ValueError(f'offset {offset} is past the end of the {info.size}-byte file')
+            n = info.size - offset if limit is None else min(limit, info.size - offset)
+            if n > _MAX_RAW:
+                raise ValueError(f'{path!r}: {n} bytes from offset {offset} exceed the 67108864-byte read limit; pass limit=')
+            return _pak.read_range(entry, offset, n, aes, check, op.counters)
 
     # ---- names and lookup --------------------------------------------------------------------------------------
 
