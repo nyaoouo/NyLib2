@@ -18,8 +18,8 @@ from PyInstaller.utils.hooks import (  # type: ignore[import-not-found]
     collect_submodules,
 )
 
-# Bundle every non-Python file inside the icons package tree (the TTFs).
-datas = collect_data_files('nylib.imguiutils.icons')
+# Bundle the icon fonts.
+datas = collect_data_files('nylib.imguiutils.icons', includes=['**/*.ttf'])
 
 # Defensive: pin every submodule (per-icon-set constants modules) as a hidden
 # import in case a future icon set is loaded via ``importlib`` rather than a

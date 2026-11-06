@@ -1,15 +1,7 @@
-"""PyInstaller hook for ``nylib.winutils.breakpoint``.
+"""Bundle the DLLs for ``nylib.winutils.breakpoint``.
 
-Each backend subdirectory ships a C++ source file and (after a successful
-local build) a compiled DLL. PyInstaller normally drops .dll files because
-``pyproject.toml`` excludes binaries from the wheel - this hook reverses that
-for the frozen bundle, mirroring ``hook-nylib.winutils.python_loader.py``.
-
-For each ``nylib/winutils/breakpoint/<backend>/<backend>_backend.cpp``:
-  1. If ``<backend>_backend.dll`` is missing, build it at freeze time only when MSVC
-     is already installed; otherwise warn and go on without it.
-  2. Add both the source and the DLL as data so package-relative lookups
-     keep working in the bundle.
+Build missing backend DLLs at freeze time only when MSVC is installed;
+otherwise warn and continue without them.
 """
 
 from __future__ import annotations
@@ -54,7 +46,6 @@ def _collect() -> None:
             continue
         for cpp in sub.glob("*_backend.cpp"):
             rel_dest = os.path.join("nylib", "winutils", "breakpoint", sub.name)
-            datas.append((str(cpp), rel_dest))
             dll = cpp.with_suffix(".dll")
             if not dll.is_file() and sub.name in ("veh", "debugger"):
                 if not _msvc_installed():

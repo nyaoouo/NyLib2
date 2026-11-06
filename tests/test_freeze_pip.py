@@ -1,5 +1,6 @@
 import ast
 import os
+import subprocess
 import sys
 import tempfile
 import types
@@ -13,7 +14,7 @@ _PIP_PY = os.path.join(ROOT, 'nylib', 'utils', 'pip.py')
 
 def _names(node):
     if isinstance(node, ast.Import): return [a.name for a in node.names]
-    if isinstance(node, ast.ImportFrom): return [node.module or '']
+    if isinstance(node, ast.ImportFrom): return [node.module or ''] + ['.'.join((node.module or '', a.name)) for a in node.names]
     return []
 
 
@@ -33,6 +34,25 @@ def _fake_pip(code):
 
     mods['pip._internal.commands'].create_command = create_command
     return mods, calls
+
+
+class PipUrllibTests(unittest.TestCase):
+    def test_import_leaves_urllib_request_and_ssl_unloaded(self):
+        child = r'''
+import os, sys
+import nylib.utils.pip as nypip
+assert os.path.normcase(os.path.abspath(nypip.__file__)) == os.path.normcase(os.path.join(os.getcwd(), 'nylib', 'utils', 'pip.py')), nypip.__file__
+print('urllib.request' in sys.modules, 'ssl' in sys.modules)
+'''
+        result = subprocess.run([sys.executable, '-B', '-c', child], cwd=ROOT, capture_output=True, text=True, timeout=300)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'False False')
+
+    def test_no_import_statement_names_urllib_request_or_error(self):
+        with open(_PIP_PY, encoding='utf-8') as f:
+            tree = ast.parse(f.read())
+        bad = [(n.lineno, x) for n in ast.walk(tree) for x in _names(n) if x in ('urllib.request', 'urllib.error')]
+        self.assertEqual(bad, [])
 
 
 class FreezePipTests(unittest.TestCase):

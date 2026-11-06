@@ -3,8 +3,6 @@ import logging
 import os
 import socket
 import sys
-import urllib.request
-import urllib.error
 import urllib.parse
 import warnings
 
@@ -35,9 +33,11 @@ def boostrap_pip():
 
 
 def _test_pip_source(url):
+    request = importlib.import_module('urllib.request')
+    error = importlib.import_module('urllib.error')
     try:
-        return urllib.request.urlopen(url, timeout=5).getcode() == 200
-    except (urllib.error.HTTPError, urllib.error.URLError, socket.timeout):
+        return request.urlopen(url, timeout=5).getcode() == 200
+    except (error.HTTPError, error.URLError, socket.timeout):
         return False
 
 

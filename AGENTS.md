@@ -553,22 +553,28 @@ editable):
   core `pyimgui.pyd` whose ABI tag the interpreter being frozen accepts,
   and registers them as hidden imports (`nylib.pyimgui.dx9` plus the short
   alias `pyimgui.dx9`, etc.). Frontends of other CPython versions are
-  skipped. The pure-Python modules there (`esp.py`) are bundled as data.
+  skipped. The pure-Python modules there (`esp.py`), top-level `.pyi` files,
+  and stubs under `imgui/` and collected frontends are bundled as data;
+  other frontend stub folders are skipped.
 - `hook-pyimgui.py` - same, for top-level `import pyimgui`.
-- `hook-keystone.py` - collects `keystone.dll`.
-- `hook-capstone.py` - collects `capstone.dll` (defensive; usually
-  already covered by `pyinstaller-hooks-contrib`).
+- `hook-keystone.py` - collects `keystone.dll` and keeps keystone's
+  `distutils` fallback out of analysis; imports of `distutils` elsewhere remain.
+- `hook-capstone.py` - collects `capstone.dll`. PyInstaller runs one hook
+  per module, so whenever it finds nylib's hooks, this one replaces the
+  lower-priority `pyinstaller-hooks-contrib` hook.
 - `hook-nylib.imguiutils.icons.py` - collects the Font Awesome TTFs
   and pins every icon-set submodule as a hidden import.
 - `hook-nylib.winutils.sign.py` - bundles the cross-cert store
   (`MSCVStore.p7b`) so driver-mode signing works when frozen.
 - `hook-nylib.winutils.breakpoint.py` - bundles the breakpoint backend
-  sources / DLLs.
+  DLLs only.
 - `hook-nylib.winutils.python_loader.py` - bundles the in-process Python
-  loader C source and DLL.
+  loader DLL only.
 
   Both hooks build a missing DLL at freeze time only when MSVC is already
-  installed; otherwise they log one WARNING per missing DLL. Prebuild with
+  installed; otherwise they log one WARNING per missing DLL. Sources are not
+  bundled, so a frozen app cannot build these DLLs; prebuild them before
+  freezing with
   `nylib.winutils.breakpoint.veh.build_backend()`,
   `nylib.winutils.breakpoint.debugger.build_backend()` and
   `nylib.winutils.python_loader.build_loader()`. In a frozen app
@@ -664,6 +670,10 @@ the ABI tag of the interpreter that froze it:
 <dist>\<app>\_internal\nylib\utils\oodle\oo2core_9_win64.dll
 <dist>\<app>\_internal\nylib\utils\oodle\oo2net_9_win64.dll
 ```
+
+A onefile build has no bundle folder to inspect. List its archive with
+`pyi-archive_viewer -l -r -b <app>.exe`, or read `build\<app>\PKG-00.toc`;
+the same paths appear without the `<dist>\<app>\_internal\` prefix.
 
 Missing frontend `.pyd` files mean the pyimgui hook did not run -
 check that `nylib` is pip-installed (entry-point mode) or that

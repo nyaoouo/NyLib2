@@ -1,25 +1,7 @@
-"""PyInstaller hook for ``nylib.winutils.python_loader``.
+"""Bundle the DLL for ``nylib.winutils.python_loader``.
 
-The loader package ships a C++ source file (``python_loader.cpp``) and a
-compiled DLL (``python_loader.dll``). The runtime code in
-``nylib.winutils.python_loader.run_script`` looks for the DLL next to
-``__init__.py`` and loads it into the target process. PyInstaller would
-normally drop the ``.dll`` because compiled binaries are excluded from
-the wheel by ``pyproject.toml`` - this hook reverses that for the frozen
-bundle.
-
-Behaviour
----------
-1. Locate ``nylib.winutils.python_loader``'s on-disk directory.
-2. If ``python_loader.dll`` is missing, build it via
-   :func:`nylib.winutils.python_loader.build_loader`, at *freeze* time and
-   only when MSVC is already installed; otherwise the hook warns and
-   continues without the DLL. If the build fails the hook logs the error
-   and continues without the DLL. A frozen app never builds it: without the
-   DLL, ``ensure_loader_dll`` raises ``FileNotFoundError``.
-3. Add the DLL and the ``.cpp`` source as data files under
-   ``nylib/winutils/python_loader/`` inside the bundle so the package's
-   ``__file__``-relative lookups keep working.
+Build the missing loader DLL at freeze time only when MSVC is installed;
+otherwise warn and continue without it.
 """
 
 from __future__ import annotations
@@ -58,10 +40,6 @@ def _collect() -> None:
     pkg_dir = init_py.parent
     dest = os.path.join('nylib', 'winutils', 'python_loader')
 
-    cpp = pkg_dir / 'python_loader.cpp'
-    if cpp.is_file():
-        datas.append((str(cpp), dest))
-
     dll = pkg_dir / 'python_loader.dll'
     if not dll.is_file() and not _msvc_installed():
         logger.warning(
@@ -86,8 +64,6 @@ def _collect() -> None:
                 exc,
             )
     if dll.is_file():
-        # Use the binaries channel: PyInstaller will treat the DLL the same
-        # way it treats any other native dependency.
         binaries.append((str(dll), dest))
 
 

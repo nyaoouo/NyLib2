@@ -130,12 +130,12 @@ result = client.rpc.add(2, 3)  # calls guest's add function
 
 查询注入状态：`./.venv/Scripts/python.exe -m nylib.winutils.python_loader info --process 1234`
 
-<!-- dt:section id="notes-0" hash="daa88aee087b" -->
-## 注意
+<!-- dt:section id="notes-0" hash="db6fcb23edf4" -->
+## 注意事项
 
-- **SeDebugPrivilege**：打开其他用户或提升权限的进程需要 `SeDebugPrivilege`。`inject` 子命令调用 `enable_privilege()`（尽力而为）来获取它；同一用户、非提升权限的进程可能无需它即可工作。
-- **Python 位数**：代码仅以 x64 构建（`_PTR_SIZE = 8`）；目标位数未显式检查。
-- **Python 版本一致性**：目标必须与主机具有相同的 `python3XX.dll` 主版本号（例如 `python311.dll`）。如果目标具有不同的布局，请传递 `python_dll=` 和 `python_home=` 来覆盖发现。
-- **PyInstaller 包**：如果主机与 PyInstaller 打包，`default_python_home()` 和 `default_python_dll()` 会自动检测 `_MEIPASS`，因此注入到 PyInstaller 打包的目标中可行。非打包的目标使用 `base_prefix` 以避免 venv stdlib 丢失错误。
-- **解释器重用**：加载器在多个 `run_code()` / `run_script()` 调用中重用 Python 解释器（设置 `reuse=False` 以禁用）。LoadPython 使用 `ScopedLock`（CRITICAL_SECTION）序列化访问，解释器通过 PyGILState_Ensure/Release 在工作线程上运行，因此并发注入是线程安全的。
-- **替代入口点**：`python_hijack.md` 描述了一个替代方案：`python_hijack` 构建一个代理 DLL，拦截 DLL 加载并在 `DLL_PROCESS_ATTACH` 上启动 Python；当 `python_loader` 无法打开目标时使用它。
+- **SeDebugPrivilege**：打开其他用户的进程或提权进程需要 `SeDebugPrivilege`。`inject` 子命令会调用 `enable_privilege()`（尽力而为）来获取该权限；同一用户的非提权进程可能无需该权限即可工作。
+- **Python 位数**：代码仅按 x64 构建（`_PTR_SIZE = 8`）；不会显式检查目标的位数。
+- **Python 版本一致性**：目标必须具有与宿主相同主次版本的 `python3XX.dll`（例如 `python311.dll`）。如果目标的布局不同，请传入 `python_dll=` 和 `python_home=` 以覆盖自动发现。
+- **PyInstaller 包**：默认值会让被注入的解释器指向宿主自身的文件：`default_python_home()` 对打包后的宿主（冻结宿主）使用 `sys._MEIPASS`，对普通宿主（包括 venv）使用 `sys.base_prefix`；`default_python_dll()` 查找宿主的 Python DLL，`default_python_paths()` 复制宿主现有的搜索路径并添加可编辑安装的源码根目录。加载器 DLL 默认取模块旁边的文件。这些默认值适用于普通的、未打包的宿主。对于 PyInstaller 宿主（onedir 或 onefile），标准库、`nylib` 和应用中的大多数纯 Python 模块都位于 exe 的 PYZ 归档中，只有宿主的冻结导入器才能读取。目标中的普通解释器只能访问 `base_library.zip` 中的引导子集、扩展模块（`.pyd`）和数据文件；诸如 `ctypes`、`json`、`pickle`、`base64` 和 `nylib.process` 之类的导入会失败，目录形式的 `pack_script` / `run_packed` 负载也会失败，因为它会导入 `base64` 和 `pickle`（单个文件则作为其自身的源码原样传递）。要从打包后的宿主注入，请传入 `python_dll=`、`python_home=` 和 `python_paths=`，指向与宿主相同主次版本的常规 Python 安装（该安装中已安装 `nylib` 及负载的其他导入，或将其列在 `python_paths` 中），并传入 `loader=`，指向位于 `_MEIPASS` 之外的加载器 DLL。onefile 宿主在退出时还会删除其临时的 `_MEIPASS` 文件夹，这又增加了第二个失败原因。
+- **解释器复用**：加载器在多次 `run_code()` / `run_script()` 调用之间复用 Python 解释器（设置 `reuse=False` 可禁用）。LoadPython 使用 `ScopedLock`（CRITICAL_SECTION）来串行化访问，解释器通过 PyGILState_Ensure/Release 在工作线程上运行，因此并发注入是线程安全的。
+- **替代入口**：`python_hijack.md` 描述了一种替代方案：`python_hijack` 构建一个代理 DLL，拦截 DLL 加载并在 `DLL_PROCESS_ATTACH` 时启动 Python；当 `python_loader` 无法打开目标时使用它。

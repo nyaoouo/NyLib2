@@ -68,31 +68,30 @@ def _collect() -> None:
         )
         return
 
-    # Destination inside the frozen bundle. ``pyimgui.pyd`` is bundled under
-    # ``nylib/`` so its sibling ``pyimgui/`` directory must end up at the
-    # same place.
     dest = os.path.join('nylib', 'pyimgui')
 
-    for entry in sorted(package_dir.iterdir()):
+    entries = sorted(package_dir.iterdir())
+    collected_stems = set()
+    for entry in entries:
         if entry.is_file() and entry.suffix.lower() == '.pyd':
             if not _is_native_ext(entry.name):
                 logger.info('hook-nylib.pyimgui: skipping %s, built for another Python ABI', entry.name)
                 continue
             binaries.append((str(entry), dest))
-            # ``dx9.cp313-win_amd64.pyd`` -> ``dx9``
             stem = entry.name.split('.', 1)[0]
+            collected_stems.add(stem.lower())
             hiddenimports.append(f'nylib.pyimgui.{stem}')
             hiddenimports.append(f'pyimgui.{stem}')
         elif entry.is_file() and entry.suffix.lower() == '.py':
-            # Pure-Python modules (``esp.py``) are not analysed; bundle them as plain files.
             datas.append((str(entry), dest))
         elif entry.is_file() and entry.suffix.lower() in {'.pyi'}:
-            # Stubs are only useful at type-check time, but PyInstaller users
-            # occasionally ship them for IDE-friendly bundles; keep them as
-            # datas so they round-trip without bloating binaries.
             datas.append((str(entry), dest))
-        elif entry.is_dir():
-            # Per-frontend stub subpackages (``pyimgui/dx9/__init__.pyi`` etc.).
+
+    for entry in entries:
+        if entry.is_dir():
+            if entry.name.lower() != 'imgui' and entry.name.lower() not in collected_stems:
+                logger.debug('hook-nylib.pyimgui: skipping stub folder %s, its frontend was not collected', entry.name)
+                continue
             for sub in entry.rglob('*'):
                 if sub.is_file() and sub.suffix.lower() in {'.pyi'}:
                     rel_parent = sub.parent.relative_to(package_dir)
