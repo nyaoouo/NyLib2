@@ -51,4 +51,3 @@ class pinned:
         if (b := self._b) is not None:
             self._b = None
             _release_buffer(b)
-

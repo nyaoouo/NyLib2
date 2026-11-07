@@ -69,19 +69,22 @@ def decode_python(src: bytes, width: int, height: int) -> bytearray:
 def _choose():
     global _decoder
     with _lock:
-        if _decoder is None:
+        d = _decoder
+        if d is None:
             try:
                 bcn.load()
             except bcn.BcnError as e:
-                _decoder = decode_python
+                _decoder = d = decode_python
                 _log.warning('BC1 decode falls back to pure Python: %s', e)
             else:
-                _decoder = bcn.decode_bc1
+                _decoder = d = bcn.decode_bc1
                 _log.debug('BC1 decode: native (nylib.utils.bcn)')
+        return d
 
 
 def decode(src: bytes, width: int, height: int) -> bytearray:
     """Decode BC1 into a new opaque RGBA8 bytearray using the selected decoder."""
-    if _decoder is None:
-        _choose()
-    return _decoder(src, width, height)
+    d = _decoder
+    if d is None:
+        d = _choose()
+    return d(src, width, height)
