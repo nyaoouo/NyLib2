@@ -39,6 +39,8 @@ For integer dimensions and one-dimensional C-contiguous buffers with one-byte it
 
 The source is pinned without copying for the duration of the call. Threads may share it, but must not modify it during decoding. Each call allocates its own output; memory use is the result plus constant overhead. A decode cannot be cancelled mid-call.
 
+Measured on 512x512 regions of a real map texture with Python 3.12 and 3.14, the native decode takes about 0.8 ms and the pure-Python decoder about 28-30 ms (35-38x). Whole `Texture.read_region()` calls, which also read and decompress, run at about 490 regions per second on one thread and about 600 on two or four.
+
 ## Errors
 
 Argument checks run before loading the DLL:
