@@ -118,6 +118,7 @@ packed = pkg_archive.pack('pkg/', is_main=True, package_name='myapp')
 
 | Module | Purpose | Main class/function |
 |--------|---------|---|
+| [`bcn`](utils/bcn.md) | Native BC1 (DXT1) block decoding to RGBA8 over a bundled C DLL | `decode_bc1()`, `load()` |
 | `delegate` | Event handler pattern, single or grouped | `Delegate`, `GroupDelegate` |
 | `enum` | Enum helpers for fallback on missing values | `missing()`, `auto_missing()` |
 | `handles` | Allocate and free integer handles | `Handles.get()`, `.free()` |

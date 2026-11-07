@@ -125,11 +125,12 @@ packed = pkg_archive.pack('script.py', is_main=True)
 packed = pkg_archive.pack('pkg/', is_main=True, package_name='myapp')
 ```
 
-<!-- dt:section id="other-utilities-0" hash="b29b1b32d1ce" -->
+<!-- dt:section id="other-utilities-0" hash="554f271d52ad" -->
 ## 其他实用工具
 
 | 模块 | 用途 | 主要类/函数 |
 |--------|---------|---|
+| [`bcn`](utils/bcn.md) | 基于内置 C DLL 的原生 BC1 (DXT1) 块解码，输出 RGBA8 | `decode_bc1()`, `load()` |
 | `delegate` | 事件处理程序模式，单个或分组 | `Delegate`, `GroupDelegate` |
 | `enum` | Enum 辅助工具，用于缺失值的回退 | `missing()`, `auto_missing()` |
 | `handles` | 分配和释放整数句柄 | `Handles.get()`, `.free()` |
