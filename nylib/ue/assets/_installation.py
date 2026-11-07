@@ -382,7 +382,7 @@ def _identity(engine: str, usmap_sha256: bytes, tocs) -> str:
     return h.hexdigest()[:16]
 
 
-def open_installation(paks_dir: str | os.PathLike, *, engine: str, usmap: 'str | os.PathLike | Usmap', build: int | None,
+def open_installation(paks_dir: str | os.PathLike, *, engine: str, usmap: 'str | os.PathLike | Usmap | None', build: int | None,
                       aes_key: 'AesKey | bytes | bytearray | Sequence[AesKey] | None' = None,
                       exe: str | os.PathLike | None = None,
                       cache_bytes: int | None = None) -> 'Installation':
@@ -392,9 +392,9 @@ def open_installation(paks_dir: str | os.PathLike, *, engine: str, usmap: 'str |
         raise TypeError(f'engine must be a str, got {type(engine).__name__}')
     if engine not in _ENGINES:
         raise ValueError(f'engine must be one of {_ENGINES}')
-    if not isinstance(usmap, (str, os.PathLike, Usmap)):
-        raise TypeError(f'usmap must be a str, os.PathLike[str] or Usmap, got {type(usmap).__name__}')
-    usmap_path = None if isinstance(usmap, Usmap) else _check_path(usmap, 'usmap')
+    if usmap is not None and not isinstance(usmap, (str, os.PathLike, Usmap)):
+        raise TypeError(f'usmap must be a str, os.PathLike[str], Usmap or None, got {type(usmap).__name__}')
+    usmap_path = None if usmap is None or isinstance(usmap, Usmap) else _check_path(usmap, 'usmap')
     if build is not None:
         build = _int_arg(build, 'build')
         if not 0 <= build <= 0xFFFFFFFF:
@@ -412,11 +412,11 @@ def open_installation(paks_dir: str | os.PathLike, *, engine: str, usmap: 'str |
     paks_name = os.path.basename(paks)
     if not os.path.isdir(paks):
         raise MissingAssetError(f'paks directory {paks_name!r} not found', path=paks)
-    usmap_name = usmap.file if usmap_path is None else os.path.basename(usmap_path)
+    usmap_name = (None if usmap is None else usmap.file) if usmap_path is None else os.path.basename(usmap_path)
     build_info = _read_build(paks, exe_path, build, usmap_name)
     usmap = usmap if usmap_path is None else load_usmap(usmap_path)
-    mappings = usmap._eff
-    usmap_sha256 = bytes.fromhex(usmap.digest)
+    mappings = None if usmap is None else usmap._eff
+    usmap_sha256 = bytes(32) if usmap is None else bytes.fromhex(usmap.digest)
     utocs, pak_paths = _scan(paks)
     if not utocs:
         raise MissingAssetError(f'no IoStore container (.utoc) in paks directory {paks_name!r}', path=paks)
@@ -561,10 +561,10 @@ class Installation:
         self._usmap_name = usmap_name
         self._usmap = usmap
         self._mapping_index = {}
-        for i, change in enumerate(usmap.changes):
+        for i, change in enumerate(() if usmap is None else usmap.changes):
             self._mapping_index.setdefault(_lower(change.struct), []).append(i)
         self._mappings = mappings
-        self._schemas = Schemas(mappings)
+        self._schemas = None if mappings is None else Schemas(mappings)
         self._mounted = tuple((toc, Container(toc, aes), aes) for toc, aes in mounted)
         self._mounted_count = len(mounted)
         self._decryptors = decryptors
@@ -1171,10 +1171,10 @@ class Installation:
                 if optional is not None and any(e.flags & _texture._BULK_OPTIONAL_PAYLOAD for e in header.bulk_data_map):
                     optional_length = self._mounted[optional[0]][0].chunk_range(optional[1])[1]
                 walking = True
-                info, layout, unreadable = _texture.parse_texture2d(header, ei, self._mappings.view(used), bulk_length,
+                info, layout, unreadable = _texture.parse_texture2d(header, ei, None if self._usmap is None else self._mappings.view(used), bulk_length,
                                                                    (len(holders), optional_length))
             except AssetError as e:
-                if walking and (isinstance(e, InvalidMappingError) or
+                if walking and self._usmap is not None and (isinstance(e, InvalidMappingError) or
                                 isinstance(e, UnsupportedAssetError) and (e.feature or '').startswith(('property type ', 'struct '))):
                     self._mapping_problem(e, 'Texture2D', used)
                 _annotate(e, pkg, c)
@@ -1383,6 +1383,9 @@ class Installation:
         _cancel_arg(cancel)
         shown = _shown(target)
         with self._op(reads=1) as op:
+            if self._usmap is None:
+                raise InvalidMappingError(f'read of {shown!r} needs a .usmap: the installation was opened with usmap=None',
+                                          reason='no mapping')
             check = _Check(self, cancel, f'read of {shown!r}')
             check()
             toc, container, idx, header, script, i = self._select(self._plan(target), op.counters, check, 'read')
@@ -1579,6 +1582,9 @@ class Exports(Sequence):
         info = self._infos[i]
         with inst._op(reads=1) as op:
             try:
+                if inst._usmap is None:
+                    raise InvalidMappingError(f'read of {info.path!r} needs a .usmap: the installation was opened with usmap=None',
+                                              reason='no mapping')
                 check = _Check(inst, cancel, f'read of {info.path!r}')
                 check()
                 toc, container, _aes = inst._mounted[self._mi]

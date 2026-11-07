@@ -7,6 +7,7 @@ import bisect
 import io
 import math
 import operator
+import re
 import struct
 import time
 from array import array
@@ -292,6 +293,45 @@ def _skip_later_platform_data(reader: Reader, names: tuple) -> None:
         reader.pos = pos + skip
     if reader.pos != len(reader.data):
         raise _Misfit(reader.pos)
+
+
+_NATIVE_PREFILTER = re.compile(
+    rb'(?=(?:\x00\x00\x00\x00.{4}|\x01\x00\x00\x00.{20})\x01\x00\x00\x00[\x00\x01]\x00\x00\x00)', re.S)
+
+
+def _fail_nomap(pkg: str, size: int, reason: str) -> InvalidMappingError:
+    detail = {'bad property header': 'the property header cannot be read',
+              'native start not found': 'no position fits',
+              'native start ambiguous': 'more than one position fits'}[reason]
+    return InvalidMappingError(
+        f'{pkg}: without a .usmap, the Texture2D native data cannot be located: {detail} (export is {size} bytes)',
+        class_name='Texture2D', reason=reason)
+
+
+def _find_native_start(data: bytes, names: tuple, pkg: str) -> int:
+    """Locate the unique native start after the unversioned property header."""
+    reader = Reader(data)
+    skipper = PropertySkipper(None, names, None)
+    skipper._pkg, skipper._size = pkg, len(data)
+    try:
+        tuple(skipper._read_header(reader, 'Texture2D'))
+    except InvalidMappingError:
+        raise _fail_nomap(pkg, len(data), 'bad property header') from None
+    found = None
+    for hit in _NATIVE_PREFILTER.finditer(data, reader.pos):
+        candidate = Reader(data, hit.start())
+        try:
+            _serialize, skip_to = _native_start(candidate, names)
+            candidate.pos = skip_to
+            _skip_later_platform_data(candidate, names)
+        except _Misfit:
+            continue
+        if found is not None:
+            raise _fail_nomap(pkg, len(data), 'native start ambiguous')
+        found = hit.start()
+    if found is None:
+        raise _fail_nomap(pkg, len(data), 'native start not found')
+    return found
 
 
 def _fail_misfit(usmap: str, pkg: str, class_name: str, pos: int, size: int) -> InvalidMappingError:
@@ -622,13 +662,16 @@ def parse_texture2d(header, export: int, mappings, bulk_chunk_length: int, optio
     `unreadable` is None for a readable texture, else (error class, details).
     """
     pkg = header.name
-    usmap = mappings._usmap
+    usmap = None if mappings is None else mappings._usmap
     e = header.exports[export]
     start, end = header.export_range(export)
     export_bytes = header.data[start:end]
     size = len(export_bytes)
     r = Reader(export_bytes)
-    PropertySkipper(mappings, header.names, usmap).skip(r, 'Texture2D', package=pkg, size=size)
+    if mappings is None:
+        r.pos = _find_native_start(export_bytes, header.names, pkg)
+    else:
+        PropertySkipper(mappings, header.names, usmap).skip(r, 'Texture2D', package=pkg, size=size)
     props_end = r.pos
 
     try:
@@ -640,6 +683,8 @@ def parse_texture2d(header, export: int, mappings, bulk_chunk_length: int, optio
         if r.pos != skip_to:
             raise _Misfit(r.pos)
     except _Misfit as m:
+        if mappings is None:
+            raise _fail_nomap(pkg, size, 'native start not found') from None
         raise _fail_skip(usmap, pkg, m.pos, skip_to, size) from None
     try:
         _skip_later_platform_data(r, header.names)
