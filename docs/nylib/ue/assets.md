@@ -298,6 +298,7 @@ class MapTiles:
         assets = None
         textures = {}
         next_poll = 0.0
+        retry = None
         try:
             while not self.stopped.is_set():
                 if assets is None:
@@ -315,10 +316,14 @@ class MapTiles:
                         assets.close()
                         assets = None
                         continue
-                try:
-                    priority, _, generation, tile = self.requests.get(timeout=0.05)
-                except queue.Empty:
-                    continue
+                if retry is not None:
+                    request, retry = retry, None
+                else:
+                    try:
+                        request = self.requests.get(timeout=0.05)
+                    except queue.Empty:
+                        continue
+                _, _, generation, tile = request
                 if generation != self.generation:
                     self.cancelled += 1
                     continue
@@ -326,7 +331,8 @@ class MapTiles:
                 try:
                     if map_name not in textures:
                         textures[map_name] = assets.texture(self.maps[map_name])
-                        self.fallback[map_name] = textures[map_name].info.virtual.fallback[0]
+                        if (virtual := textures[map_name].info.virtual) is not None:
+                            self.fallback[map_name] = virtual.fallback[0]
                     region = textures[map_name].read_region(5 - z, 512 * x, 512 * y, 512, 512,
                                                           cancel=lambda: generation != self.generation or self.stopped.is_set())
                     self.reads += 1
@@ -344,10 +350,7 @@ class MapTiles:
                     if assets.is_stale():  # a container changed: reopen, then read this tile again
                         assets.close()
                         assets = None
-                        try:
-                            self.requests.put_nowait((priority, next(self.sequence), generation, tile))
-                        except queue.Full:
-                            pass
+                        retry = request
                         self.stopped.wait(self.retry_delay)
                 except Exception:
                     self.errors += 1

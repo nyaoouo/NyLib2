@@ -240,7 +240,7 @@ if tv.history == 'Base':
 
 此前抛出 `UnsupportedPixelFormatError` 的普通 `PF_DXT1`、`PF_DXT5` 和 `PF_BC7` 纹理现在可以解码（在一次实测安装中多出 3,814 个纹理）。对于相同输入，`Installation.identity` 保持不变：升级时请清除缓存的“不可读”判定结果；仅以 identity 为键的缓存将继续保留这些判定。当可选内容缺失时，`info.readable=True` 不再保证每个 mip 都可以读取。
 
-<!-- dt:section id="on-demand-map-tiles-0" hash="bf3713b7703e" -->
+<!-- dt:section id="on-demand-map-tiles-0" hash="4ff213a0a977" -->
 ## 按需加载地图瓦片
 
 只读取可见区域及一小段预取边距。此消费者示例在工作线程上为每张地图保留一个安装实例和一个 `Texture`。其有界优先级队列会将可见瓦片排在预取瓦片之前；视图代数会取消已过时的工作。渲染线程调用 `set_view()` 和 `drain(upload, budget)`，并自行上传 RGBA8 数据，该线程上不进行任何资源读取。使用 `fallback[map_name]` 作为占位图，它在工作线程打开该纹理时填充。
@@ -314,6 +314,7 @@ class MapTiles:
         assets = None
         textures = {}
         next_poll = 0.0
+        retry = None
         try:
             while not self.stopped.is_set():
                 if assets is None:
@@ -331,10 +332,14 @@ class MapTiles:
                         assets.close()
                         assets = None
                         continue
-                try:
-                    priority, _, generation, tile = self.requests.get(timeout=0.05)
-                except queue.Empty:
-                    continue
+                if retry is not None:
+                    request, retry = retry, None
+                else:
+                    try:
+                        request = self.requests.get(timeout=0.05)
+                    except queue.Empty:
+                        continue
+                _, _, generation, tile = request
                 if generation != self.generation:
                     self.cancelled += 1
                     continue
@@ -342,7 +347,8 @@ class MapTiles:
                 try:
                     if map_name not in textures:
                         textures[map_name] = assets.texture(self.maps[map_name])
-                        self.fallback[map_name] = textures[map_name].info.virtual.fallback[0]
+                        if (virtual := textures[map_name].info.virtual) is not None:
+                            self.fallback[map_name] = virtual.fallback[0]
                     region = textures[map_name].read_region(5 - z, 512 * x, 512 * y, 512, 512,
                                                           cancel=lambda: generation != self.generation or self.stopped.is_set())
                     self.reads += 1
@@ -360,10 +366,7 @@ class MapTiles:
                     if assets.is_stale():  # a container changed: reopen, then read this tile again
                         assets.close()
                         assets = None
-                        try:
-                            self.requests.put_nowait((priority, next(self.sequence), generation, tile))
-                        except queue.Full:
-                            pass
+                        retry = request
                         self.stopped.wait(self.retry_delay)
                 except Exception:
                     self.errors += 1
