@@ -78,14 +78,15 @@ exclude = [
     "nylib.ue.tests*",
     "nylib.utils.oodle.tests*",
     "nylib.utils.imagecodec.tests*",
+    "nylib.utils.bcn.tests*",
 ]
 
 # Ship Python type stubs, PyInstaller hooks, and the bundled font resources.
 # Compiled native extensions (.pyd / .dll / .so / .dylib / .lib / .pdb) are
 # DELIBERATELY NOT shipped: they are CPython-ABI-specific and must be built
 # locally by the user (see `scripts/pyimgui2/pyimgui_generate.py` and the
-# notes in AGENTS.md), except the two Oodle DLLs in nylib.utils.oodle: plain
-# C, ABI-independent; see its PROVENANCE.md.
+# notes in AGENTS.md), except the DLLs in nylib.utils.oodle and
+# nylib.utils.bcn: plain C, ABI-independent; see their PROVENANCE.md files.
 [tool.setuptools.package-data]
 "nylib" = ["py.typed", "*.pyi"]
 "nylib.vmware_wp" = ["py.typed", "README.md"]
@@ -100,6 +101,7 @@ exclude = [
 "nylib.winutils.breakpoint.veh" = ["*.cpp"]
 "nylib.winutils.breakpoint.debugger" = ["*.cpp"]
 "nylib.utils.oodle" = ["oo2core_9_win64.dll", "oo2net_9_win64.dll", "PROVENANCE.md"]
+"nylib.utils.bcn" = ["bcn_win64.dll", "PROVENANCE.md"]
 
 [tool.setuptools.exclude-package-data]
 "*" = [
@@ -114,9 +116,10 @@ exclude = [
     "__pycache__",
     "__pycache__/*",
 ]
-# *.dll is excluded per package so nylib.utils.oodle can ship its DLLs;
+# *.dll is excluded per package so nylib.utils.oodle and nylib.utils.bcn can ship DLLs;
 # list new DLL-holding packages here
 "nylib.utils.oodle" = ["tests/*"]
+"nylib.utils.bcn" = ["tests/*"]
 "nylib.hook.detours" = ["*.dll"]
 "nylib.pdb" = ["*.dll"]
 "nylib.winutils.breakpoint.debugger" = ["*.dll"]

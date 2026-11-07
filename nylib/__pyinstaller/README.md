@@ -25,6 +25,7 @@ at this hooks directory.
 | `hook-keystone.py`            | `keystone`                       | Collects `keystone.dll` next to the `keystone` package via `collect_dynamic_libs`; keeps keystone's `distutils` fallback out of the analysis |
 | `hook-capstone.py`            | `capstone`                       | Collects `capstone.dll`. PyInstaller runs one hook per module, so whenever it finds nylib's hooks, this one replaces the lower-priority `pyinstaller-hooks-contrib` hook |
 | `hook-nylib.utils.oodle.py`   | `nylib.utils.oodle`              | Collects the bundled `oo2core_9_win64.dll` and `oo2net_9_win64.dll` into `nylib/utils/oodle/` via `collect_dynamic_libs` |
+| `hook-nylib.utils.bcn.py`     | `nylib.utils.bcn`                | Collects the bundled `bcn_win64.dll` into `nylib/utils/bcn/` via `collect_dynamic_libs` |
 | `hook-nylib.imguiutils.icons.py` | `nylib.imguiutils.icons`      | Collects the Font Awesome TTFs and pins every icon-set submodule as a hidden import |
 | `hook-nylib.winutils.sign.py` | `nylib.winutils.sign`            | Bundles the cross-certificate store `MSCVStore.p7b` as data                     |
 | `hook-nylib.winutils.breakpoint.py` | `nylib.winutils.breakpoint` | Bundles only the backend DLLs (builds a missing DLL at freeze time only when MSVC is installed) and pins the `veh` / `debugger` hidden imports |
