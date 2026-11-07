@@ -1,6 +1,14 @@
-"""Pure-Python BC1 (DXT1) decode to tightly packed RGBA8. Alpha is always 255, including three-colour index 3."""
+"""BC1 (DXT1) decode to tightly packed RGBA8, with alpha always 255."""
+import logging
 import operator
 import struct
+import threading
+
+from ...utils import bcn
+
+_decoder = None
+_lock = threading.Lock()
+_log = logging.getLogger('nylib.ue.assets')
 
 _ROW_IDX = [tuple((b >> (2 * k)) & 3 for k in range(4)) for b in range(256)]
 
@@ -21,7 +29,7 @@ def _colors(c0: int, c1: int) -> list:
 _GETTERS = [operator.itemgetter(*idx) for idx in _ROW_IDX]
 
 
-def decode(src: bytes, width: int, height: int) -> bytearray:
+def decode_python(src: bytes, width: int, height: int) -> bytearray:
     """BC1 (DXT1) `src` to a width*height*4 RGBA8 bytearray, rows top to bottom; width and height a multiple of 4."""
     if width <= 0 or height <= 0 or width % 4 or height % 4:
         raise ValueError(f'width and height must be positive multiples of 4, got {width}x{height}')
@@ -56,3 +64,27 @@ def decode(src: bytes, width: int, height: int) -> bytearray:
         out[o + 3 * stride:o + 4 * stride] = join(r3)
         o += 4 * stride
     return out
+
+
+def _choose():
+    global _decoder
+    with _lock:
+        d = _decoder
+        if d is None:
+            try:
+                bcn.load()
+            except bcn.BcnError as e:
+                _decoder = d = decode_python
+                _log.warning('BC1 decode falls back to pure Python: %s', e)
+            else:
+                _decoder = d = bcn.decode_bc1
+                _log.debug('BC1 decode: native (nylib.utils.bcn)')
+        return d
+
+
+def decode(src: bytes, width: int, height: int) -> bytearray:
+    """Decode BC1 into a new opaque RGBA8 bytearray using the selected decoder."""
+    d = _decoder
+    if d is None:
+        d = _choose()
+    return d(src, width, height)

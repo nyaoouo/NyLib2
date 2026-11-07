@@ -44,6 +44,7 @@ nylib/                       importable package
   tkinter_/                  small tkinter extras
   ue/                        Unreal Engine reflection: dumper, snapshots, runtime API
   utils/                     pip bootstrap, eventloop, threading, web, ...
+    bcn/                     native BC1 (DXT1) decoder: ctypes loader + bundled DLL
     imagecodec/              JPEG (WIC, ctypes) and PNG (zlib) encoding of RGBA8
     oodle/                   Oodle Data/Network 1 bindings (ctypes) + bundled DLLs
   vmware_wp/                 VMware Workstation Pro backend (own README.md)
@@ -52,6 +53,7 @@ nylib/                       importable package
     breakpoint/              x64 HW/SW breakpoint primitive (VEH + debugger)
 
 scripts/                     dev-only tools (NOT installed; not in the wheel)
+  bcn/                       reproducible build for the bundled BC1 decoder DLL
   breakpoint_demo/           manual smoke scripts for winutils.breakpoint
   dxtest/                    DirectX 9/10/11/12 injection smoke tests
   generate_bind/             pybind11 binding generator from C headers
@@ -104,6 +106,7 @@ canonical entry points.
 | `nylib.utils` | Catch-all: lazy pip install, asm, event loop, downloads, archive packing | pip, install, keystone, capstone, event loop, download, pack, archive | [docs/nylib/utils.md](docs/nylib/utils.md) |
 | `nylib.utils.oodle` | Oodle Data compression and Oodle Network 1 UDP/TCP packet codecs over bundled 2.9.14 DLLs | oodle, compress, decompress, Kraken, OodleLZ, UdpCodec, TcpCodec, Oodle Network | [docs/nylib/utils/oodle.md](docs/nylib/utils/oodle.md) |
 | `nylib.utils.imagecodec` | JPEG encoding through Windows WIC and PNG encoding through zlib, of RGBA8 pixels | JPEG, PNG, encode_jpeg, encode_png, WIC, zlib, RGBA, alpha | [docs/nylib/utils/imagecodec.md](docs/nylib/utils/imagecodec.md) |
+| `nylib.utils.bcn` | Native BC1 (DXT1) block decoding to RGBA8 over a bundled C DLL | bcn, BC1, DXT1, decode_bc1, texture decode, block compression, RGBA8, ctypes | [docs/nylib/utils/bcn.md](docs/nylib/utils/bcn.md) |
 | `nylib.logging` | Color console logging with file rotation and custom verbosity levels | install, std2file, color console, log to file, file rotation, custom log levels | [docs/nylib/logging.md](docs/nylib/logging.md) |
 | `nylib.vmware_wp` | Control VMware Workstation Pro (power, snapshots, guest, REST) | Vmrun, Vmcli, WorkstationRest, VmwareConfig, snapshot, guest command | [docs/nylib/vmware_wp.md](docs/nylib/vmware_wp.md) |
 | `nylib.ue` | Unreal Engine reflection dumper + runtime object access | Unreal Engine, UE4, UE5, reflection, dump, Unreal.attach, GObjects | [docs/nylib/ue/index.md](docs/nylib/ue/index.md) |
@@ -388,6 +391,8 @@ Catch-all for non-Win32 helpers. The notable ones:
   builder (used by `python_loader`).
 - `template`, `preprocessor`, `yaml2json`, `prime`, `simple` - small
   text / data utilities.
+- `bcn/` - native BC1 (DXT1) decoding to RGBA8 over a bundled C DLL, used by
+  `nylib.ue.assets` when it loads; own page, [bcn.md](docs/nylib/utils/bcn.md).
 - `imagecodec/` - JPEG encoding through Windows WIC and PNG encoding through
   zlib, of RGBA8; own page, [imagecodec.md](docs/nylib/utils/imagecodec.md).
 - `oodle/` - Oodle Data compression and Oodle Network 1 UDP/TCP packet
@@ -494,6 +499,7 @@ venv.
 | `scripts/test_inject/` | Example client/host pair driving `nylib.winutils.python_loader`. |
 | `scripts/ue/` | `build_dumper7.py` builds the pinned Dumper-7 oracle DLL that `nylib.ue`'s capture tests compare with. Needs MSVC; dev only. |
 | `scripts/oodle/` | `build.py` fetches, links, and verifies the bundled Oodle Data/Network 1 DLLs from UE's static libraries (see `nylib/utils/oodle/PROVENANCE.md`). Needs MSVC; dev only. |
+| `scripts/bcn/` | `build.py` compiles `bcn.c` into the bundled `nylib/utils/bcn/bcn_win64.dll` and checks a rebuild byte for byte (`--check`; see `nylib/utils/bcn/PROVENANCE.md`). Needs MSVC; dev only. |
 | `scripts/windows_driver_policy_manage/` | PowerShell (`manage.ps1` / `manage.bat`) to status/remove/restore the Windows cross-cert driver Code-Integrity policy so a cross-signed test driver can load. Run elevated; lowers security and needs a reboot. |
 | `scripts/setup_llvm_dev.py` | Bootstrap an LLVM dev environment via `nylib.winutils.ensure_env`. |
 | `scripts/gen_fa_icons.py` | Regenerate `nylib/imguiutils/icons/fa/{solid,regular}.py` from the upstream Font Awesome metadata. |
@@ -584,6 +590,8 @@ editable):
 - `hook-nylib.utils.oodle.py` - collects the bundled Oodle Data/Network
   DLLs (`oo2core_9_win64.dll`, `oo2net_9_win64.dll`) via
   `collect_dynamic_libs`.
+- `hook-nylib.utils.bcn.py` - collects the bundled `bcn_win64.dll` via
+  `collect_dynamic_libs`.
 
 ### Two installation modes
 
@@ -605,7 +613,7 @@ the hooks are found when the list holds `nylib.__pyinstaller:get_hook_dirs`
 hooks directory yourself (or `hookspath=nylib.__pyinstaller.get_hook_dirs()`
 in a spec). Without it the freeze succeeds, but the app fails at run time
 where it first needs a hooked file (e.g. its first frontend import), and
-the keystone and Oodle DLLs, TTFs, `MSCVStore.p7b` and loader DLLs are
+the keystone, Oodle and bcn DLLs, TTFs, `MSCVStore.p7b` and loader DLLs are
 missing too:
 
 ```bash
@@ -670,6 +678,7 @@ the ABI tag of the interpreter that froze it:
 <dist>\<app>\_internal\capstone\lib\capstone.dll
 <dist>\<app>\_internal\nylib\utils\oodle\oo2core_9_win64.dll
 <dist>\<app>\_internal\nylib\utils\oodle\oo2net_9_win64.dll
+<dist>\<app>\_internal\nylib\utils\bcn\bcn_win64.dll
 ```
 
 A onefile build has no bundle folder to inspect. List its archive with
@@ -701,9 +710,10 @@ check that `nylib` is pip-installed (entry-point mode) or that
    `nylib/winutils/python_loader/python_loader.dll` are all
    `.gitignore`d. The wheel excludes them too (see
    `[tool.setuptools.exclude-package-data]` in `pyproject.toml`).
-   Exception: the two Oodle DLLs under `nylib/utils/oodle/` are
-   committed - plain C, ABI-independent, reproducibly built by
-   `scripts/oodle/build.py`; see `nylib/utils/oodle/PROVENANCE.md`.
+   Exception: the two Oodle DLLs under `nylib/utils/oodle/` and
+   `bcn_win64.dll` under `nylib/utils/bcn/` are committed - plain C,
+   ABI-independent, reproducibly built by `scripts/oodle/build.py` and
+   `scripts/bcn/build.py`; see each package's `PROVENANCE.md`.
 7. **`.agent-memory/` is local-only.** Read it for context, but never
    commit anything inside it.
 8. **English only** for code, comments, identifiers, config,
