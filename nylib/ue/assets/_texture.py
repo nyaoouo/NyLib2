@@ -277,22 +277,40 @@ def _native_start(reader: Reader, names: tuple) -> tuple:
     return bool(serialize_mips), skip_pos + skip
 
 
-def _skip_later_platform_data(reader: Reader, names: tuple) -> None:
+def _skip_later_platform_data(reader: Reader, names: tuple, outcomes=None) -> None:
     """Jump through the later platform-data entries to the terminating None, which must end the export."""
-    while True:
-        pos = reader.pos
-        idx, num = _unpack(reader, _FNAME)
-        if not 0 <= idx < len(names) or num < 0:
-            raise _Misfit(pos)
-        if num == 0 and names[idx] == 'None':
-            break
-        pos = reader.pos
-        (skip,) = _unpack(reader, _I64)
-        if skip < 8 or pos + skip + 8 > len(reader.data):
-            raise _Misfit(pos)
-        reader.pos = pos + skip
-    if reader.pos != len(reader.data):
-        raise _Misfit(reader.pos)
+    visited = []
+    try:
+        while True:
+            pos = reader.pos
+            if outcomes is not None:
+                if pos in outcomes:
+                    valid, end = outcomes[pos]
+                    if not valid:
+                        raise _Misfit(end)
+                    reader.pos = end
+                    break
+                visited.append(pos)
+            idx, num = _unpack(reader, _FNAME)
+            if not 0 <= idx < len(names) or num < 0:
+                raise _Misfit(pos)
+            if num == 0 and names[idx] == 'None':
+                break
+            pos = reader.pos
+            (skip,) = _unpack(reader, _I64)
+            if skip < 8 or pos + skip + 8 > len(reader.data):
+                raise _Misfit(pos)
+            reader.pos = pos + skip
+        if reader.pos != len(reader.data):
+            raise _Misfit(reader.pos)
+    except _Misfit as e:
+        if outcomes is not None:
+            for pos in visited:
+                outcomes[pos] = False, e.pos
+        raise
+    if outcomes is not None:
+        for pos in visited:
+            outcomes[pos] = True, reader.pos
 
 
 _NATIVE_PREFILTER = re.compile(
@@ -318,12 +336,13 @@ def _find_native_start(data: bytes, names: tuple, pkg: str) -> int:
     except InvalidMappingError:
         raise _fail_nomap(pkg, len(data), 'bad property header') from None
     found = None
+    outcomes = {}
     for hit in _NATIVE_PREFILTER.finditer(data, reader.pos):
         candidate = Reader(data, hit.start())
         try:
             _serialize, skip_to = _native_start(candidate, names)
             candidate.pos = skip_to
-            _skip_later_platform_data(candidate, names)
+            _skip_later_platform_data(candidate, names, outcomes)
         except _Misfit:
             continue
         if found is not None:

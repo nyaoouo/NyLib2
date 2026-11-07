@@ -773,6 +773,8 @@ def read_pak_footer(path: str) -> PakFooter | None:
             if size < _PAK_FOOTER_LEN:
                 return None
             foot = f.pread(size - _PAK_FOOTER_LEN, _PAK_FOOTER_LEN)
+            if len(foot) != _PAK_FOOTER_LEN:
+                return None
     except OSError as e:
         raise _container_error(e, name, name) from None
     key_guid = foot[:16]

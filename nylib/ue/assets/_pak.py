@@ -118,6 +118,8 @@ def _read_footer(f):
         if size < length:
             continue
         b = f.pread(size - length, length)
+        if len(b) != length:
+            return None
         if struct.unpack_from('<I', b, 17)[0] != 0x5A6F12E1:
             continue
         methods = tuple(b[61 + 32 * i:93 + 32 * i].split(b'\0', 1)[0].decode('ascii', 'replace') for i in range(5)) if length == 221 else ()

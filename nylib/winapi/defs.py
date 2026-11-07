@@ -439,15 +439,12 @@ class API_SET_VALUE_ENTRY(ctypes.Structure):
     ]
 
 
-FILETIME = ctypes.wintypes.FILETIME
-
-
 class BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
     _fields_ = [
         ('dwFileAttributes', ctypes.c_ulong),
-        ('ftCreationTime', FILETIME),
-        ('ftLastAccessTime', FILETIME),
-        ('ftLastWriteTime', FILETIME),
+        ('ftCreationTime', ctypes.wintypes.FILETIME),
+        ('ftLastAccessTime', ctypes.wintypes.FILETIME),
+        ('ftLastWriteTime', ctypes.wintypes.FILETIME),
         ('dwVolumeSerialNumber', ctypes.c_ulong),
         ('nFileSizeHigh', ctypes.c_ulong),
         ('nFileSizeLow', ctypes.c_ulong),

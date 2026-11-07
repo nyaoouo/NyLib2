@@ -103,13 +103,23 @@ class SharedFile:
             done = 0
             while done < size:
                 position = offset + done
+                amount = min(size - done, 1 << 30, 2**63 - 1 - position)
+                if not amount:
+                    break
                 overlapped = OVERLAPPED(Offset=position & 0xFFFFFFFF, OffsetHigh=position >> 32)
                 count = wintypes.DWORD()
                 try:
-                    ReadFile(handle, ctypes.byref(buf, done), min(size - done, 1 << 30), ctypes.byref(count), ctypes.byref(overlapped))
+                    ReadFile(handle, ctypes.byref(buf, done), amount, ctypes.byref(count), ctypes.byref(overlapped))
                 except OSError as e:
                     if e.winerror == 38:  # ERROR_HANDLE_EOF
                         break
+                    try:
+                        at_eof = position >= _identity(handle).size
+                    except OSError:
+                        pass
+                    else:
+                        if at_eof:
+                            break
                     raise
                 if not count.value:
                     break

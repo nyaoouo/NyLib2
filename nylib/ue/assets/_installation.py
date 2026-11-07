@@ -447,11 +447,11 @@ def open_installation(paks_dir: str | os.PathLike, *, engine: str, usmap: 'str |
                 for toc, _aes in mounted]
         pak_identities = {}
         for p in pak_paths:
-            rows.append(_pak_row(p))
             try:
                 pak_identities[p] = file_identity(p)
             except OSError:
                 pak_identities[p] = None
+            rows.append(_pak_row(p))
         rows.sort(key=lambda r: (_lower(r.file), r.file))
         identity = _identity(engine, usmap_sha256, [toc for toc, _aes in mounted])
     except BaseException:
