@@ -22,6 +22,7 @@ from ..errors import (
 )
 from . import _iostore, _pak, _pe, _texture
 from ._pak import FileInfo
+from ._winfile import file_identity
 from ._bcrypt import Aes256Ecb
 from ._hashes import package_id
 from ._iostore import Container, Toc, check_key, iter_directory_index, read_directory_index
@@ -444,7 +445,13 @@ def open_installation(paks_dir: str | os.PathLike, *, engine: str, usmap: 'str |
         rows = [ContainerInfo(file=toc.basename, kind='iostore', mounted=True, version=toc.version,
                               compression=toc.used_methods(), encrypted=toc.encrypted, chunks=toc.entry_count, reason=None)
                 for toc, _aes in mounted]
-        rows += [_pak_row(p) for p in pak_paths]
+        pak_identities = {}
+        for p in pak_paths:
+            rows.append(_pak_row(p))
+            try:
+                pak_identities[p] = file_identity(p)
+            except OSError:
+                pak_identities[p] = None
         rows.sort(key=lambda r: (_lower(r.file), r.file))
         identity = _identity(engine, usmap_sha256, [toc for toc, _aes in mounted])
     except BaseException:
@@ -459,6 +466,14 @@ def open_installation(paks_dir: str | os.PathLike, *, engine: str, usmap: 'str |
     inst._init(engine=engine, build=build_info, checked=build is not None, identity=identity, containers=tuple(rows),
                usmap_name=usmap_name, mappings=mappings, usmap=usmap, mounted=mounted, decryptors=tuple(decryptors.values()),
                cache_bytes=cache_bytes, project=project, pak_count=len(pak_paths), totals=counters)
+    inst._paks_dir = paks
+    inst._container_names = tuple(tuple(os.path.basename(p) for p in paths) for paths in (utocs, pak_paths))
+    tracked = []
+    for toc, _aes in mounted:
+        tracked.append((toc.path, toc.identity))
+        tracked.extend((_iostore._ucas_path(toc.path, part), value) for part, value in enumerate(toc.ucas_identities))
+    inst._tracked_files = tuple(tracked) + tuple(pak_identities.items())
+    inst._pak_identities = pak_identities
     inst._pak_keys = keys
     inst._pak_paths = tuple(os.path.join(paks, r.file) for r in rows if r.kind == 'pak' and r.version != 0)
     _log.debug('opened %s: engine %s, %d iostore mounted, %d pak not mounted, usmap %s, identity %s', paks_name, engine,
@@ -649,6 +664,31 @@ class Installation:
         if self._closed:
             raise InstallationClosedError(_CLOSED)
 
+    def is_stale(self) -> bool:
+        """Return whether the container list or any recorded file identity has changed."""
+        self._check_open()
+        try:
+            paths = _scan(self._paks_dir)
+        except MissingAssetError:
+            _log.debug('stale: container list changed')
+            return True
+        names = tuple(tuple(os.path.basename(p) for p in group) for group in paths)
+        if names != self._container_names:
+            _log.debug('stale: container list changed')
+            return True
+        for path, recorded in self._tracked_files:
+            try:
+                current = file_identity(path)
+            except OSError:
+                current = None
+                if current != recorded:
+                    _log.debug('stale: %s cannot be identified', os.path.basename(path))
+                    return True
+            if current != recorded:
+                _log.debug('stale: %s changed', os.path.basename(path))
+                return True
+        return False
+
     def close(self) -> None:
         """Close the installation; idempotent. Returns once every handle is released, unless called inside a read."""
         me = threading.get_ident()
@@ -710,7 +750,7 @@ class Installation:
             if self._pak_index is None:
                 entries = []
                 for path in self._pak_paths:
-                    entries.extend(_pak.read_index(path, self._pak_aes, check, counters))
+                    entries.extend(_pak.read_index(path, self._pak_aes, check, counters, self._pak_identities[path]))
                 entries.sort(key=lambda e: (_lower(e[0].path), e[0].path, e[0].container))
                 by_path = {}
                 for entry in entries:
@@ -783,7 +823,7 @@ class Installation:
             try:
                 if n and entry[3]['method_index']:
                     _check_oodle(info.container)
-                return _pak.read_range(entry, offset, n, aes, check, op.counters)
+                return _pak.read_range(entry, offset, n, aes, check, op.counters, self._pak_identities[entry[1]])
             except AssetError as e:
                 e.file = info.path
                 raise
