@@ -40,6 +40,7 @@ GetOverlappedResult = def_win_api(_dll.GetOverlappedResult, ctypes.c_bool, (ctyp
 CreateNamedPipe = def_win_api(_dll.CreateNamedPipeW, ctypes.c_void_p, (ctypes.c_wchar_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p), error_val=INVALID_HANDLE_VALUE)
 ConnectNamedPipe = def_win_api(_dll.ConnectNamedPipe, ctypes.c_bool, (ctypes.c_void_p, ctypes.c_void_p), error_zero=True)
 CreateFile = def_win_api(_dll.CreateFileW, ctypes.c_void_p, (ctypes.c_wchar_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p), error_val=INVALID_HANDLE_VALUE)
+GetFileInformationByHandle = def_win_api(_dll.GetFileInformationByHandle, ctypes.c_bool, (HANDLE, ctypes.POINTER(BY_HANDLE_FILE_INFORMATION)), error_zero=True)
 SetNamedPipeHandleState = def_win_api(_dll.SetNamedPipeHandleState, ctypes.c_bool, (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p), error_zero=True)
 DeviceIoControl = def_win_api(_dll.DeviceIoControl, ctypes.c_bool, (ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_void_p,), error_zero=True)
 GetFileAttributesW = def_win_api(_dll.GetFileAttributesW, ctypes.c_ulong, (ctypes.c_wchar_p,), error_val=0xFFFFFFFF)

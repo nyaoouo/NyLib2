@@ -439,6 +439,24 @@ class API_SET_VALUE_ENTRY(ctypes.Structure):
     ]
 
 
+FILETIME = ctypes.wintypes.FILETIME
+
+
+class BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ('dwFileAttributes', ctypes.c_ulong),
+        ('ftCreationTime', FILETIME),
+        ('ftLastAccessTime', FILETIME),
+        ('ftLastWriteTime', FILETIME),
+        ('dwVolumeSerialNumber', ctypes.c_ulong),
+        ('nFileSizeHigh', ctypes.c_ulong),
+        ('nFileSizeLow', ctypes.c_ulong),
+        ('nNumberOfLinks', ctypes.c_ulong),
+        ('nFileIndexHigh', ctypes.c_ulong),
+        ('nFileIndexLow', ctypes.c_ulong),
+    ]
+
+
 class OVERLAPPED(ctypes.Structure):
     _fields_ = [
         ("Internal", ctypes.c_void_p),
