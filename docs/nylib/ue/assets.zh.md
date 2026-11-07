@@ -2,12 +2,12 @@
 
 <!-- dt:meta v="1" lang="zh" source="assets.md" -->
 
-<!-- dt:section id="__preamble__" hash="04560f388810" -->
+<!-- dt:section id="__preamble__" hash="e00bafee19cb" -->
 # nylib.ue.assets
 
-对 UE 5.7 游戏的 IoStore（`.utoc`/`.ucas`）容器进行只读读取：枚举包（包括插件挂载根目录下的包），读取 `Texture2D` 元数据，读取类型化的导出属性和跨包引用，并将虚拟纹理 BC1 瓦片以及普通的 `PF_B8G8R8A8`、`PF_DXT1`、`PF_DXT5` 和 `PF_BC7` 纹理的有界区域解码为 RGBA8，包括以可选批量数据（`.uptnl`）形式存储的普通 mip。基于 Python，AES 使用 Windows BCrypt，解压缩使用随附的 Oodle DLL；不依赖 FModel、CUE4Parse 或 Unreal。
+面向 UE 5.7 游戏 IoStore（`.utoc`/`.ucas`）容器的只读读取器：枚举软件包（包括插件挂载根目录下的软件包），读取 `Texture2D` 元数据，读取类型化的导出属性和跨包引用，并将虚拟纹理 BC1 瓦片的有界区域以及普通的 `PF_B8G8R8A8`、`PF_DXT1`、`PF_DXT5` 和 `PF_BC7` 纹理解码为 RGBA8，包括存储在可选批量数据（`.uptnl`）中的普通 mip。Windows BCrypt 句柄处理 AES，随附的 Oodle DLL 处理解压缩。BC1 解码在 `nylib.utils.bcn` 的随附 DLL 可加载时使用该 DLL，否则使用纯 Python 实现，像素结果相同；不依赖 FModel、CUE4Parse 或 Unreal。
 
-Keywords: IoStore, utoc, ucas, AesKey, open_installation, Installation, Texture, virtual texture, VT, BC1, DXT1, DXT5, BC7, B8G8R8A8, .uptnl, ordinary texture, plugin, read_region, usmap, mapping, zen package, PackageInfo, TextureInfo, Region, ScriptObjects, Oodle, Exports, StructValue, DataTable, CurveTable, native struct, ObjectRef, pak, read_file, FileInfo, locres, locmeta, localization, InstanceData, instanced mesh
+Keywords: is_stale, usmap=None, nylib.utils.bcn, IoStore, utoc, ucas, AesKey, open_installation, Installation, Texture, virtual texture, VT, BC1, DXT1, DXT5, BC7, B8G8R8A8, .uptnl, ordinary texture, plugin, read_region, usmap, mapping, zen package, PackageInfo, TextureInfo, Region, ScriptObjects, Oodle, Exports, StructValue, DataTable, CurveTable, native struct, ObjectRef, pak, read_file, FileInfo, locres, locmeta, localization, InstanceData, instanced mesh
 
 <!-- dt:section id="quick-start-0" hash="a823faa39ad4" -->
 ## 快速开始
@@ -26,7 +26,7 @@ with open_installation('path/to/MyGame/Content/Paks', engine='5.7',
     print(region.width, region.height, len(region.pixels))
 ```
 
-<!-- dt:section id="opening-0" hash="2db4d27b48dd" -->
+<!-- dt:section id="opening-0" hash="585cb5e86163" -->
 ## 打开
 
 ```python
@@ -36,14 +36,40 @@ key = AesKey.from_hex('00' * 32)
 print(repr(key))
 ```
 
-- `aes_key=` 接受 `AesKey`、原始 `bytes`/`bytearray`（以零 GUID 包装）、`AesKey` 列表（每个容器 GUID 一个），或 `None`（用于没有加密容器的安装）。`AesKey` 还可以读取密钥文件（`AesKey.from_file(path)`）或原始/十六进制字节（`AesKey(key_bytes)`）；作为 `aes_key=` 传入的 `str` 会被拒绝，并提示使用 `from_hex()` / `from_file()`，从而确保密钥不会因疏忽而被输入到日志或 repr 中。
-- `usmap=` 是游戏的 `.usmap` 映射文件（v0-v4；压缩方式为 None、Oodle 或 ZStd，ZStd 需 Python 3.14+），或来自 `load_usmap()` 的 `Usmap`。路径在打开时只解析一次；`Usmap` 会被复用，不会再次读取映射文件。
-- `build=` 固定 exe 的 PE `TimeDateStamp`：传入你用来验证 `.usmap` 的整数值；exe 不匹配或缺失时会抛出 `BuildMismatchError`。传入 `None` 可跳过检查；`Installation.build` 仍会报告所找到的 exe（如有）。
-- `exe=` 指定用于 `build=` 检查 PE 时间戳的游戏 exe。默认是 `<paks>/../../Binaries/Win64` 中唯一的 `*-Win64-Shipping.exe`；没有或超过一个都视为缺失。若游戏把 exe 放在其他位置，需要使用 `exe=`。
-- `cache_bytes=` 限制共享的解压块缓存；默认 4 MiB（大致的实测耗时见说明）。
+- `aes_key=` 接受 `AesKey`、原始 `bytes`/`bytearray`（以零 GUID 包装）、`AesKey` 列表（每个容器 GUID 一个），或对于没有加密容器的安装传入 `None`。`AesKey` 还可读取密钥文件（`AesKey.from_file(path)`）或原始/十六进制字节（`AesKey(key_bytes)`）；作为 `aes_key=` 传入的 `str` 会被拒绝，并提示使用 `from_hex()` / `from_file()`，从而避免密钥被意外写入日志或 repr。
+- `usmap=` 是游戏的 `.usmap` 映射文件（v0-v4；压缩方式为 None、Oodle 或 ZStd，ZStd 需要 Python 3.14+），也可以是 `load_usmap()` 返回的 `Usmap`，或对于不使用映射的读取显式传入 `None`（[不使用映射](#without-a-mapping)）。路径在打开时解析一次；`Usmap` 会被复用，不会再次读取映射文件。
+- `build=` 固定 exe 的 PE `TimeDateStamp`：传入你已验证 `.usmap` 所对应的整数，exe 不匹配或缺失时会抛出 `BuildMismatchError`。传入 `None` 可跳过检查；`Installation.build` 仍会报告找到的 exe（如有）。
+- `exe=` 指定 `build=` 所检查 PE 时间戳的游戏 exe。默认情况下，它是 `<paks>/../../Binaries/Win64` 中唯一的 `*-Win64-Shipping.exe`；没有或存在多个都视为缺失。如果游戏将 exe 放在其他位置，则需要传入 `exe=`。
+- `cache_bytes=` 限制共享的解压数据块缓存；默认 4 MiB（近似的实测耗时见 Notes）。
 - `Installation` 是上下文管理器；`close()` 是幂等且线程安全的，未关闭的实例在被垃圾回收时会自行关闭并发出 `ResourceWarning`。
 
-<!-- dt:section id="mappings-0" hash="fc8070f34955" -->
+<!-- dt:section id="long-lived-installations-0" hash="b0d74b30a4cd" -->
+## 长期存活的安装实例
+
+保持安装实例打开，并在两次读取之间复用其 `Texture` 句柄。从工作线程中定期调用 `assets.is_stale()`，例如每 10 秒一次，而不是每帧都调用。它会比较顶层的 `.utoc` 和 `.pak` 名称，以及记录下来的 `.utoc`、分区 `.ucas` 和 `.pak` 的标识：卷序列号、文件索引、大小和最后写入时间。目录列举失败或无法再识别的文件视为已发生变化；本身就未被识别且仍未被识别的 `.pak` 则不算变化。
+
+该检查不读取任何容器数据，不保留句柄，不获取安装锁，也不会向 `stats()` 添加任何内容。它反映的是当前状态：把文件重命名回原名后，它可能再次返回 False。它不覆盖 exe、映射或密钥文件、更深层的目录，也不覆盖四个标识字段全部保持不变的修改。映射和密钥数据只在安装时读入内存一次。关闭后调用它会抛出 `InstallationClosedError`。
+
+容器文件以 `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE` 方式打开。在安装实例打开期间，更新程序可以重命名、删除或写入它们。在 Windows 11 build 26200 上使用 NTFS 实测：先重命名再改回、删除、在已删除的文件名下重新创建，以及原地追加都成功；对被打开的文件所使用的名称调用 `os.replace()` 则失败，`winerror=5`。删除和替换的行为取决于 Windows 和文件系统；共享模式并不保证更新程序的每个操作都能成功。
+
+已打开的句柄在文件被重命名或删除后，仍会继续读取它打开时对应的文件。原地写入对之后的读取可见，因此安装实例并非快照。之后打开的数据句柄会与安装打开时记录的标识进行比较；不一致时抛出 `CorruptAssetError`，消息为 `container file {f} has changed since the installation was opened`。文件缺失或不可读时，则保留其原有错误。
+
+发生变化时，停止提交读取，关闭安装实例，丢弃其 `Texture` 和 `Exports` 句柄，重新打开并重新请求可见的瓦片。对于 `CorruptAssetError`，先显示状态并调用 `is_stale()`，确认是更新后再进行处理；其他损坏情况需要排查。更新期间重新打开可能抛出临时性的 `AssetError`：请延迟后重试。基于标识键的旧瓦片结果不得作为新安装实例的瓦片显示。
+
+兼容性：容器文件的重命名和删除现在可以在安装实例打开期间成功。操作系统失败仍保留容器文件的消息，但会暴露 Win32 的 `errno` 和 `winerror`；例如被锁定的字节范围会得到 `errno=13`、`winerror=33`，而此前 C 运行时读取得到的是 `winerror=None`。文件变化错误是一致性检查，其两个属性均为 `None`。
+
+<!-- dt:section id="without-a-mapping-0" hash="ccbe210cc37c" -->
+## 无映射
+
+当无法获得匹配的映射时（例如更新之后），请显式传入 `usmap=None`。该关键字参数仍然是必需的；省略它会引发 Python 的 `TypeError`。此时 `assets.usmap` 为 `None`，包括关闭之后；并且安装标识与使用映射打开时不同。
+
+`texture()` 和 `read_region()` 无需反射属性即可工作，包查找与列举、`exports()` 及其头部检查、`find()`、`resolve()`、`raw()`、`Exports.raw()` 以及所有松散文件方法同样如此。`Texture.mapping_changes` 为 `()`。即使传入 `partial=True` 或 `instances=True`，类型化的 `read()` 和 `Exports.read()` 仍会引发 `InvalidMappingError(reason='no mapping')`，且是在参数与关闭状态检查之后、取消检查或 I/O 之前抛出。
+
+没有映射时，`texture()` 读取无版本的属性头，并且仅当原生数据起点是剩余导出项中唯一的候选者时才接受它，该候选者的原生检查与平台数据跳过链须能够一直适配到导出项末尾。随后它会正常解析原生数据。无法读取的属性头、没有候选者或存在多个候选者都会引发 `InvalidMappingError`；它绝不会选择第一个匹配项。调用方提供的映射仍使用映射后的属性遍历，且不会自动回退。
+
+在某一次测得的构建版本上，全部 16,208 次 Texture2D 调用都与映射路径结果一致：其中 16,094 个普通纹理与 104 个虚拟纹理，8 次 `UnsupportedAssetError` 和 2 次 `CorruptAssetError` 结果，没有任何差异。抽样的 161 个区域（包括四张世界地图）字节完全一致。这只是该构建版本的证据，不保证另一次更新之后仍然成立。请保留返回的 `Texture`：扫描会在每次调用 `texture()` 时运行，没有缓存，也没有取消检查点，对于较大的内联导出可能很慢。实测的产品开销见 Notes。
+
+<!-- dt:section id="mappings-0" hash="02f2fdcdf060" -->
 ## 映射
 
 `load_usmap(path, *, meta=None, custom_serialization=()) -> Usmap` 解析一次映射，用于检查、校验以及可选的内存中修改。它从不写入 `.usmap`。将得到的 `Usmap` 传给 `open_installation(usmap=u)`，即可通过其有效记录进行读取。
@@ -64,38 +90,38 @@ with open_installation('path/to/MyGame/Content/Paks', engine='5.7',
     print(assets.usmap.digest, assets.identity)
 ```
 
-当该槽位已经是 `Struct<IntPoint>` 时，示例中的 retype 会被跳过；它只是针对自身第 4 个索引需要该类型的映射所做的修复。应用修改前，请对照你的游戏布局检查映射。
+当该槽位已经是 `Struct<IntPoint>` 时，示例中的 retype 会被跳过；它只是针对自身第 4 个索引需要该类型的映射所做的修复。在应用任何修改之前，请先将映射与你的游戏布局进行核对。
 
-- `Usmap` 是不可变的，只能由 `load_usmap()` 和 `with_changes()` 创建。`file` 是文件基本名；`sha256` 对原始文件字节做哈希；`digest` 标识文件及其已应用的修改，无修改时等于 `sha256`。`version`、`structs` 和 `enums` 描述有效映射，`changes` 按顺序列出已应用的修改。`repr(u)` 包含基本名、SHA-256 前缀、版本和计数。
-- `u.record(name) -> RecordInfo | None` 以 ASCII 不区分大小写的方式查找记录；它包含 `name`、`super`、`count` 和 `properties`（每个声明的属性一项，静态数组不展开）。`u.records()` 按文件顺序迭代有效记录，之后是新增的记录。`u.properties(struct) -> tuple[PropertyInfo, ...] | None` 按链索引顺序展开整个父链的每个槽位；记录缺失或存在循环时返回 `None`。每个 `PropertyInfo` 包含 `index`、`element`、`owner`、`own_index`、`name`、`type` 和 `array_dim`：`index` 是链范围内的索引，而 `own_index` 是该属性在其声明记录内的第一个索引。
-- `meta=` 显式指定 nylib 转储的 `meta.json`（UTF-8 JSON，最大 64 MiB）。`u.meta` 是包含 `created`、`exe`、`pe_timestamp`、`quality` 和 `reasons` 的 `DumpInfo`；没有文件时为 `None`。不会自动发现任何旁路文件，文件位置或记录数量都不能证明两者配对。`u.check(..., build=stamp).paired` 仅将该标记与 `meta.pe_timestamp` 比较，当任一方不可用时返回 `None`。打开安装时不会将 `build` 与 meta 比较；当该时间戳可用时，传入 `build=u.meta.pe_timestamp` 以固定 exe。
-- `custom_serialization=` 是调用方提供的非空类名可迭代对象，按顺序保留；nylib 不提供内置类列表，此声明也不会添加任何解码器。`u.declared_custom(class_name_or_export_info)` 返回该类或其第一个匹配父类的对应条目（ASCII 不区分大小写），否则返回 `None`。
+- `Usmap` 是不可变的，只能由 `load_usmap()` 和 `with_changes()` 创建。`file` 为文件名（basename）；`sha256` 对原始文件字节进行哈希；`digest` 标识文件及其已应用的修改，在没有修改时等于 `sha256`。`version`、`structs` 和 `enums` 描述有效映射，`changes` 按顺序列出已应用的修改。`repr(u)` 包含文件名、SHA-256 前缀、版本和计数。
+- `u.record(name) -> RecordInfo | None` 以 ASCII 大小写不敏感的方式查找记录；它包含 `name`、`super`、`count` 和 `properties`（每个声明的属性对应一项，静态数组不展开）。`u.records()` 按文件顺序遍历有效记录，之后是新增的记录。`u.properties(struct) -> tuple[PropertyInfo, ...] | None` 按链索引顺序展开整个父链上的每个槽位；记录缺失或存在循环时返回 `None`。每个 `PropertyInfo` 包含 `index`、`element`、`owner`、`own_index`、`name`、`type` 和 `array_dim`：`index` 在整个链上计算，而 `own_index` 是该属性在其声明记录内的起始索引。
+- `meta=` 显式指定 nylib 转储的 `meta.json`（UTF-8 JSON，最大 64 MiB）。`u.meta` 是包含 `created`、`exe`、`pe_timestamp`、`quality` 和 `reasons` 的 `DumpInfo`，若没有文件则为 `None`。不会自动发现任何 sidecar 文件，文件位置或记录数量也不能证明两者是配对的。`u.check(..., build=stamp).paired` 只将该 stamp 与 `meta.pe_timestamp` 进行比较，当任一项不可用时返回 `None`。打开安装目录时不会将 `build` 与 meta 进行比较；当该时间戳可用时，传入 `build=u.meta.pe_timestamp` 以固定 exe。
+- `custom_serialization=` 是调用方提供的非空类名可迭代对象，按顺序保存；nylib 不提供内置类列表，此声明也不会添加任何解码器。`u.declared_custom(class_name_or_export_info)` 以 ASCII 大小写不敏感的方式返回该类或其第一个匹配父类对应的条目，若无则返回 `None`。
 
-修改是 `MappingChange` 记录，由 `u.with_changes(iterable)` 按顺序应用，它返回新的 `Usmap` 且保持 `u` 不变。构造函数包括 `add(struct, own_index, name, type, *, array_dim=1, note=None)`、`retype(struct, own_index, type, *, before=None, note=None)`、`rename(struct, own_index, name, *, before=None, type=None, note=None)`、`set_count(struct, count, *, before=None, note=None)` 和 `record(struct, *, super=None, count, properties=(), note=None)`。记录的属性是 `(own_index, name, type[, array_dim])` 条目。`add` 需要记录计数范围内的空闲区间；`set_count` 不能使条目落在其范围之外。已存在且父类与计数相同的记录被视为已就位，不比较其属性列表。
+修改是 `MappingChange` 记录，由 `u.with_changes(iterable)` 按顺序应用，该方法返回一个新的 `Usmap`，并保持 `u` 不变。构造函数为 `add(struct, own_index, name, type, *, array_dim=1, note=None)`、`retype(struct, own_index, type, *, before=None, note=None)`、`rename(struct, own_index, name, *, before=None, type=None, note=None)`、`set_count(struct, count, *, before=None, note=None)` 和 `record(struct, *, super=None, count, properties=(), note=None)`。记录的属性为 `(own_index, name, type[, array_dim])` 条目。`add` 需要记录计数范围内的空闲区间；`set_count` 不能使条目落到其范围之外。具有相同 super 和 count 的已有记录被视为已经就位，不会比较其属性列表。
 
-`before` 用于守护先前的类型、名称或计数；重命名的可选 `type` 是另一个守护条件。已经就位的修改会被跳过且不列出（重命名的类型守护仍会检查）。不匹配的修改会抛出 `InvalidMappingError(reason='change does not apply')`；不会返回部分修改的映射。已应用的修改在可用时记录先前的值，并且上述构造函数使用 `by='patch'`。根据检查结果构造修改时，应使用 `found.owner` 和 `found.own_index`，绝不要使用 `found.index`：继承的属性具有不同的链索引。类型标签包括 `Float`、`Struct<IntPoint>`、`Array<Struct<Vector>>`、`Map<Name,Int>` 和 `Enum<MyEnum:Byte>`；`Struct<None>` 表示不存在的结构体名称。`Object<C>` 被拒绝，因为 `.usmap` 不存储对象属性的类。
+`before` 用于保护之前的类型、名称或计数；重命名的可选 `type` 是另一个保护条件。已经就位的修改会被跳过且不列出（但重命名的类型保护仍会检查）。不适配的修改会抛出 `InvalidMappingError(reason='change does not apply')`；不会返回部分修改的映射。已应用的修改在可用时记录先前的值，并且对于上述构造函数使用 `by='patch'`。根据检查结果构造修改时，应使用 `found.owner` 和 `found.own_index`，绝不要使用 `found.index`：继承的属性具有不同的链索引。类型标签包括 `Float`、`Struct<IntPoint>`、`Array<Struct<Vector>>`、`Map<Name,Int>` 和 `Enum<MyEnum:Byte>`；`Struct<None>` 表示不存在结构体名称。`Object<C>` 会被拒绝，因为 `.usmap` 不存储对象属性的类。
 
-`u.check(requirements, *, fallback=None, by=None, build=None) -> MappingReport` 从不改变 `u`。传入从族名到非空 `Requirement(struct, name=None, index=None, type=None)` 可迭代对象的映射，或为族名 `''` 传入单个非空可迭代对象。`index` 是链范围内的索引。仅含结构体的需求检查其整个链；仅含类型的需求需要一个匹配的属性。名称精确匹配，包括大小写。结果有六种状态：
+`u.check(requirements, *, fallback=None, by=None, build=None) -> MappingReport` 从不修改 `u`。传入从族名到非空 `Requirement(struct, name=None, index=None, type=None)` 可迭代对象的映射，或者为名为 `''` 的族传入一个非空可迭代对象。`index` 在整个链上计算。仅含结构体的需求检查其链；仅含类型的需求需要一个匹配的属性。名称匹配是精确的，包括大小写。结果有六种状态：
 
 | status | meaning |
 | --- | --- |
-| `ok` | 原始文件以相同槽位满足该需求 |
-| `resolved` | 已应用的修改满足它，或 fallback 提出了重命名 |
-| `missing` | 记录或槽位缺失，或父链存在循环 |
-| `type mismatch` | 候选项具有另一种类型 |
-| `index mismatch` | 名称位于另一个索引处，或请求的索引具有另一个名称 |
-| `ambiguous` | 多个候选项或冲突的名称声明阻止了匹配 |
+| `ok` | the original file satisfies the requirement with the same slot |
+| `resolved` | an applied change satisfies it, or a fallback proposes a rename |
+| `missing` | a record or slot is missing, or the super chain cycles |
+| `type mismatch` | the candidate has another type |
+| `index mismatch` | the name is at another index, or the requested index has another name |
+| `ambiguous` | several candidates or conflicting name claims prevent a match |
 
-`report.families` 包含 `FamilyResult(name, verdict, items)` 记录。当有效映射满足每个需求时，verdict 为 `'usable'`；当应用提案并在没有 fallback 的情况下再次检查后该族得到满足时，为 `'usable after apply'`；否则为 `'not usable'`。只有 `'usable'` 时 `family.usable` 为真。`report.family(name)` 选择一个族；`covered` 只列出可用的族，`items` 将其结果展平，`counts` 是按表格顺序排列的 `(status, count)` 元组。每个结果包含 `family`、`requirement`、`status`、`found`、`change`、`by` 和 `detail`；`found` 是 `PropertyInfo` 或 `None`。`str(report)` 是关于计数、提案、修改和转储配对的 ASCII 摘要，不包含属性名称。
+`report.families` 保存 `FamilyResult(name, verdict, items)` 记录。当有效映射满足每个需求时，verdict 为 `'usable'`；当应用提议并在不使用 fallback 的情况下重新检查后满足该族时，为 `'usable after apply'`；否则为 `'not usable'`。只有 `'usable'` 时 `family.usable` 才为真。`report.family(name)` 选取一个族；`covered` 仅列出可用的族，`items` 将它们的结果展平，`counts` 是按表格顺序排列的 `(status, count)` 元组。每个结果包含 `family`、`requirement`、`status`、`found`、`change`、`by` 和 `detail`；`found` 为 `PropertyInfo` 或 `None`。`str(report)` 是关于计数、提议、修改和转储配对的 ASCII 摘要，不包含属性名称。
 
-fallback 仅对链可解析但没有精确名称匹配的命名需求运行。传入 `fallback=callable, by='your-rule'`；`by` 必须非空、不含控制字符，且不等于 `'patch'`（没有 fallback 时保持 `None`）。它在检查线程上接收 `(requirement, chain)`，并返回该链中的一个槽位、`None`，或由不同候选槽位组成的元组。多个候选会产生 `ambiguous`；异常会向外传播。答案仍必须满足需求的类型和索引，跨族的冲突声明会被拒绝。提供两个可选启用的函数：
+只有对于链可以解析但没有精确名称匹配的已命名需求，才会运行 fallback。传入 `fallback=callable, by='your-rule'`；`by` 必须非空，不得包含控制字符，并且不能为 `'patch'`（没有 fallback 时保持 `None`）。它在检查线程上接收 `(requirement, chain)`，返回该链中的一个槽位、`None` 或一个由不同候选槽位组成的元组。多个候选会产生 `ambiguous`；异常会向外传播。答案仍必须满足需求的类型和索引，跨族的冲突声明会被拒绝。提供两个可选启用的函数：
 
-- `index_and_type_fallback` 同时要求 `index` 和 `type`，仅当该链索引处的槽位标签匹配时返回该槽位；它忽略名称。
-- `unique_prefix_fallback` 在链内按任一方向的前缀匹配 `_aaa` 名称，使用元素 0 的槽位，并遵守所需类型。较短的前缀必须至少为 **6 个字符**；候选名称在比较前在其第一个 NUL 处截断。多个匹配返回多个候选。
+- `index_and_type_fallback` 要求同时提供 `index` 和 `type`，仅当标签匹配时才返回该链索引处的槽位；它忽略名称。
+- `unique_prefix_fallback` 在链内以任一方向按前缀匹配 `_aaa` 名称，使用元素 0 的槽位，并遵守所需类型。较短的前缀必须至少为 **6 个字符**；候选的名称在比较前会在其第一个 NUL 处截断。多个匹配会返回多个候选。
 
-fallback 答案是需要审阅的提案：即使是唯一前缀，当应有的属性缺失时，也可能选中错误的属性。`report.proposed` 包含带守护的重命名修改；请检查它们，然后使用 `u.with_changes(...)` 显式应用已接受的修改并重新检查。任何读取都不会运行 fallback 或应用提案。`report.changes` 保存已应用到 `u` 的修改，与提案分开。
+Fallback 的答案是需要审阅的提议：即使是唯一前缀，当目标属性缺失时也可能选中错误的属性。`report.proposed` 包含带保护的重命名修改；请检查它们，然后使用 `u.with_changes(...)` 显式应用已接受的修改，并重新检查。任何读取操作都不会运行 fallback 或应用提议。`report.changes` 保存已应用到 `u` 上的修改，与提议分开。
 
-映射记录是不可变的、可哈希的，并且支持 pickle/deepcopy 往返。除 `RecordInfo` 外，每个记录都有 `to_python()` 和 `from_python()`，用于转换为兼容 JSON 的字典；元组变为列表，`None` 变为 JSON `null`。紧凑的模式如下：
+映射记录是不可变的、可哈希的，并支持 pickle 和 deepcopy 往返。除 `RecordInfo` 外，每个记录都有 `to_python()` 和 `from_python()`，用于转换为 JSON 兼容的字典；元组变为列表，`None` 变为 JSON `null`。紧凑模式如下：
 
 | record | dict keys |
 | --- | --- |
@@ -107,19 +133,19 @@ fallback 答案是需要审阅的提案：即使是唯一前缀，当应有的�
 | `FamilyResult` | `name`, `verdict`, nested `items` |
 | `MappingReport` | `format='nylib.ue.assets.MappingReport'`, `format_version=1`, `file`, `sha256`, `digest`, `version`, `structs`, `enums`, `meta`, `build`, `paired`, `families`, `covered`, `counts` (a dict), `proposed`, `changes`, `custom_serialization`, `summary` |
 
-要归档已应用的修改，请使用 `json.dumps([c.to_python() for c in u.changes])`；重放时使用 `load_usmap(path).with_changes(MappingChange.from_python(d) for d in json.loads(text))`。将原始文件哈希以及任何 meta/custom-serialization 参数与归档一同保存。JSON 默认的 `ensure_ascii=True` 会保留 NUL 和无法解码的名称字节。`MappingReport.from_python()` 可对报告归档进行往返，并验证其格式版本以及派生的配对/计数/覆盖情况；`summary` 仅为显示文本。读取器会拒绝缺失或未知的键以及错误类型；`MappingChange.from_python()` 接受省略的可选键，但使用 `own_index` 而非 `index`。`Usmap` 本身拒绝 pickle 和 copy/deepcopy：应在接收进程中加载文件并重放修改。
+要归档已应用的修改，请使用 `json.dumps([c.to_python() for c in u.changes])`；重放时使用 `load_usmap(path).with_changes(MappingChange.from_python(d) for d in json.loads(text))`。请将原始文件哈希以及任何 meta/custom-serialization 参数与归档一同保存。JSON 默认的 `ensure_ascii=True` 能保留 NUL 和无法解码的名称字节。`MappingReport.from_python()` 可对报告归档进行往返，并校验其格式版本以及派生的配对/计数/覆盖情况；`summary` 仅为显示文本。读取方会拒绝缺失或未知的键以及类型错误的值；`MappingChange.from_python()` 接受省略的可选键，但使用 `own_index`，而不是 `index`。`Usmap` 本身拒绝 pickle 以及 copy/deepcopy：应在接收进程中加载文件并重放修改。
 
-`Export.mapping_changes` 和 `Texture.mapping_changes` 按应用顺序列出适用于调用方所查找记录的已应用修改，否则为 `()`。类型化读取会解析整个链，而纹理属性遍历是惰性的，因此这两个元组不必相同。部分导出会列出失败前遇到的修改；其 `problem` 保留错误归因。`Export.mapping_changes` 不参与相等性、哈希和 repr。属性遍历失败（`InvalidMappingError` 和 `UnsupportedAssetError`）携带 `mapping_changes`（失败前查找过的记录），以及 `custom_serialization`（第一个声明的匹配项）：依次为导出的类/父类、属性路径中的结构体（按顺序），然后是错误的类和结构体名称。无关实例（包括映射加载/修改错误）两个属性均为 `None`。
+`Export.mapping_changes` 和 `Texture.mapping_changes` 按应用顺序列出对调用所查找记录的已应用修改，若无则为 `()`。类型化读取会解析整个链，而纹理属性遍历是惰性的，因此这两个元组不必一致。部分导出会列出失败之前遇到的修改；其 `problem` 保留错误归因。`Export.mapping_changes` 不参与相等性比较、哈希和 repr。属性遍历失败（`InvalidMappingError` 和 `UnsupportedAssetError`）会携带失败前所查找记录的 `mapping_changes`，以及第一个声明匹配项的 `custom_serialization`：依次为导出类/父类、按顺序的属性路径结构体，然后是错误的类名和结构体名。无关实例（包括映射加载/修改错误）的这两个属性保持为 `None`。
 
-| 失败归因 | 调用方操作 |
+| failure attribution | caller action |
 | --- | --- |
-| 已设置 `custom_serialization` | 声明的自定义布局可能在任何映射下失败 |
-| `mapping_changes` 非空 | 先检查这些修改；add/retype/count/record 可能改变布局，rename 不会 |
-| 两者皆无，且为 `InvalidMappingError` | 检查 `reason`，了解文件为何不匹配 |
-| 两者皆无，且为 `UnsupportedAssetError` | nylib 缺少原生布局或变体 |
-| 其他错误类 | 超出映射范围进行排查 |
+| `custom_serialization` set | the declared custom layout can fail with any mapping |
+| non-empty `mapping_changes` | inspect those changes first; add/retype/count/record can move layout, rename cannot |
+| neither, `InvalidMappingError` | inspect `reason` for how the file does not fit |
+| neither, `UnsupportedAssetError` | nylib lacks the native layout or variant |
+| another error class | investigate beyond the mapping |
 
-兼容性：名称、类型和槽位现在遵循有效映射；可选启用的重命名会改变 `Slot.name` 和 `to_python()` 的键。`Installation.identity` 跟随 `usmap.digest`，在没有已应用修改时保持不变。`Installation.usmap` 在 `close()` 之后仍可读取，在安装及其他映射引用释放之前保留已解析的记录（一个被测映射约 26 MiB）。无效的 `usmap=` 类型现在抛出 `TypeError`，消息为 `usmap must be a str, os.PathLike[str] or Usmap, got <type>`；返回 bytes 的 `PathLike` 保持其先前的 bytes 路径错误。现有路径打开保持其读取结果、消息和 repr 不变。新增的 12 个公共名称为 `load_usmap`、`Usmap`、`RecordInfo`、`PropertyInfo`、`MappingChange`、`Requirement`、`RequirementResult`、`FamilyResult`、`MappingReport`、`DumpInfo`、`index_and_type_fallback` 和 `unique_prefix_fallback`；现有导出仍可使用。
+兼容性说明：名称、类型和槽位现在遵循有效映射；可选启用的重命名会改变 `Slot.name` 以及 `to_python()` 的键。`Installation.identity` 跟随 `usmap.digest`，在没有已应用修改时保持不变。`Installation.usmap` 在 `close()` 之后仍可读取，并会保留已解析的记录，直到安装对象及任何其他映射引用被释放（对于一个实测映射约为 26 MiB）。无效的 `usmap=` 类型现在会抛出 `TypeError`，消息为 `usmap must be a str, os.PathLike[str], Usmap or None, got <type>`；返回 bytes 的 `PathLike` 仍保留其先前的 bytes 路径错误。已有的路径打开方式保留其读取结果、消息和 repr。新增的 12 个公共名称为 `load_usmap`、`Usmap`、`RecordInfo`、`PropertyInfo`、`MappingChange`、`Requirement`、`RequirementResult`、`FamilyResult`、`MappingReport`、`DumpInfo`、`index_and_type_fallback` 和 `unique_prefix_fallback`；现有导出仍然可用。
 
 <!-- dt:section id="finding-packages-0" hash="142c59dbc544" -->
 ## 查找包
@@ -131,13 +157,13 @@ fallback 答案是需要审阅的提案：即使是唯一前缀，当应有的�
 - 插件挂载根：`list_packages()` 也列出位于 `Engine/Plugins/.../Content/...` 或 `<Project>/Plugins/.../Content/...` 目录下的包，命名为 `/<mount>/<rest>`。当 `<mount>` 已经与条目记录的块 id 匹配时，它是插件文件夹名称；否则目录在其第一个不匹配的条目上花费一次摘要读取，从该条目的记录包名称学习 `<mount>`，然后为目录的其余部分重用它（在一个游戏上实测，22,313 个插件根文件中有 106 个需要学到的挂载，来自 2 次学习读取）。学到的 `<mount>` 保持记录名称的大小写；`<rest>` 始终保持目录索引的大小写。
 - `.uasset`/`.umap` 文件路径形式不适用于插件根：位于 `Plugins/` 目录下的文件路径仍然会引发 `ValueError`。通过包路径或对象路径形式（`/<mount>/...`）或通过 `list_packages()` 返回的名称来寻址插件根包。
 
-<!-- dt:section id="loose-files-0" hash="440dc7904c37" -->
-## 散文件
+<!-- dt:section id="loose-files-0" hash="be6ada9da1f6" -->
+## 松散文件
 
-同一个安装实例可以读取旧版 `.pak` 版本 11 和 12 的散文件，包括加密条目。打开时仍然需要 `.usmap` 和 IoStore 安装；没有独立的 `.pak` 打开器。`.pak` 内的包保持未挂载：对于已挂载的 IoStore 包，请使用包 API。
+同一安装可以读取旧版 `.pak` 版本 11 和 12 的松散文件，包括加密条目。打开仍然需要一个 IoStore 安装；接受 `usmap=None`，读取松散文件不需要映射；没有独立的 `.pak` 打开器。`.pak` 内的包保持未挂载状态：对于已挂载的 IoStore 包，请使用包 API。
 
 ```python
-# 需要：一个名为 assets 的已打开 Installation，且其中包含所列的散文件
+# needs: an open Installation named assets with the listed loose file
 path = 'Wardogs/Content/Localization/Game/en/Game.locres'
 info = assets.file(path)
 data = assets.read_file(info)
@@ -145,18 +171,18 @@ sample = assets.read_file(path, offset=100000, limit=70000)
 print(info.size, len(data), len(sample))
 ```
 
-- `assets.has_file(path: str) -> bool` 检查某个已列出的路径；`assets.file(path: str) -> FileInfo` 返回其记录，若不存在则抛出 `MissingAssetError`。
-- `assets.list_files(prefix='', *, match=None) -> list[FileInfo]` 返回一个新列表，按路径前缀以及可选的、针对整个路径的 `fnmatch` 模式进行过滤。两者都按 ASCII 不区分大小写匹配；两个过滤参数都允许任意字符串。结果按 `(ASCII-lower(path), path, container)` 排序。
-- `FileInfo` 是不可变的：`path` 保留索引中的大小写，`container` 是 `.pak` 的基本文件名，`size` 是未压缩字节数，`stored_size` 是存储字节数，`compression` 为 `'None'`、方法名，或对于未命名方法索引为 `'#k'`，`encrypted` 描述条目本身。将 `FileInfo` 传给 `read_file()` 时只使用其 `path`，并在该安装实例中查找。
-- 查找路径是非空的相对路径，使用 `/` 分隔符，例如上面的示例。反斜杠、开头或结尾的 `/`、空段（`//`），以及 `.` 或 `..` 段都会抛出 `ValueError`；查找按 ASCII 不区分大小写进行。条目路径会将挂载点（去掉开头的 `../../../`）、目录和文件名拼接起来，合并重复的 `/` 并去掉开头的 `/`。无效的条目路径、超过 1,024 个字符的路径、控制字符、Unicode 行/段落分隔符、孤立代理项以及无法解码的文件名都会被跳过，删除记录同样会被跳过。
-- 重复路径（包括同一 `.pak` 内的大小写变体）不会按补丁顺序解析：`has_file()` 返回 True，`list_files()` 会列出两者，但 `file()` 和 `read_file()` 会抛出 `UnsupportedContainerError(feature='patch containers')`。
-- 这四个调用中的第一个会加载所有可识别的 `.pak` 索引，校验两个索引的 SHA-1 哈希，并将结果保留到 `close()`。加密索引使用打开时提供的、GUID 与页脚匹配的 `aes_key=`；不会再次读取密钥文件。密钥缺失或错误会抛出 `InvalidKeyError`，索引损坏会抛出 `CorruptAssetError`，其他版本会抛出 `UnsupportedContainerError(feature='pak version <v>')`，没有完整目录索引则会抛出 `UnsupportedContainerError(feature='pak without a full directory index')`。任何失败都会丢弃整个加载结果；下一次调用会重新尝试。打开本身仍只读取页脚，因此这些失败会在首次使用散文件时出现。
-- `assets.read_file(path, *, offset=0, limit=None, cancel=None) -> bytes` 只读取范围所涉及的压缩块，对于存储条目则按 64 KiB 分块读取。`offset` 必须是不大于 `size` 的非负整数；`limit` 是 0 到 67,108,864（64 MiB）之间的整数，或为 `None`（表示从 `offset` 读到末尾），同样受此上限约束。这里布尔值不被视为整数。显式指定的 limit 会在 EOF 处截断；空范围返回 `b''`。无效参数会在任何 I/O 之前失败。超过上限的文件可以分段读取。
-- 只支持 `'None'` 和 `'Oodle'` 压缩；其他方法会抛出 `UnsupportedContainerError(feature='compression <method>')`。加密条目同样使用 `.pak` 页脚 GUID 对应的密钥；密钥缺失会抛出 `InvalidKeyError`。在解密之前，AES 窗口会按 16 字节对齐，解密后再截取所请求的范围。读取使用调用本地的句柄，并绕过共享的块缓存。`read_file()` 返回 UE 存储的原始字节；游戏为这些字节添加的加密由调用方自行处理。
+- `assets.has_file(path: str) -> bool` 检查某个已列出的路径；`assets.file(path: str) -> FileInfo` 返回其记录，否则抛出 `MissingAssetError`。
+- `assets.list_files(prefix='', *, match=None) -> list[FileInfo]` 返回一个新列表，按路径前缀过滤，并可选地按整个路径上的 `fnmatch` 模式过滤。两种过滤都按 ASCII 忽略大小写匹配；两个过滤参数都可以是任意字符串。结果按 `(ASCII-lower(path), path, container)` 排序。
+- `FileInfo` 是不可变的：`path` 保留索引中的大小写，`container` 是 `.pak` 的文件名基名，`size` 是未压缩字节数，`stored_size` 是存储字节数，`compression` 为 `'None'`、方法名，或对于未命名方法索引为 `'#k'`，`encrypted` 描述条目本身。将 `FileInfo` 传给 `read_file()` 时只使用其 `path`，并在该安装中查找。
+- 查找路径是非空的相对路径，使用 `/` 分隔符，例如上面的示例。反斜杠、开头或结尾的 `/`、空段（`//`）以及 `.` 或 `..` 段都会抛出 `ValueError`；查找按 ASCII 忽略大小写。条目路径由挂载点（去掉开头的 `../../../`）、目录和文件名拼接而成，合并重复的 `/` 并去掉开头的 `/`。无效的条目路径、超过 1,024 个字符的路径、控制字符、Unicode 行/段落分隔符、孤立代理项以及无法解码的文件名都会被跳过，删除记录也会被跳过。
+- 重复路径（包括同一个 `.pak` 内大小写不同的变体）不会按补丁顺序解析：`has_file()` 返回 True，`list_files()` 会列出两者，但 `file()` 和 `read_file()` 会抛出 `UnsupportedContainerError(feature='patch containers')`。
+- 上述四个调用中的第一个会加载所有可识别的 `.pak` 索引，检查两个索引的 SHA-1 哈希，并将结果保留到 `close()`。加密索引使用打开时提供的、GUID 与页脚匹配的 `aes_key=`；不会再次读取密钥文件。缺失或错误的密钥会抛出 `InvalidKeyError`，损坏的索引会抛出 `CorruptAssetError`，其他版本会抛出 `UnsupportedContainerError(feature='pak version <v>')`，没有完整目录索引会抛出 `UnsupportedContainerError(feature='pak without a full directory index')`。任何失败都会丢弃整个加载结果；下一次调用会重试。打开本身仍只读取页脚，因此这些失败会在首次使用松散文件时出现。
+- `assets.read_file(path, *, offset=0, limit=None, cancel=None) -> bytes` 只读取该范围涉及的压缩块，对于存储条目则按 64 KiB 分块读取。`offset` 必须是不大于 `size` 的非负整数；`limit` 是 0 到 67,108,864（64 MiB）之间的整数，或为 `None` 以表示从 `offset` 读到末尾，同样受此上限约束。这里布尔值不被视为整数。显式指定的 `limit` 会在 EOF 处截断；空范围返回 `b''`。无效参数会在 I/O 前失败。大于上限的文件可以分块范围读取。
+- 只读取 `'None'` 和 `'Oodle'` 压缩；其他方法会抛出 `UnsupportedContainerError(feature='compression <method>')`。加密条目同样使用 `.pak` 页脚 GUID 对应的密钥；缺失密钥会抛出 `InvalidKeyError`。在解密前，AES 窗口会按 16 字节对齐，并将结果截取为所请求的范围。读取使用调用级别的句柄，并绕过共享块缓存。`read_file()` 返回 UE 存储的字节；游戏为这些字节添加的加密由调用方自行处理。
 
-一个密钥校验的限制：如果条目是加密的，但其索引未加密，并且没有其他任何东西校验该 GUID 对应的密钥，那么错误的密钥会对存储条目返回错误的字节；对于压缩条目，则会抛出 `CorruptAssetError`。实测的安装实例全部使用加密索引，因此该情况在那里没有被测试。
+一个密钥验证的限制：如果条目是加密的，但其索引是明文的，并且没有其他东西验证该 GUID 对应的密钥，那么错误的密钥对于存储条目会返回错误的字节；对于压缩条目则会抛出 `CorruptAssetError`。实测的安装中索引全部为加密的，因此在那里没有覆盖这种情况。
 
-兼容性：`.pak` 行仍然具有 `mounted=False`。受支持的 221 字节页脚的 `reason` 现在为 `'legacy .pak: loose files only, through read_file()'`。其他版本保持 `'legacy .pak is not read by this nylib version'`；可识别的 222、225 和 262 字节页脚现在会报告其版本和索引加密标志，并带有 `compression=()`，但不会进一步读取。无法识别或无法读取的页脚保留其原有原因，并在索引加载时被跳过。`Installation.identity` 及其 repr 保持不变，不会标识 `.pak` 的内容；密钥本地化按 `Locres.sha256` 进行缓存。`nylib.ue.assets.__all__` 中新增的七个惰性公共名称（现为 59 个）为 `FileInfo`、`parse_locres`、`parse_locmeta`、`Locres`、`LocresEntry`、`Locmeta` 和 `InstanceData`；`nylib.ue.__all__` 保持不变。
+兼容性：`.pak` 行的 `mounted` 仍为 `False`。受支持的 221 字节页脚的 `reason` 现为 `'legacy .pak: loose files only, through read_file()'`。其他版本保留 `'legacy .pak is not read by this nylib version'`；可识别的 222、225 和 262 字节页脚现在会报告其版本和索引加密标志，`compression=()`，但不会进一步读取。无法识别或无法读取的页脚保留其原有原因，并在索引加载时被跳过。`Installation.identity` 及其 repr 未变，且不标识 `.pak` 的内容；密钥本地化按 `Locres.sha256` 缓存。`nylib.ue.assets.__all__` 中新增的七个惰性公共名称（现在共 59 个）为 `FileInfo`、`parse_locres`、`parse_locmeta`、`Locres`、`LocresEntry`、`Locmeta` 和 `InstanceData`；`nylib.ue.__all__` 未变。
 
 <!-- dt:section id="localization-0" hash="3ee60b16f34e" -->
 ## 本地化
@@ -213,6 +239,145 @@ if tv.history == 'Base':
 兼容性：在早期版本中，每个普通（非虚拟）纹理都会无条件地从 `read_region` 抛出 `UnsupportedAssetError(feature='non-virtual texture')`。现在，可读的普通纹理可以正常解码；而采用无解码器像素格式的普通纹理会改为抛出 `UnsupportedPixelFormatError`——这与此前不受支持的虚拟纹理层格式的行为一致。这两个错误类都派生自 `UnsupportedError`；如果调用方只在 `read_region` 外围捕获 `UnsupportedAssetError`，就会漏掉新的异常。普通纹理上的 `texture()` 现在也可能抛出 `CorruptAssetError`，原因是某个 mip 的尺寸、`.ubulk` 或已挂载的 `.uptnl` 范围，或序列化尺寸不一致。另外，若插件内容目录的学习读取失败，则只保留已与其文件夹名匹配的条目，其余条目会被丢弃，且仅在 DEBUG 日志中可见。
 
 此前抛出 `UnsupportedPixelFormatError` 的普通 `PF_DXT1`、`PF_DXT5` 和 `PF_BC7` 纹理现在可以解码（在一次实测安装中多出 3,814 个纹理）。对于相同输入，`Installation.identity` 保持不变：升级时请清除缓存的“不可读”判定结果；仅以 identity 为键的缓存将继续保留这些判定。当可选内容缺失时，`info.readable=True` 不再保证每个 mip 都可以读取。
+
+<!-- dt:section id="on-demand-map-tiles-0" hash="4ff213a0a977" -->
+## 按需加载地图瓦片
+
+只读取可见区域及一小段预取边距。此消费者示例在工作线程上为每张地图保留一个安装实例和一个 `Texture`。其有界优先级队列会将可见瓦片排在预取瓦片之前；视图代数会取消已过时的工作。渲染线程调用 `set_view()` 和 `drain(upload, budget)`，并自行上传 RGBA8 数据，该线程上不进行任何资源读取。使用 `fallback[map_name]` 作为占位图，它在工作线程打开该纹理时填充。
+
+此示例假定为虚拟世界地图，其 mip 0 为 16384x16384：显示缩放级别 `z` 使用 mip `5 - z`，瓦片尺寸为 512x512 像素。请为该 mip 提供有效的瓦片坐标。结果按返回的 `(assets.identity, map_name, z, x, y, 'rgba8')` 键进行缓存。请求队列已满时 `want()` 返回 False；`set_view()` 返回已接受的数量，以便调用方稍后再请求缺失的瓦片。只有渲染线程会改变视图代数。遇到容器已变更的错误时，工作线程会重新打开并重新排队该瓦片；其他错误会被计数，供调用方显示或记录。
+
+```python
+# needs: an installed UE 5.7 game, its AES key file and virtual world-map textures
+"""Read visible map tiles on one worker thread."""
+import itertools
+import queue
+import threading
+import time
+
+from nylib.ue.assets import AesKey, CorruptAssetError, ReadCancelledError, open_installation
+
+
+class MapTiles:
+    def __init__(self, paks, key_file, maps, *, engine='5.7', build=None, exe=None, capacity=64, retry_delay=1.0):
+        self.options = dict(engine=engine, usmap=None, build=build, exe=exe, cache_bytes=4 << 20)
+        self.paks, self.key_file, self.maps = paks, key_file, dict(maps)
+        self.requests = queue.PriorityQueue(capacity)
+        self.results = queue.Queue(capacity)
+        self.sequence = itertools.count()
+        self.generation = 0
+        self.fallback = {}
+        self.errors = self.reads = self.cancelled = 0
+        self.retry_delay = retry_delay
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def want(self, map_name, z, x, y, *, prefetch=False):
+        try:
+            self.requests.put_nowait((int(prefetch), next(self.sequence), self.generation, (map_name, z, x, y)))
+            return True
+        except queue.Full:
+            return False
+
+    def set_view(self, visible, prefetch=()):
+        self.generation += 1
+        while True:
+            try:
+                self.requests.get_nowait()
+            except queue.Empty:
+                break
+        while True:
+            try:
+                self.results.get_nowait()
+            except queue.Empty:
+                break
+        accepted = sum(self.want(*tile) for tile in visible)
+        accepted += sum(self.want(*tile, prefetch=True) for tile in prefetch)
+        return accepted
+
+    def drain(self, upload, budget):
+        for _ in range(budget):
+            try:
+                generation, key, region = self.results.get_nowait()
+            except queue.Empty:
+                break
+            if generation == self.generation:
+                upload(key, region)
+
+    def close(self):
+        self.stopped.set()
+        self.generation += 1
+        self.thread.join()
+
+    def _run(self):
+        assets = None
+        textures = {}
+        next_poll = 0.0
+        retry = None
+        try:
+            while not self.stopped.is_set():
+                if assets is None:
+                    try:
+                        assets = open_installation(self.paks, aes_key=AesKey.from_file(self.key_file), **self.options)
+                        textures = {}
+                        next_poll = time.monotonic() + 10.0
+                    except Exception:
+                        self.errors += 1
+                        self.stopped.wait(self.retry_delay)
+                        continue
+                if time.monotonic() >= next_poll:
+                    next_poll = time.monotonic() + 10.0
+                    if assets.is_stale():
+                        assets.close()
+                        assets = None
+                        continue
+                if retry is not None:
+                    request, retry = retry, None
+                else:
+                    try:
+                        request = self.requests.get(timeout=0.05)
+                    except queue.Empty:
+                        continue
+                _, _, generation, tile = request
+                if generation != self.generation:
+                    self.cancelled += 1
+                    continue
+                map_name, z, x, y = tile
+                try:
+                    if map_name not in textures:
+                        textures[map_name] = assets.texture(self.maps[map_name])
+                        if (virtual := textures[map_name].info.virtual) is not None:
+                            self.fallback[map_name] = virtual.fallback[0]
+                    region = textures[map_name].read_region(5 - z, 512 * x, 512 * y, 512, 512,
+                                                          cancel=lambda: generation != self.generation or self.stopped.is_set())
+                    self.reads += 1
+                    key = (assets.identity, map_name, z, x, y, 'rgba8')
+                    while generation == self.generation and not self.stopped.is_set():
+                        try:
+                            self.results.put((generation, key, region), timeout=0.05)
+                            break
+                        except queue.Full:
+                            pass
+                except ReadCancelledError:
+                    self.cancelled += 1
+                except CorruptAssetError:
+                    self.errors += 1
+                    if assets.is_stale():  # a container changed: reopen, then read this tile again
+                        assets.close()
+                        assets = None
+                        retry = request
+                        self.stopped.wait(self.retry_delay)
+                except Exception:
+                    self.errors += 1
+        finally:
+            if assets is not None:
+                assets.close()
+```
+
+在消费者关闭时调用 `close()`。示例在工作线程上每 10 秒轮询一次变更，打开失败后延迟重试，调度、缓存淘汰和状态展示则留给应用程序处理。`drain()` 按每帧数量限制上传量；请根据渲染器的开销选择其 budget。
+
+子进程是工作线程的另一种放置方式：在该子进程中打开安装实例，并通过管道传递请求和像素结果。`Installation` 和 `Texture` 无法被 pickle。经测量，子进程方案使渲染影响保持在基线附近；线程方案配合原生 BC1 解码器也可工作。工作负载与耗时见 Notes。这些都是消费者模式，而非 nylib 提供的调度器。
 
 <!-- dt:section id="exports-and-properties-0" hash="2d5ea55f2eec" -->
 ## 导出与属性
@@ -310,17 +475,17 @@ if isinstance(export.native, InstanceData):
 - 除了上文 Exports 和 properties 部分提到的上百种内置布局之外，遇到的其他每个结构体名称都会通过 `.usmap` 映射来读取，方式与任何反射结构体相同——其中包括几个看起来像引擎类型的名称（例如 `BodyInstance`、`ScalarParameterValue`、`VectorParameterValue`、`TextureParameterValue`），它们唯一的原生实现其实属于另一款 UE 游戏；对本游戏而言，这些名称只是普通的无版本数据，具体如何读取由映射自身的记录决定。
 - 完全无法读取的结构体名称会抛出 `UnsupportedAssetError`，其中 `feature='native struct <name>'`，`struct_name` 设为该名称，`position` 为其字节开始处。这些情况分为两类：一类是 29 个独立于引擎、不在内置集合中、且在实测安装中从未出现过的原生结构体——`ColorMaterialInput`、`CompressedRichCurve`、`ExpressionInput`、`ScalarMaterialInput`、`VectorMaterialInput`、`Vector2MaterialInput`、`MaterialAttributesInput`、`SkeletalMeshSamplingRegionBuiltData`、`PannerDetails`、`LevelSequenceObjectReferenceMap`、`MaterialLayersFunctionsTree`、`MidiEvent`、`RawAnimSequenceTrack`、`SectionEvaluationDataTree`、`Transform3f`、`TypedParameter`、`UniqueNetIdRepl`、`ClothLODDataCommon`、`ClothLODData`、`ClothTetherData`、`AnimationAttributeIdentifier`、`AttributeCurve`、`PCGPoint`、`CacheEventTrack`、`DataCacheDuplicatedObjectData`、`EdGraphPinType`、`ControlRigOverrideContainer`、`UInt32Property`、`ZeroSizeProperty`——另一类是 74 个其唯一已知布局是为完全不同的另一款游戏编写的原生结构体（例如 `FixedPoint`、`GameplayEffectFloatMapping`、`NiagaraUserParameterModifier`）。无论是哪一类，读取时都会直接抛出异常，而不会去猜测一个本游戏数据未必遵循的布局。
 
-<!-- dt:section id="threads-and-cancellation-0" hash="ef730b146b80" -->
+<!-- dt:section id="threads-and-cancellation-0" hash="c10b09cd7abd" -->
 ## 线程与取消
 
-- 任意数量的线程可以同时调用 `Installation`、`Exports` 和 `Texture` 的方法；容器块读取和共享块缓存使用短时锁。松散文件索引的加载有自己的锁，并发布一个不可变的索引；其他调用者等待该索引。记录和 `AesKey` 都是不可变的。
-- 在文件 I/O、AES 解密和 Oodle 解压期间会释放 GIL；在解析以及 BC1、DXT5 和 BC7 解码期间持有 GIL，这些解码是纯 Python 实现的。
-- `close()` 会等待其他线程上正在进行的读取完成，但不包括调用它的线程自身发起的那一次读取；一旦它返回，且没有自身发起的读取仍在进行，该安装就不再持有任何文件句柄、锁对象或缓存。
-- `Installation`、`Exports`、`Texture`、`AesKey` 和 `Usmap` 拒绝 pickle 以及 `copy`/`deepcopy`；记录、值（包括 `StructValue` 和 `MapValue`）以及错误类可以 pickle 并完成 `deepcopy` 往返。`Usmap` 可以被任意数量的线程和安装共享，包括并发的 `check()` 调用；`load_usmap()` 没有 `cancel=` 参数。
-- `exports()`、`read()`、`raw()` 和 `resolve()` 上的 `cancel=` 会在操作涉及的每个压缩块之前检查；在列出包的导出时，每隔几千个导出映射条目检查一次；在解码属性或表行时，每隔几千个已解码值检查一次。唯一的例外是 cooked 头部本身在最后一个块之后的解析：它没有检查点，且耗时随头部大小线性增长。在一次实测安装中，此处的最坏取消延迟约为：主映射的 `exports()` 约 0.2 s，整个安装中最大的 cooked 头部约 0.45-0.48 s。
-- `read_file()` 会在任何读取之前、每个 `.pak` 的索引读取之前、等待另一个调用加载索引期间约每 50 ms、以及每个压缩块或存储片段之前检查取消。取消会抛出 `ReadCancelledError`，且不返回任何字节。四个松散文件方法在关闭后会抛出 `InstallationClosedError`；正在进行的读取会在其下一个检查点发现关闭。`close()` 会释放索引、保留的密钥和解密器；任何一次调用结束后都不会残留 `.pak` 句柄。返回的文件、本地化和实例记录的生命周期都长于该安装。
+- 任意数量的线程可以同时调用 `Installation`、`Exports` 和 `Texture` 的方法；容器分区按偏移量读取，读取时不持有容器锁；共享块缓存使用短时锁。松散文件索引的加载有自己的锁，并发布一个不可变索引；其他调用方会等待该索引。记录与 `AesKey` 均为不可变对象。
+- 当随附的 DLL 被加载时，文件 I/O、AES 解密、Oodle 解压以及原生 BC1 解码期间会释放 GIL。解析、DXT5 和 BC7 解码期间持有 GIL；BC1 在使用纯 Python 回退实现时也持有 GIL。原生 BC1 的参数检查和输出内存分配仍持有 GIL。`is_stale()` 可以与读取和关闭并发运行；若某次检查已越过其关闭检查点，则正常完成。
+- `close()` 会等待其他线程中正在进行的读取，但不等待由它自己所在线程发起的读取；一旦它返回，且自身没有进行中的读取，该 installation 便不再持有任何文件句柄、锁对象或缓存。
+- `Installation`、`Exports`、`Texture`、`AesKey` 和 `Usmap` 拒绝 pickle 以及 `copy`/`deepcopy`；记录、值对象（包括 `StructValue` 和 `MapValue`）以及错误类可以 pickle，并可经 `deepcopy` 往返。`Usmap` 可被任意数量的线程和 installation 共享，包括并发的 `check()` 调用；`load_usmap()` 没有 `cancel=` 参数。
+- `exports()`、`read()`、`raw()` 和 `resolve()` 上的 `cancel=` 会在操作涉及的每个压缩块之前检查，在列出包的导出时每隔数千个导出映射条目检查一次，在解码属性或表行时每隔数千个已解码值检查一次。唯一的空缺是 cooked 头部本身在最后一个块之后的解析：它没有检查点，且耗时随头部大小线性增长。在一次实测的安装中，该处的最坏取消延迟约为：主 map 的 `exports()` 约 0.2 秒，整个安装中最大的 cooked 头部约 0.45–0.48 秒。
+- `read_file()` 会在任何读取之前、每个 `.pak` 的索引读取之前、等待另一调用加载索引时约每 50 毫秒，以及每个压缩块或存储分片之前检查取消。取消会抛出 `ReadCancelledError` 且不返回任何字节。四个松散文件方法在 close 之后会抛出 `InstallationClosedError`；进行中的读取会在其下一个检查点察觉关闭。`close()` 释放索引、保留的密钥和解密器；调用结束后不会残留任何 `.pak` 句柄。返回的文件、本地化及实例记录的生命周期长于 installation。
 
-<!-- dt:section id="errors-0" hash="0ffb0b9d733c" -->
+<!-- dt:section id="errors-0" hash="6f8b021f64c1" -->
 ## 错误
 
 ```text
@@ -347,12 +512,14 @@ UeError
                                       hold (also a KeyError); .class_name, .property_index, .property_name
 ```
 
-- 错误的参数类型抛出 `TypeError`，错误的值抛出 `ValueError` —— 除 `RegionOutOfBoundsError` 外，绝不会是上述类之一，它同时是 `AssetError` 和 `ValueError`。超出范围的 `Exports` 索引，或传给 `StructValue.at()` 或 `StructValue.state()` 的越界索引，抛出 `IndexError`；传给 `sv[name]` 或 `CurveTable.keys()` 的未知名称抛出 `KeyError`。
-- 每个 `AssetError` 都有 `file` 属性，默认为 `None`：涉及某一路径的散装文件失败会将其设为该路径，本地化解析器失败则使用提供的 `file=`。这些失败不带 mapping-change 或 custom-serialization 归因。`Locres.entry()` 对缺失的 namespace/key 组合抛出 `KeyError`。
-- `AmbiguousNameError`（从 `nylib.ue` 重新导出，不在 `AssetError` 之下）在包名或对象路径的导出名匹配多个 Texture2D 导出时由 `texture()` 抛出，在名称匹配多个导出时由 `read()`、`raw()` 和 `Exports.find()` 抛出；它不是 `AssetError`。
-- `AbsentPropertyError` 同时也是 `KeyError`，但覆写了 `__str__`，因此尽管 `KeyError` 会加引号，`str(err)` 仍是纯文本消息；`StructValue.get()` 和 `in` 将其视为缺失，与真正的 `KeyError` 一样。部分 `Export`（见下文）携带的 `problem` 绝不是 `KeyError`，因此 `get()` 绝不会静默地把未读取的属性变成默认值。
-- 在读取单个导出的属性时发生的失败——从属性块、对象尾部、表格行或原生结构内部抛出的 `InvalidMappingError` 或 `UnsupportedAssetError`——会携带 `property_path`：从导出的类到失败处的各步骤，例如 `WDWeaponStatsData#1.WDWeaponStats#36`，数组索引写作 `[3]`，映射的键或值写作 `[key 0]` / `[value 0]`，表格行写作 `[row 2]`。`class_name`、`property_index`、`property_name` 和 `property_type` 描述最后一步；`position` 是失败读取开始的位置；`struct_name` 在涉及原生结构时命名该结构；`row` 在失败位于某个表格行内时命名该行。消息本身仍然绝不重复属性名或行名——这些只存在于属性中。
-- 消息为一行英文；路径使用基本名，但带引号的包内路径和对象路径除外。消息绝不包含密钥材料、解密/解码后的字节、本地化文本、映射文件内容或属性名。`load_usmap()` 将映射/元数据失败报告为 `InvalidMappingError`；缺失元数据文件的 `reason='meta.json not found'`，无效的 UTF-8/JSON 为 `'meta.json not JSON'`，错误的转储架构为 `'meta.json schema'`。`with_changes()` 的拒绝带有 `reason='change does not apply'`；如需名称，请检查属性和变更记录。报告摘要和需求细节同样省略属性名。
+- 容器身份不匹配时会抛出 `CorruptAssetError`，其 `detail='has changed since the installation was opened'`，消息为 `container file {f} has changed since the installation was opened`。对于分区，`container` 是 `.utoc` 的基本文件名；对于 pak，则是 `.pak` 的基本文件名；`read_file()` 还会将 `file` 设为包内路径。`errno` 和 `winerror` 均为 `None`。请先检查 `is_stale()`，然后按照“长期持有的安装”（Long-lived installations）中的说明关闭并重新打开。
+- 没有映射时，类型化读取会抛出 `InvalidMappingError(reason='no mapping')`，消息以 `needs a .usmap: the installation was opened with usmap=None` 结尾。纹理位置查找失败时，reason 为 `'bad property header'`、`'native start not found'` 或 `'native start ambiguous'`，消息细节分别为 `the property header cannot be read`、`no position fits` 或 `more than one position fits`。这些消息会包含包和导出项的大小；`class_name='Texture2D'`、`usmap=None`，并且不会设置映射变更或自定义序列化的归因。请提供匹配的映射，而不要猜测原生起始位置。
+- 参数类型错误抛出 `TypeError`，参数值错误抛出 `ValueError`，不会抛出上述任何类，但 `RegionOutOfBoundsError` 例外，它同时是 `AssetError` 和 `ValueError`。`Exports` 索引越界，或 `StructValue.at()`、`StructValue.state()` 的索引越界，会抛出 `IndexError`；`sv[name]` 或 `CurveTable.keys()` 的名称未知，会抛出 `KeyError`。
+- 每个 `AssetError` 都有 `file` 属性，默认为 `None`：涉及单个路径的松散文件失败会将其设为该路径，本地化解析器失败则使用传入的 `file=`。这些失败不包含映射变更或自定义序列化的归因。`Locres.entry()` 在命名空间/键对缺失时抛出 `KeyError`。
+- `AmbiguousNameError`（从 `nylib.ue` 重新导出，不属于 `AssetError`）在以下情况抛出：`texture()` 的包名或对象路径的导出名匹配到多个 Texture2D 导出项；`read()`、`raw()` 和 `Exports.find()` 的名称匹配到多个导出项。它不是 `AssetError`。
+- `AbsentPropertyError` 同时也是 `KeyError`，但它覆写了 `__str__`，因此 `str(err)` 只返回纯消息，不带 `KeyError` 的引号。`StructValue.get()` 和 `in` 会将其视为缺失，与真正的 `KeyError` 一致。部分 `Export`（见下文）携带的 `problem` 永远不是 `KeyError`，因此 `get()` 绝不会悄悄将未读取的属性替换为默认值。
+- 在读取单个导出项的属性时发生的失败——即在属性块、对象尾部、表格行或原生结构体内部抛出的 `InvalidMappingError` 或 `UnsupportedAssetError`——会携带 `property_path`：从导出项的类到失败位置的各步路径，例如 `WDWeaponStatsData#1.WDWeaponStats#36`，数组索引写作 `[3]`，映射的键或值写作 `[key 0]` / `[value 0]`，表格行写作 `[row 2]`。`class_name`、`property_index`、`property_name` 和 `property_type` 描述的是最后一步；`position` 是失败读取开始的位置；`struct_name` 在涉及原生结构体时给出其名称；`row` 在失败位于某一表格行内时给出该行的名称。消息本身仍然永远不会重复属性名或行名——这些信息只保存在属性中。
+- 消息为一行英文；路径使用基本文件名，但带引号的包内路径和对象路径除外。消息绝不包含密钥材料、解密或解码后的字节、本地化文本、映射文件内容或属性名。`load_usmap()` 会将映射/元数据失败报告为 `InvalidMappingError`：缺少元数据文件时 `reason='meta.json not found'`，UTF-8 或 JSON 无效时为 `'meta.json not JSON'`，转储模式错误时为 `'meta.json schema'`。`with_changes()` 的拒绝情况 `reason='change does not apply'`；名称需检查属性和变更记录。报告摘要和需求细节同样省略属性名。
 
 <!-- dt:section id="supported-profile-0" hash="9338388ceb02" -->
 ## 支持的范围
@@ -369,23 +536,27 @@ UeError
 | 虚拟纹理区域读取 | `RawGPU` 编解码器，单层，`PF_DXT1`，非旧版图块布局 | `UnsupportedAssetError` / `UnsupportedPixelFormatError`；`info.readable` 为 False 并说明原因。其他任何 VT 层格式（包括 `PF_DXT5` 和 `PF_BC7`）仍报告 `has no decoder in this nylib version`，尽管这些格式在普通纹理上可以解码 |
 | 普通纹理区域读取 | `PF_B8G8R8A8`、`PF_DXT1`、`PF_DXT5`、`PF_BC7`；内联 mip、默认 `.ubulk` 或可选 `.uptnl`（烘焙索引 0，位于任何已挂载的容器中） | 其他像素格式：`UnsupportedPixelFormatError`；没有序列化 mip、mip 数据未与纹理一起序列化、压缩或内存映射的批量数据（`.m.ubulk`）、其他烘焙索引、位于多个容器中的可选块、可选数据同时标记为内联，或任何其他位置：`UnsupportedAssetError`；`info.readable` 为 False 并说明原因。未挂载的可选块会使 `info.readable=True` 保持不变，但该 mip 的读取会抛出 `MissingAssetError` |
 
-<!-- dt:section id="notes-0" hash="a686545b52ce" -->
+<!-- dt:section id="notes-0" hash="051accc5e44d" -->
 ## 说明
 
-- 在一台与其他工作同时运行的共享机器上测量，Python 3.12/3.14：产品首次加载 16 个 `.pak` 文件、5,976 个条目的松散文件索引耗时约 60-94 毫秒，保留 6.1-6.3 MiB（峰值 6.1-6.4 MiB）；之后的索引查找耗时约 5 微秒。松散文件读取的 p50 约 0.53-0.54 毫秒，p95 约 0.63-0.68 毫秒；读取全部 219 个加密条目耗时约 24 毫秒。早前的范围探测在每个 Game `.locres` 的 2 个块中读取了 70,000 字节，并在 2 个存储分片中读取了 70,000 字节的影片尾部。这些是近似观测值，不包含冷缓存声明，也不保证吞吐量。
-- 在该共享机器上，产品解析 Game `en`（525,364 字节，5,948 个条目，169 个命名空间）耗时约 13-15 毫秒，保留约 2.1 MiB；最大的 `.locres`（6,892,728 字节）耗时约 145-183 毫秒，保留 19.1-19.6 MiB。早前对两个 Game 语言区域的原型探测分别耗时约 12-14 毫秒，各保留 2.2 MiB。解析器的内存和时间随字符串和条目增长，解析过程没有取消检查点。
-- 在同一共享机器上，读取某主地图的 43,117 个导出项，不含实例时耗时约 9.0-10.6 秒，含实例时耗时 10.1-13.1 秒；一个 23,340 个实例的导出项耗时约 12-14 毫秒，峰值跟踪分配为 15.5-15.7 MiB。早前的整个安装目录探测发现约 8% 的额外尾部工作；这与该地图的工作负载不同。实测取消延迟在实例解析期间约为 1.7-2.1 毫秒，在存储的松散文件读取期间约为 0.10-0.14 毫秒。
-- `read_file()` 保留返回的字节以及工作缓冲区：实测跟踪分配在 64 MiB 存储范围上峰值接近 128 MiB，在 33.8 MiB 的 Oodle 文件上为 67.5 MiB，在这些输入上处于 `2 * returned_bytes + 4 MiB` 之内。使用较小的范围可降低峰值内存。
-- 不进行重采样：mip 的像素以该 mip 自身的尺寸返回；缩放由调用方负责。
-- BC1、DXT5 和 BC7 解码是纯 Python 实现：它们持有 GIL，因此大范围读取在解码期间受单核限制。在一台机器上的整 mip 原型测量显示，DXT1 约为 25-30 Mpx/s，DXT5 约为 2.6-2.9 Mpx/s，BC7 约为 0.6-1.0 Mpx/s，具体取决于块。按这些速率，整个 4096x4096 的 BC7 mip 需要约 17-27 秒；交互式读取请使用有界区域。
-- 在一台与其他工作同时运行的机器上测量：普通 512x512 区域读取的 p50 耗时，DXT1 约为 27 毫秒，DXT5 为 97 毫秒，BC7 为 239 毫秒（分别为 16、32 和 32 个压缩块）。2x2 采样在 1 个块上的 p50 耗时约为 0.07-0.13 毫秒，其中包括可选 `.uptnl` mip 约 0.09 毫秒。这些格式的实测取消延迟分别约为 13 毫秒、24 毫秒和 60 毫秒；轮询发生在压缩块之间，因此延迟包括两次轮询之间的解码工作。这些数字不能证明冷缓存性能。
-- 在一台被测机器上，对安装目录首次调用 `texture()`、`exports()`、`read()`、`raw()` 或 `resolve()` 会加载一次全局 ScriptObjects 表（在被测游戏上约 4.66 MB），总计约 0.42 秒，其中几乎全部是该加载耗时；之后的调用会复用该表。
-- 与 CUE4Parse 相比：DXT1 的三色 index-3 纹素在此处为不透明黑色 `(0, 0, 0, 255)`，而 CUE4Parse 给出 alpha 0。DXT5 完全遵循其 BCDecoder 运算，包括 alpha 插值舍入和强制四色块。BC7 遵循 BPTC 规范，与 CUE4Parse 的 AssetRipper 路径一致；其 Windows Detex 路径在模式 6 中某通道可能相差 1。不在 4 像素网格上的 mip 会被解码为填充块并裁剪到其声明尺寸；CUE4Parse 的 BC1/BC3 解码器无法解码这些尺寸，其 BC7 路径则返回填充后的图像。
-- 近似值，单机：`open_installation` 耗时约 0.22 秒（其中约 0.15 秒用于解析一个 `.usmap`；一个更大的 3.3 MB 映射的原型解析耗时约 0.26 秒，保留约 26 MiB）；无论 `cache_bytes` 为 0、默认的 4 MiB 还是 16 MiB，区域读取的 p50 都约为 30 毫秒——受解码限制，因此更大的缓存主要对同一瓦片的重复读取有帮助。
-- 在一台与其他工作同时运行的机器上测量，Python 3.12/3.14：`load_usmap()` 在三个映射文件上耗时约 0.15-0.30 秒，工作集峰值增长约 17-31 MiB。检查 100 个需求在没有回退时耗时约 2.6-4.1 毫秒，带前缀回退及其应用/复查过程（6 个提案）时耗时 6.4-7.5 毫秒。应用 3,167 个合成重命名耗时约 35-47 毫秒，另加摘要计算约 7-12 毫秒。使用已加载的映射打开耗时约 68-94 毫秒，而通过其路径打开耗时 387-437 毫秒；映射变更归因在 1,598 次读取中耗时约 5-6 微秒 p50。这些是近似观测值，并非冷缓存测量，也不保证吞吐量。
-- 近似值，单机，普通纹理的地形瓦片（`PF_B8G8R8A8`，`.ubulk` mip）：2x2 采样在 1 个压缩块上耗时约 0.1 毫秒；mip 0 读取的 p50 约为 2.5 毫秒，`cancel=` 每个压缩块轮询一次，在被测瓦片上约每 0.3 毫秒一次——它本身不会增加那么多延迟。`list_packages()` 的首次调用（同时会了解插件挂载根）耗时 4.25-5.0 秒。
-- 近似值，单机，导出项与类型化读取：主地图的 cooked 头部的 `exports()` 耗时约 0.28-0.30 秒，保留约 35-38 MiB；小型导出项的 `read()` p50 远低于 1 毫秒；通过 `Exports` 句柄的 64 字节 `raw()` 读取了 1 个压缩块（当范围跨越块边界时为 2 个）；通过 `assets.raw()` 则读取了 3 个，因为该调用还会读取目标的 cooked 头部。在安装包的每六十分之一采样（1,787 个包，21,141 个导出项）中，遍历本身耗时数秒，该采样中解码值最多的导出项（394,305 个，一个 `AudioImpulseResponse`）耗时约 0.13 秒读取完成，相对基线的工作集峰值增长约 17 MiB。在主地图的 `exports()` 期间取消的 p50 延迟约为 93 毫秒（最坏情况 198 毫秒，来自上文 Threads and cancellation 中提到的间隙）；解码中途取消约为 1 毫秒。
-- 单次 `read()` 的限制：cooked 头部或导出项数据超过 64 MiB 会抛出 `CorruptAssetError`；超过 16 层结构嵌套的值会抛出 `InvalidMappingError`，原因为 `struct nesting`，计入容器时超过 64 层的会抛出 `value nesting`；解码值和已构建槽位超过导出项字节数加 65,536 的读取会抛出 `decode budget`。在一个被测安装中，没有导出项达到后两个限制，最大的读取超出 65,536 的部分每字节使用 0.375 单位。
-- 内存随解码值增长，解码值是 Python 对象：主要由小型原生结构体组成的导出项，在结果存活期间每个输入字节最多占用约 190 字节，因此 64 MiB 的 `Color` 值导出项将占用约 12 GiB。请逐个读取大型导出项，或使用 `raw()`。
-- `.usmap` 是受信任的输入：对于手工构造的映射，两次读取的值之间的 `==` 以及 `to_python()` 可能在几个字节的数据上耗时数秒，因为它们会展开一次读取共享的零掩码结构体。
-- 仅限 Windows x64（AES 使用 BCrypt；exe 的 PE 以及 `.ucas`/`.utoc` 布局）。请将 AES 密钥文件及其内容视为机密：绝不记录、打印或提交，通过路径传递。
+- 在一台共享机器上测量，Python 3.14/3.12，三次运行取最佳：热缓存的 `is_stale()` p95 约为 2.7/3.0 ms。以先前版本作为同会话基线（使用相同的原生解码器），共享句柄的定位读取得到的区域 p50 比值为 1.008/1.016，四线程吞吐比值为 1.059/1.020。这些是热缓存观察结果，不是冷缓存测量，也不是保证。
+- 按需基准以 120 FPS 驱动渲染循环，每帧 1 ms 的 Python 工作量，至多四次计数上传，3x3 可见视图加 16 个预取瓦片，每 2 秒平移一次。在 Python 3.14/3.12 上，三次取最佳的额外 p95 帧时间：工作线程约为 0.12/0.50 ms，线程切换间隔为 1 ms 时约为 0.11/0.55 ms，子进程约为 -0.02/-0.01 ms。接近零的负差值属于测量噪声。在所有运行和放置方式中，首个视图（包括打开）在 3.14 上耗时约 0.86-0.94 s，在 3.12 上为 1.20-1.36 s。上传按字节计数，并未实际使用 GPU，因此这并不能说明应用的渲染成本。纯 Python 对比中，每个区域的 p50 耗时约 31-32 ms，约 31 个区域/s。
+- 在同一构建上，产品的映射/无映射对比中，无映射时额外的 `texture()` 耗时在 Python 3.12/3.14 上约为 p50 0.18-0.19 ms、p95 3.0-3.2 ms、最坏情况 0.99-1.00 s。早先的定位器研究中，对 8 MB 内联导出的完整扫描达到 2.0 s。这些是不同的测量；两者都不能确立其他构建的延迟上界。
+
+- 在一台有其他工作运行的共享机器上测量，Python 3.12/3.14：产品首次加载 16 个 `.pak` 文件、5,976 个条目的散文件索引耗时约 60-94 ms，保留 6.1-6.3 MiB（峰值 6.1-6.4 MiB）；之后的索引查找约 5 微秒。散文件读取的 p50 约 0.53-0.54 ms，p95 为 0.63-0.68 ms；读取全部 219 个加密条目约 24 ms。早先的范围探测在每个 Game `.locres` 中读取 2 个块共 70,000 字节，以及在 2 个存储片段中读取 70,000 字节的影片尾部。这些是近似观察，不包含冷缓存声明，也不保证吞吐量。
+- 在同一共享机器上，产品解析 Game `en`（525,364 字节，5,948 个条目，169 个命名空间）耗时约 13-15 ms，保留约 2.1 MiB；最大的 `.locres`（6,892,728 字节）耗时约 145-183 ms，保留 19.1-19.6 MiB。早先对两个 Game 语言区域的原型探测耗时约 12-14 ms，每个保留 2.2 MiB。解析器的内存和时间随字符串和条目增长；解析过程没有取消检查点。
+- 在同一共享机器上，读取某主地图的 43,117 个导出：不含实例时约 9.0-10.6 s，含实例时约 10.1-13.1 s；一个包含 23,340 个实例的导出耗时约 12-14 ms，追踪分配峰值 15.5-15.7 MiB。早先对整个安装的探测发现约 8% 额外尾部工作；这与该地图的工作负载不同。测得实例解析期间的取消延迟约为 1.7-2.1 ms，存储散文件读取期间约为 0.10-0.14 ms。
+- `read_file()` 保留返回的字节以及工作缓冲区：测得对 64 MiB 存储范围的追踪分配峰值接近 128 MiB，对 33.8 MiB 的 Oodle 文件为 67.5 MiB，在这些输入上处于 `2 * returned_bytes + 4 MiB` 之内。使用更小的范围可降低峰值内存。
+- 不做重采样：mip 的像素以该 mip 自身的尺寸返回；缩放由调用方负责。
+- BC1 在首次解码时自动选择随附的原生解码器。若加载抛出 `BcnError`，会输出一条 WARNING：`BC1 decode falls back to pure Python: ...`，其中说明原因，此后进程使用纯 Python，像素结果相同。`nylib.utils.bcn.load()` 直接检查原生是否可用。原生速度和 GIL 行为的测量见 [nylib.utils.bcn](../utils/bcn.md#threads-and-the-gil)。DXT5 和 BC7 未改变，并持有 GIL；在一台机器上对整个 mip 的原型测量中，DXT5 约为 2.6-2.9 Mpx/s，BC7 约为 0.6-1.0 Mpx/s，取决于块内容。在这些速率下，整个 4096x4096 BC7 mip 需要约 17-27 s；交互式读取请使用有界区域。
+- 早先使用纯 Python BC1 解码器、在一台有其他工作运行的机器上的测量：普通的 512x512 区域读取，DXT1 约为 27 ms p50，DXT5 为 97 ms，BC7 为 239 ms（分别为 16、32 和 32 个压缩块）。2x2 采样在 1 个块上约为 0.07-0.13 ms p50，其中包含可选 `.uptnl` mip 约 0.09 ms。这些格式的测得取消延迟分别约为 13 ms、24 ms 和 60 ms；轮询发生在压缩块之间，因此延迟包含两次轮询之间的解码工作。这些数字不能确立冷缓存性能。
+- 安装上首次调用 `texture()`、`exports()`、`read()`、`raw()` 或 `resolve()` 会加载一次全局 ScriptObjects 表（在被测游戏上约 4.66 MB），在一台被测机器上总计约 0.42 s，几乎全部是该加载开销；之后的调用复用该表。
+- 与 CUE4Parse 相比：DXT1 的三色 index-3 纹素在此处为不透明黑色 `(0, 0, 0, 255)`，而 CUE4Parse 给出 alpha 0。DXT5 严格遵循其 BCDecoder 算术，包括 alpha 插值舍入和强制四色块。BC7 遵循 BPTC 规范，与 CUE4Parse 的 AssetRipper 路径一致；其 Windows Detex 路径在模式 6 下某通道可能相差 1。不在 4 像素网格上的 mip 解码为填充块并裁剪到其声明尺寸；CUE4Parse 的 BC1/BC3 解码器无法解码这些尺寸，其 BC7 路径则返回填充后的图像。
+- 近似值，一台机器：`open_installation` 耗时约 0.22 s（其中约 0.15 s 用于解析一个 `.usmap`；较大的 3.3 MB 映射的原型解析耗时约 0.26 s，保留约 26 MiB）；早先的纯 Python BC1 区域读取，无论 `cache_bytes` 为 0、默认 4 MiB 还是 16 MiB，p50 都约为 30 ms。使用原生 BC1 时，在 Python 3.12/3.14 上，默认 4 MiB 下后续 16 区域的地图工作负载 p50 约为 1.3-1.6 ms。较大的缓存有助于对相同块的重复读取；这些运行并未比较不同缓存大小下的原生解码。
+- 在一台有其他工作运行的机器上测量，Python 3.12/3.14：`load_usmap()` 在三个映射文件上耗时约 0.15-0.30 s，工作集峰值增长约 17-31 MiB。检查 100 个需求在无回退时约 2.6-4.1 ms，有前缀回退及其应用/重新检查过程（6 个提案）时约 6.4-7.5 ms。应用 3,167 个合成重命名约 35-47 ms，另加摘要约 7-12 ms。使用已加载的映射打开耗时约 68-94 ms，而使用其路径时为 387-437 ms；映射变更归因在 1,598 次读取中约为 p50 5-6 微秒。这些是近似观察，不是冷缓存测量，也不是吞吐量保证。
+- 近似值，一台机器，普通纹理地形瓦片（`PF_B8G8R8A8`，`.ubulk` mip）：2x2 采样在 1 个压缩块上约 0.1 ms；mip 0 读取的 p50 约 2.5 ms，`cancel=` 每个压缩块轮询一次，在被测瓦片上约每 0.3 ms 一次——它本身不增加那么多延迟。`list_packages()` 的首次调用（同时学习插件挂载根）耗时 4.25-5.0 s。
+- 近似值，一台机器，导出与类型化读取：主地图的烹制头部 `exports()` 耗时约 0.28-0.30 s，保留约 35-38 MiB；小导出的 `read()` 远低于 1 ms p50；通过 `Exports` 句柄的 64 字节 `raw()` 读取了 1 个压缩块（当范围跨越块边界时为 2 个）；通过 `assets.raw()` 则读取了 3 个，因为该调用还会读取目标的烹制头部。对安装包的每六十分之一抽样（1,787 个包，21,141 个导出），扫描本身耗时几秒，该样本中解码值最多的导出（394,305 个，一个 `AudioImpulseResponse`）读取耗时约 0.13 s，工作集峰值相对基线增长约 17 MiB。在主地图的 `exports()` 期间取消，p50 延迟约 93 ms（最坏情况 198 ms，来自上文 Threads and cancellation 中提到的间隙）；解码中途取消约 1 ms。
+- 单次 `read()` 的限制：烹制头部或导出数据超过 64 MiB 会抛出 `CorruptAssetError`；嵌套超过 16 层结构的值抛出 `InvalidMappingError`，原因为 `struct nesting`，计入容器时超过 64 层则为 `value nesting`；解码值与已构建槽位超过导出字节数加 65,536 的读取会抛出 `decode budget`。在一个被测安装上，没有导出触及后两者，最大的读取每字节超出 65,536 的部分使用了 0.375 个单位。
+- 内存随解码值增长，而解码值是 Python 对象：主要由小型原生结构组成的导出，在结果存活期间每输入字节最多占用约 190 字节，因此 64 MiB 的 `Color` 值导出将占用约 12 GiB。请逐个读取大型导出，或使用 `raw()`。
+- `.usmap` 是可信输入：对于手工构造的映射，两次读取得到的值之间的 `==` 以及 `to_python()` 在几字节数据上可能耗时数秒，因为它们会展开一次读取共享的零掩码结构。
+- 仅限 Windows x64（AES 使用 BCrypt；exe 的 PE 以及 `.ucas`/`.utoc` 布局）。请将 AES 密钥文件及其内容视为机密：切勿记录、打印或提交，应通过路径传递。

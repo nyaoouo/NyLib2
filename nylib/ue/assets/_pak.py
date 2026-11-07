@@ -10,11 +10,13 @@ from dataclasses import dataclass
 from nylib.utils import oodle
 from nylib.utils.oodle import OodleError
 from ..errors import CorruptAssetError, InvalidKeyError, UnsupportedContainerError
-from ._iostore import _MAX_BLOCK_SIZE, _container_error, _guid_str
+from ._iostore import _MAX_BLOCK_SIZE, _changed_file, _container_error, _guid_str
+from ._winfile import SharedFile
 
 _BAD = re.compile('[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]')
 _LOWER = str.maketrans('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
 _PIECE = 64 << 10
+_UNRECORDED = object()
 _PATH_ERROR = ("path must be a relative path such as 'Wardogs/Content/Localization/Game/en/Game.locres', "
                "without a backslash, a leading /, an empty segment, '.' or '..'")
 
@@ -106,21 +108,26 @@ def align16(n):
 
 
 def read_footer(path):
-    with open(path, 'rb') as f:
-        size = f.seek(0, 2)
-        for length in (221, 222, 225, 262):
-            if size < length:
-                continue
-            f.seek(size - length)
-            b = f.read(length)
-            if struct.unpack_from('<I', b, 17)[0] != 0x5A6F12E1:
-                continue
-            methods = tuple(b[61 + 32 * i:93 + 32 * i].split(b'\0', 1)[0].decode('ascii', 'replace') for i in range(5)) if length == 221 else ()
-            foot = dict(size=size, length=length, version=struct.unpack_from('<i', b, 21)[0], encrypted=bool(b[16]),
-                        guid=_guid_str(b[:16]), methods=methods)
-            if length == 221:
-                foot.update(offset=struct.unpack_from('<q', b, 25)[0], index_size=struct.unpack_from('<q', b, 33)[0], hash=b[41:61])
-            return foot
+    with SharedFile(path) as f:
+        return _read_footer(f)
+
+
+def _read_footer(f):
+    size = f.identity().size
+    for length in (221, 222, 225, 262):
+        if size < length:
+            continue
+        b = f.pread(size - length, length)
+        if len(b) != length:
+            return None
+        if struct.unpack_from('<I', b, 17)[0] != 0x5A6F12E1:
+            continue
+        methods = tuple(b[61 + 32 * i:93 + 32 * i].split(b'\0', 1)[0].decode('ascii', 'replace') for i in range(5)) if length == 221 else ()
+        foot = dict(size=size, length=length, version=struct.unpack_from('<i', b, 21)[0], encrypted=bool(b[16]),
+                    guid=_guid_str(b[:16]), methods=methods)
+        if length == 221:
+            foot.update(offset=struct.unpack_from('<q', b, 25)[0], index_size=struct.unpack_from('<q', b, 33)[0], hash=b[41:61])
+        return foot
     return None
 
 
@@ -165,8 +172,7 @@ def _serialized(r, methods):
 
 def _read(f, offset, n, counters):
     t = time.perf_counter()
-    f.seek(offset)
-    b = f.read(n)
+    b = f.pread(offset, n)
     counters.seconds_io += time.perf_counter() - t
     counters.blocks_read += 1
     counters.bytes_read += len(b)
@@ -195,20 +201,22 @@ def _corrupt(pak, detail, path=None):
     return CorruptAssetError(src + detail, container=pak, file=path, detail=detail)
 
 
-def read_index(path, aes_for, check, counters):
+def read_index(path, aes_for, check, counters, identity=_UNRECORDED):
     pak = os.path.basename(path)
     entry_path = None
     try:
         check()
-        foot = read_footer(path)
-        if foot is None:
-            raise _Bad('not a recognised .pak file')
-        v = foot['version']
-        if foot['length'] != 221 or v not in (11, 12):
-            raise UnsupportedContainerError(f'{pak} is a .pak of version {v}, which this nylib version does not read',
-                                            container=pak, feature=f'pak version {v}')
-        aes = aes_for(foot['guid'], pak) if foot['encrypted'] else None
-        with open(path, 'rb') as f:
+        with SharedFile(path) as f:
+            if identity is not _UNRECORDED and f.identity() != identity:
+                raise _changed_file(pak, pak)
+            foot = _read_footer(f)
+            if foot is None:
+                raise _Bad('not a recognised .pak file')
+            v = foot['version']
+            if foot['length'] != 221 or v not in (11, 12):
+                raise UnsupportedContainerError(f'{pak} is a .pak of version {v}, which this nylib version does not read',
+                                                container=pak, feature=f'pak version {v}')
+            aes = aes_for(foot['guid'], pak) if foot['encrypted'] else None
             prim = _blob(f, foot['offset'], foot['index_size'], foot, aes, counters)
             r = _Reader(prim)
             try:
@@ -298,7 +306,7 @@ def read_index(path, aes_for, check, counters):
         raise _corrupt(pak, str(e), entry_path) from None
 
 
-def read_range(entry, offset, n, aes, check, counters):
+def read_range(entry, offset, n, aes, check, counters, identity=_UNRECORDED):
     info, path, guid, e = entry
     if not n:
         return b''
@@ -307,7 +315,9 @@ def read_range(entry, offset, n, aes, check, counters):
     check.k, check.n = 0, last - first + 1
     out = bytearray(n)
     try:
-        with open(path, 'rb') as f:
+        with SharedFile(path) as f:
+            if identity is not _UNRECORDED and f.identity() != identity:
+                raise _changed_file(info.container, os.path.basename(path), info.path)
             for b in range(first, last + 1):
                 check()
                 lo, hi = max(offset, b * bs), min(offset + n, (b + 1) * bs)

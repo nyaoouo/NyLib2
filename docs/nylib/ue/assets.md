@@ -1,8 +1,8 @@
 # nylib.ue.assets
 
-Read-only reader for a UE 5.7 game's IoStore (`.utoc`/`.ucas`) containers: enumerate packages, including those under plugin mount roots, read `Texture2D` metadata, read typed export properties and cross-package references, and decode bounded regions of virtual-texture BC1 tiles and ordinary `PF_B8G8R8A8`, `PF_DXT1`, `PF_DXT5` and `PF_BC7` textures to RGBA8, including ordinary mips stored as optional bulk data (`.uptnl`). Python, with Windows BCrypt for AES and the bundled Oodle DLL for decompression; no FModel, CUE4Parse or Unreal dependency.
+Read-only reader for a UE 5.7 game's IoStore (`.utoc`/`.ucas`) containers: enumerate packages, including those under plugin mount roots, read `Texture2D` metadata, read typed export properties and cross-package references, and decode bounded regions of virtual-texture BC1 tiles and ordinary `PF_B8G8R8A8`, `PF_DXT1`, `PF_DXT5` and `PF_BC7` textures to RGBA8, including ordinary mips stored as optional bulk data (`.uptnl`). Windows BCrypt handles AES and the bundled Oodle DLL handles decompression. BC1 decodes through `nylib.utils.bcn`'s bundled DLL when it loads, otherwise in pure Python, with identical pixels; no FModel, CUE4Parse or Unreal dependency.
 
-Keywords: IoStore, utoc, ucas, AesKey, open_installation, Installation, Texture, virtual texture, VT, BC1, DXT1, DXT5, BC7, B8G8R8A8, .uptnl, ordinary texture, plugin, read_region, usmap, mapping, zen package, PackageInfo, TextureInfo, Region, ScriptObjects, Oodle, Exports, StructValue, DataTable, CurveTable, native struct, ObjectRef, pak, read_file, FileInfo, locres, locmeta, localization, InstanceData, instanced mesh
+Keywords: is_stale, usmap=None, nylib.utils.bcn, IoStore, utoc, ucas, AesKey, open_installation, Installation, Texture, virtual texture, VT, BC1, DXT1, DXT5, BC7, B8G8R8A8, .uptnl, ordinary texture, plugin, read_region, usmap, mapping, zen package, PackageInfo, TextureInfo, Region, ScriptObjects, Oodle, Exports, StructValue, DataTable, CurveTable, native struct, ObjectRef, pak, read_file, FileInfo, locres, locmeta, localization, InstanceData, instanced mesh
 
 ## Quick start
 
@@ -30,11 +30,35 @@ print(repr(key))
 ```
 
 - `aes_key=` takes an `AesKey`, raw `bytes`/`bytearray` (wrapped with the zero GUID), a list of `AesKey` (one per container GUID), or `None` for an install with no encrypted container. `AesKey` also reads a key file (`AesKey.from_file(path)`) or raw/hex bytes (`AesKey(key_bytes)`); a `str` passed as `aes_key=` is rejected, pointing at `from_hex()` / `from_file()`, so a key is never typed into a log or a repr by accident.
-- `usmap=` is the game's `.usmap` mapping file (v0-v4; compression None, Oodle, or ZStd on Python 3.14+), or a `Usmap` from `load_usmap()`. A path is parsed once, at open; a `Usmap` is reused without reading the mapping file again.
+- `usmap=` is the game's `.usmap` mapping file (v0-v4; compression None, Oodle, or ZStd on Python 3.14+), a `Usmap` from `load_usmap()`, or explicitly `None` for reads [without a mapping](#without-a-mapping). A path is parsed once, at open; a `Usmap` is reused without reading the mapping file again.
 - `build=` pins the exe's PE `TimeDateStamp`: pass the int you verified a `.usmap` against, and a mismatched or missing exe raises `BuildMismatchError`. Pass `None` to skip the check; `Installation.build` still reports the exe found, if any.
 - `exe=` names the game exe whose PE stamp `build=` checks. By default it is the unique `*-Win64-Shipping.exe` in `<paks>/../../Binaries/Win64`; none, or more than one, counts as missing. A game that ships its exe elsewhere needs `exe=`.
 - `cache_bytes=` caps the shared decompressed-block cache; default 4 MiB (approximate measured timings are under Notes).
 - `Installation` is a context manager; `close()` is idempotent and thread-safe, and an unclosed instance that is garbage-collected closes itself and emits a `ResourceWarning`.
+
+## Long-lived installations
+
+Keep an installation open and reuse its `Texture` handles between reads. Call `assets.is_stale()` periodically from a worker, for example every 10 seconds, rather than on every frame. It compares the top-level `.utoc` and `.pak` names and the recorded `.utoc`, partition `.ucas` and `.pak` identities: volume serial, file index, size and last-write time. A directory-listing failure or a file that can no longer be identified counts as a change; an already unidentified `.pak` that remains unidentified does not.
+
+The check reads no container data, keeps no handle, takes no installation lock and adds nothing to `stats()`. It reports the present state: renaming a file back unchanged can make it return False again. It does not cover the exe, mapping or key file, deeper directories, or changes preserving all four identity fields. Mapping and key data are read into memory once. After close it raises `InstallationClosedError`.
+
+Container files open with `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE`. An updater can rename, delete or write them while the installation is open. Measured on Windows 11 build 26200 with NTFS: rename away and back, deletion, recreation under a deleted name and an in-place append succeeded; `os.replace()` onto the name of a held-open file failed with `winerror=5`. Delete and replacement behavior depends on Windows and the filesystem; sharing does not guarantee every updater operation succeeds.
+
+An already open handle keeps reading the file it opened after a rename or deletion. In-place writes are visible to later reads, so an installation is not a snapshot. A data handle opened later is compared with the identity recorded at installation open; a mismatch raises `CorruptAssetError` with `container file {f} has changed since the installation was opened`. A missing or unreadable file keeps its existing error instead.
+
+On a change, stop submitting reads, close the installation, discard its `Texture` and `Exports` handles, reopen and request the visible tiles again. For `CorruptAssetError`, show a status and check `is_stale()` before treating it as an update; other corruption needs investigation. Reopening during an update can raise a transient `AssetError`: retry after a delay. Old identity-keyed tile results must not be displayed as tiles of the new installation.
+
+Compatibility: container renames and deletes can now succeed while an installation is open. OS failures retain their container-file messages but expose Win32 `errno` and `winerror`; a locked byte range, for example, gives `errno=13`, `winerror=33`, where the earlier C-runtime read gave `winerror=None`. The changed-file error is a consistency check, with both attributes `None`.
+
+## Without a mapping
+
+Pass `usmap=None` explicitly when a matching mapping is unavailable, for example after an update. The keyword remains required; omitting it raises Python's `TypeError`. `assets.usmap` is then `None`, including after close, and the installation identity differs from an open with a mapping.
+
+`texture()` and `read_region()` work without reflected properties, as do package lookup and listing, `exports()` and its header inspection, `find()`, `resolve()`, `raw()`, `Exports.raw()` and all loose-file methods. `Texture.mapping_changes` is `()`. Typed `read()` and `Exports.read()` raise `InvalidMappingError(reason='no mapping')` even with `partial=True` or `instances=True`, after argument and closed checks but before cancellation or I/O.
+
+Without a mapping, `texture()` reads the unversioned property header and accepts a native-data start only when it is the unique candidate across the remaining export whose native checks and platform-data skip chain fit through the export's end. It then parses the native data normally. An unreadable property header, no candidate or several candidates raises `InvalidMappingError`; it never chooses the first match. A mapping supplied by the caller still uses the mapped property walk, with no automatic fallback.
+
+On one measured build, all 16,208 Texture2D calls agreed with the mapping path: 16,094 ordinary and 104 virtual textures, 8 `UnsupportedAssetError` and 2 `CorruptAssetError` outcomes, with no differences. The 161 sampled regions, including four world maps, were byte-identical. This is evidence for that build, not a guarantee after another update. Keep the returned `Texture`: the scan runs on each `texture()` call, has no cache or cancellation checkpoint, and can be slow for a large inline export. Measured product costs are under Notes.
 
 ## Mappings
 
@@ -111,7 +135,7 @@ To archive applied changes, use `json.dumps([c.to_python() for c in u.changes])`
 | neither, `UnsupportedAssetError` | nylib lacks the native layout or variant |
 | another error class | investigate beyond the mapping |
 
-Compatibility: names, types and slots now follow the effective mapping; an opt-in rename changes `Slot.name` and `to_python()` keys. `Installation.identity` follows `usmap.digest`, and is unchanged without applied changes. `Installation.usmap` stays readable after `close()`, retaining parsed records until the installation and any other mapping references are released (about 26 MiB for one measured mapping). An invalid `usmap=` type now raises `TypeError` with `usmap must be a str, os.PathLike[str] or Usmap, got <type>`; a bytes-returning `PathLike` keeps its previous bytes-path error. Existing path opens keep their read outcomes, messages and reprs. The 12 added public names are `load_usmap`, `Usmap`, `RecordInfo`, `PropertyInfo`, `MappingChange`, `Requirement`, `RequirementResult`, `FamilyResult`, `MappingReport`, `DumpInfo`, `index_and_type_fallback` and `unique_prefix_fallback`; existing exports remain available.
+Compatibility: names, types and slots now follow the effective mapping; an opt-in rename changes `Slot.name` and `to_python()` keys. `Installation.identity` follows `usmap.digest`, and is unchanged without applied changes. `Installation.usmap` stays readable after `close()`, retaining parsed records until the installation and any other mapping references are released (about 26 MiB for one measured mapping). An invalid `usmap=` type now raises `TypeError` with `usmap must be a str, os.PathLike[str], Usmap or None, got <type>`; a bytes-returning `PathLike` keeps its previous bytes-path error. Existing path opens keep their read outcomes, messages and reprs. The 12 added public names are `load_usmap`, `Usmap`, `RecordInfo`, `PropertyInfo`, `MappingChange`, `Requirement`, `RequirementResult`, `FamilyResult`, `MappingReport`, `DumpInfo`, `index_and_type_fallback` and `unique_prefix_fallback`; existing exports remain available.
 
 ## Finding packages
 
@@ -124,7 +148,7 @@ Compatibility: names, types and slots now follow the effective mapping; an opt-i
 
 ## Loose files
 
-The same installation reads loose files from legacy `.pak` versions 11 and 12, including encrypted entries. Opening still needs a `.usmap` and an IoStore installation; there is no standalone `.pak` opener. Packages inside a `.pak` stay unmounted: use the package APIs for mounted IoStore packages.
+The same installation reads loose files from legacy `.pak` versions 11 and 12, including encrypted entries. Opening still needs an IoStore installation; `usmap=None` is accepted and loose-file reads need no mapping; there is no standalone `.pak` opener. Packages inside a `.pak` stay unmounted: use the package APIs for mounted IoStore packages.
 
 ```python
 # needs: an open Installation named assets with the listed loose file
@@ -200,6 +224,144 @@ if tv.history == 'Base':
 Compatibility: in an earlier version, every ordinary (non-virtual) texture raised `UnsupportedAssetError(feature='non-virtual texture')` from `read_region`, unconditionally. Now a readable ordinary texture decodes, and an ordinary texture in a pixel format with no decoder raises `UnsupportedPixelFormatError` instead -- as an unsupported virtual-texture layer format already did. Both error classes derive from `UnsupportedError`; a caller that catches only `UnsupportedAssetError` around `read_region` misses the new one. `texture()` on an ordinary texture can now also raise `CorruptAssetError`, for a mip whose size, `.ubulk` or mounted `.uptnl` range, or serial size is inconsistent. And a plugin content directory whose learning read fails lists only the entries that already match their folder name; the rest are dropped, visible only in the DEBUG log.
 
 Ordinary `PF_DXT1`, `PF_DXT5` and `PF_BC7` textures that previously raised `UnsupportedPixelFormatError` now decode (3,814 more textures on one measured install). `Installation.identity` is unchanged for the same inputs: clear cached "unreadable" verdicts when upgrading; an identity-keyed cache alone will keep them. `info.readable=True` no longer guarantees every mip can be read when optional content is missing.
+
+## On-demand map tiles
+
+Read only the visible area and a small prefetch margin. This consumer example keeps one installation and one `Texture` per map on a worker thread. Its bounded priority queue puts visible tiles before prefetch; view generations cancel obsolete work. The render thread calls `set_view()` and `drain(upload, budget)` and uploads RGBA8 itself, with no asset reads on that thread. Use `fallback[map_name]`, populated when the worker opens that texture, for placeholders.
+
+The example assumes virtual world maps whose mip 0 is 16384x16384: display zoom `z` uses mip `5 - z` and 512x512 pixel tiles. Supply valid tile coordinates for that mip. Cache results by the returned `(assets.identity, map_name, z, x, y, 'rgba8')` key. A full request queue returns False from `want()`; `set_view()` returns the number accepted, so the consumer can request missing tiles later. Only the render thread changes the view generation. On a changed-container error the worker reopens and requeues that tile; other errors are counted for the consumer to display or log.
+
+```python
+# needs: an installed UE 5.7 game, its AES key file and virtual world-map textures
+"""Read visible map tiles on one worker thread."""
+import itertools
+import queue
+import threading
+import time
+
+from nylib.ue.assets import AesKey, CorruptAssetError, ReadCancelledError, open_installation
+
+
+class MapTiles:
+    def __init__(self, paks, key_file, maps, *, engine='5.7', build=None, exe=None, capacity=64, retry_delay=1.0):
+        self.options = dict(engine=engine, usmap=None, build=build, exe=exe, cache_bytes=4 << 20)
+        self.paks, self.key_file, self.maps = paks, key_file, dict(maps)
+        self.requests = queue.PriorityQueue(capacity)
+        self.results = queue.Queue(capacity)
+        self.sequence = itertools.count()
+        self.generation = 0
+        self.fallback = {}
+        self.errors = self.reads = self.cancelled = 0
+        self.retry_delay = retry_delay
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def want(self, map_name, z, x, y, *, prefetch=False):
+        try:
+            self.requests.put_nowait((int(prefetch), next(self.sequence), self.generation, (map_name, z, x, y)))
+            return True
+        except queue.Full:
+            return False
+
+    def set_view(self, visible, prefetch=()):
+        self.generation += 1
+        while True:
+            try:
+                self.requests.get_nowait()
+            except queue.Empty:
+                break
+        while True:
+            try:
+                self.results.get_nowait()
+            except queue.Empty:
+                break
+        accepted = sum(self.want(*tile) for tile in visible)
+        accepted += sum(self.want(*tile, prefetch=True) for tile in prefetch)
+        return accepted
+
+    def drain(self, upload, budget):
+        for _ in range(budget):
+            try:
+                generation, key, region = self.results.get_nowait()
+            except queue.Empty:
+                break
+            if generation == self.generation:
+                upload(key, region)
+
+    def close(self):
+        self.stopped.set()
+        self.generation += 1
+        self.thread.join()
+
+    def _run(self):
+        assets = None
+        textures = {}
+        next_poll = 0.0
+        retry = None
+        try:
+            while not self.stopped.is_set():
+                if assets is None:
+                    try:
+                        assets = open_installation(self.paks, aes_key=AesKey.from_file(self.key_file), **self.options)
+                        textures = {}
+                        next_poll = time.monotonic() + 10.0
+                    except Exception:
+                        self.errors += 1
+                        self.stopped.wait(self.retry_delay)
+                        continue
+                if time.monotonic() >= next_poll:
+                    next_poll = time.monotonic() + 10.0
+                    if assets.is_stale():
+                        assets.close()
+                        assets = None
+                        continue
+                if retry is not None:
+                    request, retry = retry, None
+                else:
+                    try:
+                        request = self.requests.get(timeout=0.05)
+                    except queue.Empty:
+                        continue
+                _, _, generation, tile = request
+                if generation != self.generation:
+                    self.cancelled += 1
+                    continue
+                map_name, z, x, y = tile
+                try:
+                    if map_name not in textures:
+                        textures[map_name] = assets.texture(self.maps[map_name])
+                        if (virtual := textures[map_name].info.virtual) is not None:
+                            self.fallback[map_name] = virtual.fallback[0]
+                    region = textures[map_name].read_region(5 - z, 512 * x, 512 * y, 512, 512,
+                                                          cancel=lambda: generation != self.generation or self.stopped.is_set())
+                    self.reads += 1
+                    key = (assets.identity, map_name, z, x, y, 'rgba8')
+                    while generation == self.generation and not self.stopped.is_set():
+                        try:
+                            self.results.put((generation, key, region), timeout=0.05)
+                            break
+                        except queue.Full:
+                            pass
+                except ReadCancelledError:
+                    self.cancelled += 1
+                except CorruptAssetError:
+                    self.errors += 1
+                    if assets.is_stale():  # a container changed: reopen, then read this tile again
+                        assets.close()
+                        assets = None
+                        retry = request
+                        self.stopped.wait(self.retry_delay)
+                except Exception:
+                    self.errors += 1
+        finally:
+            if assets is not None:
+                assets.close()
+```
+
+Call `close()` when the consumer shuts down. The example polls for changes every 10 seconds on the worker, retries failed opens after a delay, and leaves scheduling, cache eviction and status presentation to the application. `drain()` bounds uploads by count per frame; choose its budget for the renderer's cost.
+
+A child process is another placement for the worker: open the installation there and pass requests and pixel results over a pipe. `Installation` and `Texture` cannot be pickled. The measured child-process variant kept render impact near baseline; a thread also worked with the native BC1 decoder. See Notes for the workload and timings. These are consumer patterns, not a scheduler supplied by nylib.
 
 ## Exports and properties
 
@@ -293,8 +455,8 @@ if isinstance(export.native, InstanceData):
 
 ## Threads and cancellation
 
-- Any number of threads may call `Installation`, `Exports` and `Texture` methods at once; container block reads and the shared block cache use short locks. Loose-file index loading has its own lock and publishes one immutable index; other callers wait for it. Records and `AesKey` are immutable.
-- The GIL is released during file I/O, AES decrypt and Oodle decompress, and held during parsing and the BC1, DXT5 and BC7 decodes, which are pure Python.
+- Any number of threads may call `Installation`, `Exports` and `Texture` methods at once; container partitions are read by offset with no container lock around the read; the shared block cache uses short locks. Loose-file index loading has its own lock and publishes one immutable index; other callers wait for it. Records and `AesKey` are immutable.
+- The GIL is released during file I/O, AES decrypt, Oodle decompress and native BC1 decode when the bundled DLL loads. Parsing, DXT5 and BC7 decode hold it; BC1 also holds it when using the pure-Python fallback. Native BC1 argument checks and output allocation still hold it. `is_stale()` may run concurrently with reads and close; a check already past its closed check completes normally.
 - `close()` waits for reads running on other threads, except one it is called from itself; once it returns with no in-flight read of its own, the installation holds no file handle, lock object or cache.
 - `Installation`, `Exports`, `Texture`, `AesKey` and `Usmap` refuse pickling and `copy`/`deepcopy`; records, values (`StructValue` and `MapValue` included) and the error classes pickle and `deepcopy` round-trip. A `Usmap` may be shared by any number of threads and installations, including concurrent `check()` calls; `load_usmap()` has no `cancel=`.
 - `cancel=` on `exports()`, `read()`, `raw()` and `resolve()` is checked before every compression block an operation touches, every few thousand export-map entries while listing a package's exports, and every few thousand decoded values while decoding properties or table rows. The one gap is the cooked-header parse itself after its last block, which has no checkpoint and grows linearly with the header: on one measured install, worst-case cancel latency there was about 0.2 s for a main map's `exports()` and about 0.45-0.48 s for the largest cooked header in the whole install.
@@ -326,6 +488,8 @@ UeError
                                       hold (also a KeyError); .class_name, .property_index, .property_name
 ```
 
+- A container identity mismatch raises `CorruptAssetError` with `detail='has changed since the installation was opened'` and message `container file {f} has changed since the installation was opened`. `container` is the `.utoc` basename for a partition or the `.pak` basename; `read_file()` also sets `file` to the in-pak path. `errno` and `winerror` are `None`. Check `is_stale()`, then close and reopen as described under Long-lived installations.
+- Without a mapping, typed reads raise `InvalidMappingError(reason='no mapping')` with a message ending `needs a .usmap: the installation was opened with usmap=None`. Texture location failures use reasons `'bad property header'`, `'native start not found'` or `'native start ambiguous'`, with message details `the property header cannot be read`, `no position fits` or `more than one position fits`. Their messages include the package and export size; `class_name='Texture2D'`, `usmap=None`, and neither mapping-change nor custom-serialization attribution is set. Supply a matching mapping rather than guessing a native start.
 - Wrong argument types raise `TypeError`, wrong values raise `ValueError` -- never one of the classes above, except `RegionOutOfBoundsError`, which is both an `AssetError` and a `ValueError`. An out-of-range `Exports` index, or an out-of-range index to `StructValue.at()` or `StructValue.state()`, raises `IndexError`; an unknown name to `sv[name]` or `CurveTable.keys()` raises `KeyError`.
 - Every `AssetError` has `file`, defaulting to `None`: loose-file failures concerning one path set it to that path, and localization parser failures use the supplied `file=`. These failures have no mapping-change or custom-serialization attribution. `Locres.entry()` raises `KeyError` for a missing namespace/key pair.
 - `AmbiguousNameError` (re-exported from `nylib.ue`, not under `AssetError`) is raised by `texture()` when a package name, or an object path's export name, matches more than one Texture2D export, and by `read()`, `raw()` and `Exports.find()` when a name matches more than one export; it is not an `AssetError`.
@@ -349,16 +513,20 @@ UeError
 
 ## Notes
 
+- Measured on one shared machine, Python 3.14/3.12, best of three runs: warm `is_stale()` p95 was about 2.7/3.0 ms. Against the previous version as a same-session baseline with the same native decoder, the shared-handle positional reads gave region p50 ratios of 1.008/1.016 and four-thread throughput ratios 1.059/1.020. These are warm-cache observations, not cold-cache measurements or guarantees.
+- The on-demand bench paced a render loop at 120 FPS with 1 ms of Python work and at most four counted uploads per frame, a 3x3 visible view plus 16 prefetch tiles, and a pan every 2 seconds. Best-of-three extra p95 frame time on Python 3.14/3.12 was about 0.12/0.50 ms for a worker thread, 0.11/0.55 ms with a 1 ms thread switch interval, and -0.02/-0.01 ms for a child process. Near-zero negative differences are measurement noise. Across all runs and placements the first view, including open, took about 0.86-0.94 s on 3.14 and 1.20-1.36 s on 3.12. Uploads counted bytes rather than exercising a GPU, so this does not establish the application's render cost. The pure-Python comparison took about 31-32 ms p50 per region, around 31 regions/s.
+- In the product's mapping/no-mapping comparison on that same build, extra `texture()` time without a mapping was about 0.18-0.19 ms p50, 3.0-3.2 ms p95 and 0.99-1.00 s worst case on Python 3.12/3.14. The earlier locator study's full scan reached 2.0 s on an 8 MB inline export. These are different measurements; neither establishes a latency bound for other builds.
+
 - Measured on one shared machine with other work running, Python 3.12/3.14: the product's first loose-file index load over 16 `.pak` files and 5,976 entries took about 60-94 ms, retaining 6.1-6.3 MiB (6.1-6.4 MiB peak); later index lookups took about 5 microseconds. Loose-file reads took about 0.53-0.54 ms p50 and 0.63-0.68 ms p95; reading all 219 encrypted entries took about 24 ms. Earlier range probes read 70,000 bytes across 2 blocks in each Game `.locres`, and a 70,000-byte movie tail across 2 stored pieces. These are approximate observations, with no cold-cache claim or throughput guarantee.
 - On that shared machine, the product parsed Game `en` (525,364 bytes, 5,948 entries, 169 namespaces) in about 13-15 ms, retaining about 2.1 MiB; the largest `.locres` (6,892,728 bytes) took about 145-183 ms and retained 19.1-19.6 MiB. Earlier prototype probes of the two Game cultures took about 12-14 ms and retained 2.2 MiB each. Parser memory and time grow with the strings and entries; parsing has no cancellation checkpoint.
 - On the same shared machine, reading 43,117 exports of a main map took about 9.0-10.6 s without instances and 10.1-13.1 s with them; a 23,340-instance export took about 12-14 ms with 15.5-15.7 MiB peak traced allocation. Earlier whole-install probes found about 8% extra tail work; this is a different workload from that map. Measured cancellation latency was about 1.7-2.1 ms during instance parsing and 0.10-0.14 ms during a stored loose-file read.
 - `read_file()` keeps the returned bytes plus working buffers: measured traced allocation peaked near 128 MiB for a 64 MiB stored range and 67.5 MiB for a 33.8 MiB Oodle file, within `2 * returned_bytes + 4 MiB` on those inputs. Use smaller ranges to reduce peak memory.
 - No resampling: a mip's pixels come back at that mip's own size; scaling is the caller's job.
-- The BC1, DXT5 and BC7 decodes are pure Python: they hold the GIL, so large reads are single-core bound during decode. Prototype whole-mip measurements on one machine were about 25-30 Mpx/s for DXT1, 2.6-2.9 Mpx/s for DXT5 and 0.6-1.0 Mpx/s for BC7, depending on the blocks. A whole 4096x4096 BC7 mip takes about 17-27 s at those rates; use bounded regions for interactive reads.
-- Measured on one machine with other work running: ordinary 512x512 region reads took about 27 ms p50 for DXT1, 97 ms for DXT5 and 239 ms for BC7 (16, 32 and 32 compression blocks respectively). A 2x2 sample took about 0.07-0.13 ms p50 on 1 block, including about 0.09 ms for an optional `.uptnl` mip. Measured cancellation latency was about 13 ms, 24 ms and 60 ms for those formats respectively; polls are between compression blocks, so latency includes decode work between polls. These figures do not establish cold-cache performance.
+- BC1 automatically selects the bundled native decoder on its first decode. If loading raises `BcnError`, one WARNING, `BC1 decode falls back to pure Python: ...`, names the cause, and the process uses pure Python thereafter with identical pixels. `nylib.utils.bcn.load()` checks native availability directly. See [nylib.utils.bcn](../utils/bcn.md#threads-and-the-gil) for measured native speed and GIL behavior. DXT5 and BC7 are unchanged and hold the GIL; prototype whole-mip measurements on one machine were about 2.6-2.9 Mpx/s for DXT5 and 0.6-1.0 Mpx/s for BC7, depending on the blocks. A whole 4096x4096 BC7 mip takes about 17-27 s at those rates; use bounded regions for interactive reads.
+- Earlier measurements with the pure-Python BC1 decoder, on one machine with other work running: ordinary 512x512 region reads took about 27 ms p50 for DXT1, 97 ms for DXT5 and 239 ms for BC7 (16, 32 and 32 compression blocks respectively). A 2x2 sample took about 0.07-0.13 ms p50 on 1 block, including about 0.09 ms for an optional `.uptnl` mip. Measured cancellation latency was about 13 ms, 24 ms and 60 ms for those formats respectively; polls are between compression blocks, so latency includes decode work between polls. These figures do not establish cold-cache performance.
 - The first call to `texture()`, `exports()`, `read()`, `raw()` or `resolve()` on an installation loads the global ScriptObjects table once (about 4.66 MB on the measured game) and costs about 0.42 s total on one measured machine, almost all of it that load; later calls reuse the table.
 - Compared with CUE4Parse: DXT1's three-colour index-3 texel is opaque black `(0, 0, 0, 255)` here, where CUE4Parse gives alpha 0. DXT5 follows its BCDecoder arithmetic exactly, including alpha interpolation rounding and the forced four-colour block. BC7 follows the BPTC specification, matching CUE4Parse's AssetRipper path; its Windows Detex path can differ by 1 in a channel in mode 6. Mips off the 4-pixel grid decode as padded blocks cropped to their declared size; CUE4Parse's BC1/BC3 decoder cannot decode those sizes, and its BC7 paths return the padded image.
-- Approximate, one machine: `open_installation` took about 0.22 s (about 0.15 s of that parsing one `.usmap`; a larger, 3.3 MB mapping's prototype parse took about 0.26 s and retained about 26 MiB); region reads were about 30 ms p50 whether `cache_bytes` was 0, the 4 MiB default, or 16 MiB -- decode-bound, so a bigger cache mainly helps repeated reads of the same tiles.
+- Approximate, one machine: `open_installation` took about 0.22 s (about 0.15 s of that parsing one `.usmap`; a larger, 3.3 MB mapping's prototype parse took about 0.26 s and retained about 26 MiB); earlier pure-Python BC1 region reads were about 30 ms p50 whether `cache_bytes` was 0, the 4 MiB default, or 16 MiB. With native BC1, the later 16-region map workload took about 1.3-1.6 ms p50 at the 4 MiB default on Python 3.12/3.14. A larger cache can help repeated reads of the same blocks; these runs do not compare native decode across cache sizes.
 - Measured on one machine with other work running, Python 3.12/3.14: `load_usmap()` took about 0.15-0.30 s over three mapping files, with about 17-31 MiB peak working-set growth. Checking 100 requirements took about 2.6-4.1 ms without a fallback, or 6.4-7.5 ms with the prefix fallback and its apply/recheck pass (6 proposals). Applying 3,167 synthetic renames took about 35-47 ms, plus about 7-12 ms for the digest. Opening with an already loaded mapping took about 68-94 ms, against 387-437 ms with its path; mapping-change attribution cost about 5-6 microseconds p50 over 1,598 reads. These are approximate observations, not cold-cache measurements or throughput guarantees.
 - Approximate, one machine, an ordinary-texture terrain tile (`PF_B8G8R8A8`, `.ubulk` mips): a 2x2 sample took about 0.1 ms on 1 compression block; a mip 0 read was about 2.5 ms p50, with `cancel=` polled once per compression block, about every 0.3 ms on the measured tile -- it does not add that much latency itself. `list_packages()`'s first call, which also learns plugin mount roots, took 4.25-5.0 s.
 - Approximate, one machine, exports and typed reads: `exports()` of a main map's cooked header took about 0.28-0.30 s and retained about 35-38 MiB; `read()` of a small export was well under 1 ms p50; a 64-byte `raw()` through an `Exports` handle read 1 compression block (2 when the range crosses a block boundary); through `assets.raw()` it read 3, because that call also reads the target's cooked header. Over a one-in-sixty sample of the install's packages (1,787 packages, 21,141 exports), the sweep itself took a few seconds, and the export with the most decoded values in that sample (394,305, an `AudioImpulseResponse`) read in about 0.13 s with peak working-set growth of about 17 MiB over the baseline. Cancelling during a main map's `exports()` had a latency of about 93 ms p50 (198 ms worst case, from the gap noted under Threads and cancellation, above); cancelling mid-decode was about 1 ms.

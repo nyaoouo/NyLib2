@@ -22,6 +22,7 @@ from ..errors import (
 )
 from . import _iostore, _pak, _pe, _texture
 from ._pak import FileInfo
+from ._winfile import file_identity
 from ._bcrypt import Aes256Ecb
 from ._hashes import package_id
 from ._iostore import Container, Toc, check_key, iter_directory_index, read_directory_index
@@ -381,7 +382,7 @@ def _identity(engine: str, usmap_sha256: bytes, tocs) -> str:
     return h.hexdigest()[:16]
 
 
-def open_installation(paks_dir: str | os.PathLike, *, engine: str, usmap: 'str | os.PathLike | Usmap', build: int | None,
+def open_installation(paks_dir: str | os.PathLike, *, engine: str, usmap: 'str | os.PathLike | Usmap | None', build: int | None,
                       aes_key: 'AesKey | bytes | bytearray | Sequence[AesKey] | None' = None,
                       exe: str | os.PathLike | None = None,
                       cache_bytes: int | None = None) -> 'Installation':
@@ -391,9 +392,9 @@ def open_installation(paks_dir: str | os.PathLike, *, engine: str, usmap: 'str |
         raise TypeError(f'engine must be a str, got {type(engine).__name__}')
     if engine not in _ENGINES:
         raise ValueError(f'engine must be one of {_ENGINES}')
-    if not isinstance(usmap, (str, os.PathLike, Usmap)):
-        raise TypeError(f'usmap must be a str, os.PathLike[str] or Usmap, got {type(usmap).__name__}')
-    usmap_path = None if isinstance(usmap, Usmap) else _check_path(usmap, 'usmap')
+    if usmap is not None and not isinstance(usmap, (str, os.PathLike, Usmap)):
+        raise TypeError(f'usmap must be a str, os.PathLike[str], Usmap or None, got {type(usmap).__name__}')
+    usmap_path = None if usmap is None or isinstance(usmap, Usmap) else _check_path(usmap, 'usmap')
     if build is not None:
         build = _int_arg(build, 'build')
         if not 0 <= build <= 0xFFFFFFFF:
@@ -411,11 +412,11 @@ def open_installation(paks_dir: str | os.PathLike, *, engine: str, usmap: 'str |
     paks_name = os.path.basename(paks)
     if not os.path.isdir(paks):
         raise MissingAssetError(f'paks directory {paks_name!r} not found', path=paks)
-    usmap_name = usmap.file if usmap_path is None else os.path.basename(usmap_path)
+    usmap_name = (None if usmap is None else usmap.file) if usmap_path is None else os.path.basename(usmap_path)
     build_info = _read_build(paks, exe_path, build, usmap_name)
     usmap = usmap if usmap_path is None else load_usmap(usmap_path)
-    mappings = usmap._eff
-    usmap_sha256 = bytes.fromhex(usmap.digest)
+    mappings = None if usmap is None else usmap._eff
+    usmap_sha256 = bytes(32) if usmap is None else bytes.fromhex(usmap.digest)
     utocs, pak_paths = _scan(paks)
     if not utocs:
         raise MissingAssetError(f'no IoStore container (.utoc) in paks directory {paks_name!r}', path=paks)
@@ -444,7 +445,13 @@ def open_installation(paks_dir: str | os.PathLike, *, engine: str, usmap: 'str |
         rows = [ContainerInfo(file=toc.basename, kind='iostore', mounted=True, version=toc.version,
                               compression=toc.used_methods(), encrypted=toc.encrypted, chunks=toc.entry_count, reason=None)
                 for toc, _aes in mounted]
-        rows += [_pak_row(p) for p in pak_paths]
+        pak_identities = {}
+        for p in pak_paths:
+            try:
+                pak_identities[p] = file_identity(p)
+            except OSError:
+                pak_identities[p] = None
+            rows.append(_pak_row(p))
         rows.sort(key=lambda r: (_lower(r.file), r.file))
         identity = _identity(engine, usmap_sha256, [toc for toc, _aes in mounted])
     except BaseException:
@@ -459,6 +466,14 @@ def open_installation(paks_dir: str | os.PathLike, *, engine: str, usmap: 'str |
     inst._init(engine=engine, build=build_info, checked=build is not None, identity=identity, containers=tuple(rows),
                usmap_name=usmap_name, mappings=mappings, usmap=usmap, mounted=mounted, decryptors=tuple(decryptors.values()),
                cache_bytes=cache_bytes, project=project, pak_count=len(pak_paths), totals=counters)
+    inst._paks_dir = paks
+    inst._container_names = tuple(tuple(os.path.basename(p) for p in paths) for paths in (utocs, pak_paths))
+    tracked = []
+    for toc, _aes in mounted:
+        tracked.append((toc.path, toc.identity))
+        tracked.extend((_iostore._ucas_path(toc.path, part), value) for part, value in enumerate(toc.ucas_identities))
+    inst._tracked_files = tuple(tracked) + tuple(pak_identities.items())
+    inst._pak_identities = pak_identities
     inst._pak_keys = keys
     inst._pak_paths = tuple(os.path.join(paks, r.file) for r in rows if r.kind == 'pak' and r.version != 0)
     _log.debug('opened %s: engine %s, %d iostore mounted, %d pak not mounted, usmap %s, identity %s', paks_name, engine,
@@ -546,10 +561,10 @@ class Installation:
         self._usmap_name = usmap_name
         self._usmap = usmap
         self._mapping_index = {}
-        for i, change in enumerate(usmap.changes):
+        for i, change in enumerate(() if usmap is None else usmap.changes):
             self._mapping_index.setdefault(_lower(change.struct), []).append(i)
         self._mappings = mappings
-        self._schemas = Schemas(mappings)
+        self._schemas = None if mappings is None else Schemas(mappings)
         self._mounted = tuple((toc, Container(toc, aes), aes) for toc, aes in mounted)
         self._mounted_count = len(mounted)
         self._decryptors = decryptors
@@ -649,6 +664,31 @@ class Installation:
         if self._closed:
             raise InstallationClosedError(_CLOSED)
 
+    def is_stale(self) -> bool:
+        """Return whether the container list or any recorded file identity has changed."""
+        self._check_open()
+        try:
+            paths = _scan(self._paks_dir)
+        except MissingAssetError:
+            _log.debug('stale: container list changed')
+            return True
+        names = tuple(tuple(os.path.basename(p) for p in group) for group in paths)
+        if names != self._container_names:
+            _log.debug('stale: container list changed')
+            return True
+        for path, recorded in self._tracked_files:
+            try:
+                current = file_identity(path)
+            except OSError:
+                current = None
+                if current != recorded:
+                    _log.debug('stale: %s cannot be identified', os.path.basename(path))
+                    return True
+            if current != recorded:
+                _log.debug('stale: %s changed', os.path.basename(path))
+                return True
+        return False
+
     def close(self) -> None:
         """Close the installation; idempotent. Returns once every handle is released, unless called inside a read."""
         me = threading.get_ident()
@@ -710,7 +750,7 @@ class Installation:
             if self._pak_index is None:
                 entries = []
                 for path in self._pak_paths:
-                    entries.extend(_pak.read_index(path, self._pak_aes, check, counters))
+                    entries.extend(_pak.read_index(path, self._pak_aes, check, counters, self._pak_identities[path]))
                 entries.sort(key=lambda e: (_lower(e[0].path), e[0].path, e[0].container))
                 by_path = {}
                 for entry in entries:
@@ -783,7 +823,7 @@ class Installation:
             try:
                 if n and entry[3]['method_index']:
                     _check_oodle(info.container)
-                return _pak.read_range(entry, offset, n, aes, check, op.counters)
+                return _pak.read_range(entry, offset, n, aes, check, op.counters, self._pak_identities[entry[1]])
             except AssetError as e:
                 e.file = info.path
                 raise
@@ -1131,10 +1171,10 @@ class Installation:
                 if optional is not None and any(e.flags & _texture._BULK_OPTIONAL_PAYLOAD for e in header.bulk_data_map):
                     optional_length = self._mounted[optional[0]][0].chunk_range(optional[1])[1]
                 walking = True
-                info, layout, unreadable = _texture.parse_texture2d(header, ei, self._mappings.view(used), bulk_length,
+                info, layout, unreadable = _texture.parse_texture2d(header, ei, None if self._usmap is None else self._mappings.view(used), bulk_length,
                                                                    (len(holders), optional_length))
             except AssetError as e:
-                if walking and (isinstance(e, InvalidMappingError) or
+                if walking and self._usmap is not None and (isinstance(e, InvalidMappingError) or
                                 isinstance(e, UnsupportedAssetError) and (e.feature or '').startswith(('property type ', 'struct '))):
                     self._mapping_problem(e, 'Texture2D', used)
                 _annotate(e, pkg, c)
@@ -1343,6 +1383,9 @@ class Installation:
         _cancel_arg(cancel)
         shown = _shown(target)
         with self._op(reads=1) as op:
+            if self._usmap is None:
+                raise InvalidMappingError(f'read of {shown!r} needs a .usmap: the installation was opened with usmap=None',
+                                          reason='no mapping')
             check = _Check(self, cancel, f'read of {shown!r}')
             check()
             toc, container, idx, header, script, i = self._select(self._plan(target), op.counters, check, 'read')
@@ -1539,6 +1582,9 @@ class Exports(Sequence):
         info = self._infos[i]
         with inst._op(reads=1) as op:
             try:
+                if inst._usmap is None:
+                    raise InvalidMappingError(f'read of {info.path!r} needs a .usmap: the installation was opened with usmap=None',
+                                              reason='no mapping')
                 check = _Check(inst, cancel, f'read of {info.path!r}')
                 check()
                 toc, container, _aes = inst._mounted[self._mi]

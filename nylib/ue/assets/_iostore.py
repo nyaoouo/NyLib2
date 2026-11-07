@@ -17,6 +17,7 @@ from ._bcrypt import Aes256Ecb
 from ._hashes import chunk_hash
 from ._keys import AesKey
 from ._records import _Counters
+from ._winfile import SharedFile, file_identity
 
 _TOC_MAGIC = b'-==--==--==--==-'
 _TOC_HEADER_LEN = 144
@@ -68,6 +69,11 @@ def _container_error(e: OSError, container: str, basename: str) -> CorruptAssetE
                               errno=e.errno, winerror=e.winerror)
 
 
+def _changed_file(container, basename, file=None):
+    detail = 'has changed since the installation was opened'
+    return CorruptAssetError(f'container file {basename} {detail}', container=container, detail=detail, file=file)
+
+
 def _corrupt(container: str, detail: str, chunk: tuple[int, int] | None = None, block: int | None = None) -> CorruptAssetError:
     """A CorruptAssetError reading '{container}[ chunk {id:016x} ({type})][ block {b}]: {detail}'; chunk is (id, type)."""
     loc = container
@@ -80,8 +86,7 @@ def _corrupt(container: str, detail: str, chunk: tuple[int, int] | None = None, 
 
 def _pread(f, offset: int, size: int, container: str, basename: str) -> bytes:
     try:
-        f.seek(offset)
-        return f.read(size)
+        return f.pread(offset, size)
     except OSError as e:
         raise _container_error(e, container, basename) from None
 
@@ -116,7 +121,7 @@ class Toc:
     __slots__ = ('path', 'version', 'flags', 'entry_count', 'block_count', 'method_count', 'block_size',
                  'dir_index_size', 'partition_count', 'partition_size', 'container_id', 'key_guid', '_methods',
                  '_chunk_ids_raw', '_offlen_raw', '_seeds_raw', 'seeds_count', '_no_hash_raw', 'no_hash_count',
-                 '_raw_blocks', 'dir_index_raw', 'ucas_size', 'ucas_sizes', 'digest', '_no_hash_map')
+                 '_raw_blocks', 'dir_index_raw', 'ucas_size', 'ucas_sizes', 'digest', '_no_hash_map', 'identity', 'ucas_identities')
 
     def __init__(self, path, version, flags, entry_count, block_count, method_count, block_size, dir_index_size,
                  partition_count, partition_size, container_id, key_guid, methods, chunk_ids_raw, offlen_raw, seeds_raw,
@@ -255,12 +260,13 @@ class Toc:
         name = os.path.basename(path)
         t0 = time.perf_counter()
         try:
-            f = open(path, 'rb')
+            f = SharedFile(path)
         except OSError as e:
             raise _container_error(e, name, name) from None
         with f:
             try:
-                n = os.fstat(f.fileno()).st_size
+                identity = f.identity()
+                n = identity.size
             except OSError as e:
                 raise _container_error(e, name, name) from None
             head = _pread(f, 0, _TOC_HEADER_LEN, name, name)
@@ -367,7 +373,7 @@ class Toc:
         if flags & _FLAG_ENCRYPTED and flags & _FLAG_INDEXED and dir_index_size % 16 != 0:
             raise _corrupt(name, f'the encrypted directory index size {dir_index_size} is not a multiple of 16')
 
-        sizes = []
+        sizes, identities = [], []
         for part in range(partition_count):
             ucas_name = os.path.basename(_ucas_path(path, part))
             try:
@@ -376,14 +382,20 @@ class Toc:
                 raise _container_error(e, name, ucas_name) from None
             if not stat.S_ISREG(ust.st_mode):
                 raise CorruptAssetError(f'container file {ucas_name} cannot be read', container=name, detail='cannot be read') from None
+            try:
+                identities.append(file_identity(_ucas_path(path, part)))
+            except OSError as e:
+                raise _container_error(e, name, ucas_name) from None
             sizes.append(ust.st_size)
         ucas_sizes = tuple(sizes)
 
         digest = _digest(name, head, chunk_ids_raw, offlen_raw, raw_blocks, method_name_bytes, metas_raw,
                           dir_index_raw or b'', ucas_sizes)
-        return cls(path, version, flags, entry_count, block_count, method_count, block_size, dir_index_size,
+        toc = cls(path, version, flags, entry_count, block_count, method_count, block_size, dir_index_size,
                     partition_count, partition_size, container_id, key_guid, methods, chunk_ids_raw, offlen_raw, seeds_raw,
                     seeds_count, no_hash_raw, no_hash_count, raw_blocks, dir_index_raw, ucas_sizes, digest)
+        toc.identity, toc.ucas_identities = identity, tuple(identities)
+        return toc
 
 
 def check_key(toc: Toc, key: AesKey) -> None:
@@ -602,14 +614,19 @@ class Container:
     def _open_file(self, part: int):
         ucas_name = os.path.basename(_ucas_path(self.toc.path, part))
         try:
-            f = open(_ucas_path(self.toc.path, part), 'rb')
+            f = SharedFile(_ucas_path(self.toc.path, part))
         except OSError as e:
             raise _container_error(e, self.toc.basename, ucas_name) from None
         try:
-            return f, os.fstat(f.fileno()).st_size
-        except OSError as e:
+            identity = f.identity()
+            if identity != self.toc.ucas_identities[part]:
+                raise _changed_file(self.toc.basename, ucas_name)
+            return f, identity.size
+        except BaseException as e:
             f.close()
-            raise _container_error(e, self.toc.basename, ucas_name) from None
+            if isinstance(e, OSError):
+                raise _container_error(e, self.toc.basename, ucas_name) from None
+            raise
 
     def _partition(self, part: int):
         """(file, size) of partition `part`, opened on first use."""
@@ -658,29 +675,24 @@ class Container:
         f, size = self._partition(part)
         if local + raw_len > size:
             raise _corrupt(c, f'the {label} file ends at {size} but the block ends at {local + raw_len}', chunk, i)
-        buf = bytearray(raw_len)
         t0 = time.perf_counter()
         ucas_name = os.path.basename(_ucas_path(self.toc.path, part))
-        with self._lock:
+        try:
+            data = f.pread(local, raw_len)
+            got = len(data)
+            actual_size = f.identity().size if got < raw_len else size
+        except ValueError:
             if self._closed:
                 raise InstallationClosedError('the installation is closed')
-            try:
-                f.seek(local)
-                got = f.readinto(buf)
-            except OSError as e:
-                raise _container_error(e, self.toc.basename, ucas_name) from None
+            raise
+        except OSError as e:
+            raise _container_error(e, self.toc.basename, ucas_name) from None
         if counters is not None:
             counters.bytes_read += got
             counters.blocks_read += 1
             counters.seconds_io += time.perf_counter() - t0
         if got < raw_len:
-            # local + got is only the real end when local itself is within the file; re-stat for a truncation past it.
-            try:
-                actual_size = os.fstat(f.fileno()).st_size
-            except OSError as e:
-                raise _container_error(e, self.toc.basename, ucas_name) from None
             raise _corrupt(c, f'the {label} file ends at {actual_size} but the block ends at {local + raw_len}', chunk, i)
-        data = bytes(buf)
         if self.toc.encrypted:
             t0 = time.perf_counter()
             data = self._aes.decrypt(data)
@@ -756,12 +768,13 @@ def read_pak_footer(path: str) -> PakFooter | None:
     """The trailing FPakInfo of a legacy .pak; None when the footer does not parse."""
     name = os.path.basename(path)
     try:
-        with open(path, 'rb') as f:
-            size = os.fstat(f.fileno()).st_size
+        with SharedFile(path) as f:
+            size = f.identity().size
             if size < _PAK_FOOTER_LEN:
                 return None
-            f.seek(size - _PAK_FOOTER_LEN)
-            foot = f.read(_PAK_FOOTER_LEN)
+            foot = f.pread(size - _PAK_FOOTER_LEN, _PAK_FOOTER_LEN)
+            if len(foot) != _PAK_FOOTER_LEN:
+                return None
     except OSError as e:
         raise _container_error(e, name, name) from None
     key_guid = foot[:16]
