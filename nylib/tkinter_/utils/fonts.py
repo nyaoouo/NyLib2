@@ -13,8 +13,10 @@ if sys.platform == "win32":
 
 
     def register_font(fa_path):
-        if not ctypes.windll.gdi32.AddFontResourceW(str(fa_path)):
-            raise ctypes.WinError()
+        ctypes.set_last_error(0)
+        if not ctypes.WinDLL("gdi32", use_last_error=True).AddFontResourceW(str(fa_path)):
+            if code := ctypes.get_last_error(): raise ctypes.WinError(code)
+            raise OSError(f"AddFontResourceW added no font from {str(fa_path)!r}")
 else:
     import shutil
 

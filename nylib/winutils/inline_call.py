@@ -26,7 +26,7 @@ _PATCH_RETRIES = 32
 _open_queues = set()
 _open_queues_lock = threading.Lock()
 
-_gil_kernel32 = ctypes.PyDLL('kernel32.dll')
+_gil_kernel32 = ctypes.PyDLL('kernel32.dll', use_last_error=True)
 _gil_suspend = _gil_kernel32.SuspendThread
 _gil_suspend.argtypes = (ctypes.c_void_p,)
 _gil_suspend.restype = ctypes.c_ulong
@@ -49,7 +49,7 @@ def is_executable(process, addr: int) -> bool:
 
 def _thread_call(func, handle):
     result = func(handle)
-    if result == 0xFFFFFFFF: raise ctypes.WinError()
+    if result == 0xFFFFFFFF: raise ctypes.WinError(ctypes.get_last_error())
     return result
 
 
@@ -82,7 +82,7 @@ def _run_quiescent(process, ranges, action, *, busy=None):
                 suspended.append(thread)
             for thread in suspended:
                 context.ContextFlags = winapi.CONTEXT_CONTROL
-                if not _gil_get_context(thread.handle, ctypes.addressof(context)): raise ctypes.WinError()
+                if not _gil_get_context(thread.handle, ctypes.addressof(context)): raise ctypes.WinError(ctypes.get_last_error())
                 rip = context.Rip
                 if any(start <= rip < end for start, end in ranges):
                     occupied = True
