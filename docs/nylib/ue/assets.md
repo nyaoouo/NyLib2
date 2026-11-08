@@ -111,6 +111,8 @@ A fallback runs only for a named requirement whose chain resolves but has no exa
 
 Fallback answers are proposals to review: even a unique prefix can select the wrong property when the intended one is missing. `report.proposed` contains guarded rename changes; inspect them, then explicitly apply the accepted changes with `u.with_changes(...)` and check again. No read runs a fallback or applies a proposal. `report.changes` holds changes already applied to `u`, separately from proposals.
 
+Applying `report.proposed` can make another family ambiguous. Re-run `check()` on the changed mapping before serving reads.
+
 Mapping records are immutable, hashable and pickle/deepcopy round-trip. Except for `RecordInfo`, each has `to_python()` and `from_python()` for a JSON-compatible dict; tuples become lists, and `None` becomes JSON `null`. The compact schemas are:
 
 | record | dict keys |
