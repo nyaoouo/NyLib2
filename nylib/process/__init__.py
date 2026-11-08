@@ -797,7 +797,7 @@ class _APCCall:
 def _wait_object(handle, timeout_ms=-1) -> bool:
     if isinstance(handle, _APCCall): handle = handle.handle
     res = winapi.WaitForSingleObject(handle, timeout_ms) & 0xFFFFFFFF  # DWORD result; WAIT_FAILED is not raised by the wrapper
-    if res == 0xFFFFFFFF: raise ctypes.WinError()
+    if res == 0xFFFFFFFF: raise ctypes.WinError(ctypes.get_last_error())
     return res == 0  # WAIT_OBJECT_0
 
 

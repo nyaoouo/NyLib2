@@ -74,7 +74,7 @@ _lock = threading.Lock()
 _ready = False
 _windowscodecs = None
 _protos: dict = {}
-_Release = _GetLastError = _GetSystemDirectoryW = _CoIncrementMTAUsage = _CoCreateInstance = None
+_Release = _GetSystemDirectoryW = _CoIncrementMTAUsage = _CoCreateInstance = None
 _CreateStreamOnHGlobal = _GetHGlobalFromStream = _GlobalLock = _GlobalUnlock = None
 
 
@@ -89,10 +89,11 @@ def _error(name: str, hresult: int) -> ImageCodecError:
 
 
 def _api(name: str, fn, *args):
-    """Call a non-COM function that can fail: an HRESULT below 0, or a zero result with the thread's last error."""
+    """Call a non-COM function that can fail: an HRESULT below 0, or a zero result with the call's last error (`ctypes.get_last_error()`)."""
     if name in _LAST_ERROR_FUNCS:
+        ctypes.set_last_error(0)
         if not (r := fn(*args)):
-            e = _GetLastError()
+            e = ctypes.get_last_error()
             raise _error(name, 0x80070000 | (e & 0xFFFF) if e else _E_FAIL)
         return r
     if (r := fn(*args)) < 0:
@@ -134,14 +135,14 @@ def _init() -> None:
 
 
 def _setup() -> None:
-    global _windowscodecs, _Release, _GetLastError, _GetSystemDirectoryW, _CoIncrementMTAUsage, _CoCreateInstance
+    global _windowscodecs, _Release, _GetSystemDirectoryW, _CoIncrementMTAUsage, _CoCreateInstance
     global _CreateStreamOnHGlobal, _GetHGlobalFromStream, _GlobalLock, _GlobalUnlock
     py, win = ctypes.PYFUNCTYPE, ctypes.WINFUNCTYPE
     if _GetSystemDirectoryW is None:
-        kernel32 = ctypes.WinDLL('kernel32')
-        _GetLastError = py(_u32)(('GetLastError', kernel32))
-        _GetSystemDirectoryW = py(_u32, ctypes.c_wchar_p, _u32)(('GetSystemDirectoryW', kernel32))
-        _GlobalLock = py(_p, _p)(('GlobalLock', kernel32))
+        kernel32 = ctypes.PyDLL('kernel32', use_last_error=True)
+        _GetSystemDirectoryW, _GlobalLock = kernel32.GetSystemDirectoryW, kernel32.GlobalLock
+        _GetSystemDirectoryW.restype, _GetSystemDirectoryW.argtypes = _u32, (ctypes.c_wchar_p, _u32)
+        _GlobalLock.restype, _GlobalLock.argtypes = _p, (_p,)
         _GlobalUnlock = py(ctypes.c_int, _p)(('GlobalUnlock', kernel32))
     buf = ctypes.create_unicode_buffer(1024)
     system = buf.value[:_api('GetSystemDirectoryW', _GetSystemDirectoryW, buf, len(buf))]
