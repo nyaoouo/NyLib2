@@ -79,6 +79,7 @@ exclude = [
     "nylib.utils.oodle.tests*",
     "nylib.utils.imagecodec.tests*",
     "nylib.utils.bcn.tests*",
+    "nylib.winapi.tests*",
 ]
 
 # Ship Python type stubs, PyInstaller hooks, and the bundled font resources.
