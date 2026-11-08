@@ -79,10 +79,11 @@ ms = GetTickCount()
 print(f'Milliseconds since boot: {ms}')
 ```
 
-<!-- dt:section id="notes-0" hash="665d19173943" -->
+<!-- dt:section id="notes-0" hash="0d34f082d98c" -->
 ## 注意事项
 
 - 所有包装的函数在失败时引发 `ctypes.WinError`（NTSTATUS 函数引发 `OSError`）。传递 `_ignore_error=True` 给任何调用以禁用此行为。
+- 对于引发 `ctypes.WinError` 的包装函数（NTSTATUS 函数除外），所引发错误的 `winerror` 即该调用自身的 Win32 错误码。在 `_ignore_error=True` 的调用失败后，用 `ctypes.get_last_error()` 读取该错误码；`ctypes.GetLastError()` 也会返回它，但在 Python 3.13+ 且有其他线程运行时，它可能已经持有另一个值。不设置错误码的调用（多数成功的调用即如此）会使两者保持原样。
 - 来自 `defs.py` 的结构体（PEB、MEMORY_BASIC_INFORMATION、IMAGE_NT_HEADERS64 等）被重新导出；使用 `ctypes.byref()` 将它们传递给 API 调用。
 - 大多数 API 使用伪句柄，如 `GetCurrentProcess()`，不需要关闭；其他则返回需要 `CloseHandle()` 的 `HANDLE` 值。
 - NTSTATUS 函数使用 `error_nt=True` 并检查 `NT_SUCCESS(result)` — 仅在结果 >= 0x80000000 时引发异常。

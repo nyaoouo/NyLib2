@@ -72,6 +72,7 @@ print(f'Milliseconds since boot: {ms}')
 ## Notes
 
 - All wrapped functions raise `ctypes.WinError` on failure (with NTSTATUS functions raising `OSError`). Pass `_ignore_error=True` to any call to suppress this.
+- For the wrappers that raise `ctypes.WinError` (not the NTSTATUS ones), a raised error's `winerror` is the call's own Win32 code. After a failed call with `_ignore_error=True`, read that code with `ctypes.get_last_error()`; `ctypes.GetLastError()` returns it too, but on Python 3.13+ with other threads running it may already hold another value. A call that sets no code, as most successful calls do, leaves both as they were.
 - Structures from `defs.py` (PEB, MEMORY_BASIC_INFORMATION, IMAGE_NT_HEADERS64, etc.) are re-exported; use `ctypes.byref()` to pass them to API calls.
 - Most APIs use pseudo-handles like `GetCurrentProcess()` which do not need closing; others return `HANDLE` values that require `CloseHandle()`.
 - NTSTATUS functions use `error_nt=True` and check `NT_SUCCESS(result)` — only raise if result is >= 0x80000000.
