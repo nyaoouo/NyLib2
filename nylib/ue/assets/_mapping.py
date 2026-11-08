@@ -952,6 +952,8 @@ def _answer(answer, chain: _Chain, family: str, n: int) -> tuple:
         raise ValueError(f'{where}: the fallback answered the same slot twice')
     if any(chain.by_index.get(a.index) != a for a in many):
         raise ValueError(f'{where}: the fallback answered a slot that is not in the chain')
+    if any(not a.owner for a in many):
+        raise ValueError(f'{where}: the fallback answered a slot with an empty owner')
     return many
 
 

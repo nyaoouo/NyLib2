@@ -69,7 +69,7 @@ print(repr(key))
 
 在某一次测得的构建版本上，全部 16,208 次 Texture2D 调用都与映射路径结果一致：其中 16,094 个普通纹理与 104 个虚拟纹理，8 次 `UnsupportedAssetError` 和 2 次 `CorruptAssetError` 结果，没有任何差异。抽样的 161 个区域（包括四张世界地图）字节完全一致。这只是该构建版本的证据，不保证另一次更新之后仍然成立。请保留返回的 `Texture`：扫描会在每次调用 `texture()` 时运行，没有缓存，也没有取消检查点，对于较大的内联导出可能很慢。实测的产品开销见 Notes。
 
-<!-- dt:section id="mappings-0" hash="02f2fdcdf060" -->
+<!-- dt:section id="mappings-0" hash="6c22152aa158" -->
 ## 映射
 
 `load_usmap(path, *, meta=None, custom_serialization=()) -> Usmap` 解析一次映射，用于检查、校验以及可选的内存中修改。它从不写入 `.usmap`。将得到的 `Usmap` 传给 `open_installation(usmap=u)`，即可通过其有效记录进行读取。
@@ -120,6 +120,8 @@ with open_installation('path/to/MyGame/Content/Paks', engine='5.7',
 - `unique_prefix_fallback` 在链内以任一方向按前缀匹配 `_aaa` 名称，使用元素 0 的槽位，并遵守所需类型。较短的前缀必须至少为 **6 个字符**；候选的名称在比较前会在其第一个 NUL 处截断。多个匹配会返回多个候选。
 
 Fallback 的答案是需要审阅的提议：即使是唯一前缀，当目标属性缺失时也可能选中错误的属性。`report.proposed` 包含带保护的重命名修改；请检查它们，然后使用 `u.with_changes(...)` 显式应用已接受的修改，并重新检查。任何读取操作都不会运行 fallback 或应用提议。`report.changes` 保存已应用到 `u` 上的修改，与提议分开。
+
+应用 `report.proposed` 可能使另一个族变得有歧义。在提供读取之前，请对修改后的映射重新运行 `check()`。
 
 映射记录是不可变的、可哈希的，并支持 pickle 和 deepcopy 往返。除 `RecordInfo` 外，每个记录都有 `to_python()` 和 `from_python()`，用于转换为 JSON 兼容的字典；元组变为列表，`None` 变为 JSON `null`。紧凑模式如下：
 
