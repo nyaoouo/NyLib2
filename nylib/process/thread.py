@@ -6,6 +6,8 @@ from .. import winapi
 class Thread:
     """Own a thread handle; close it explicitly or use it as a context manager."""
 
+    _creation_time: int | None = None
+
     def __init__(self, thread_id: int, handle=None, da=0x1FFFFF):
         self.thread_id = thread_id
         self.handle = winapi.OpenThread(da, False, thread_id) if handle is None else handle
@@ -25,7 +27,10 @@ class Thread:
             winapi.LocalFree(buf)
 
     def creation_time(self) -> int:
-        """Creation time as a FILETIME (100-ns ticks since 1601); raises OSError if the handle cannot be queried."""
+        """Creation time as a FILETIME (100-ns ticks since 1601); raises OSError if the handle cannot be queried.
+        A thread from Process.iter_threads() returns its snapshot value without a call.
+        """
+        if self._creation_time is not None: return self._creation_time
         times = (ctypes.c_uint64 * 4)()
         winapi.GetThreadTimes(self.handle, *(ctypes.byref(times, i * 8) for i in range(4)))
         return times[0]

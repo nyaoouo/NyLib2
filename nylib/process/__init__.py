@@ -6,6 +6,7 @@ import struct
 import typing
 from .namespace import Namespace
 from .thread import Thread
+from ._snapshot import Snapshot
 from ..pattern import CachedRawMemoryPatternScanner, StaticPatternSearcher
 from .. import ctype as m_ctype
 from .. import winapi, winutils
@@ -401,34 +402,18 @@ class Process:
         return thread
 
     def iter_threads(self, da=0x1FFFFF) -> typing.Iterator[Thread]:
-        """Yield owned thread objects from a snapshot, skipping threads that exited since it; close each returned thread."""
-        snapshot = winapi.CreateToolhelp32Snapshot(0x4, 0)  # TH32CS_SNAPTHREAD
-        try:
-            entry = winapi.ThreadEntry32()
-            entry.dwSize = ctypes.sizeof(entry)
+        """Yield owned thread objects from one system snapshot, skipping threads that exited since it; close each returned thread."""
+        for record in Snapshot().threads(self.process_id):
             try:
-                winapi.Thread32First(snapshot, ctypes.byref(entry))
+                thread = self.get_thread(record.thread_id, da=da)
+            except ValueError:
+                continue
             except OSError as e:
-                if e.winerror == 18: return  # ERROR_NO_MORE_FILES
+                if e.winerror == 87: continue
+                if not any(r.thread_id == record.thread_id for r in Snapshot().threads(self.process_id)): continue
                 raise
-            while True:
-                if entry.th32OwnerProcessID == self.process_id:
-                    try:
-                        thread = self.get_thread(entry.th32ThreadID, da=da)
-                    except ValueError:
-                        thread = None  # the TID was reused by another process
-                    except OSError as e:
-                        if e.winerror != 87: raise  # ERROR_INVALID_PARAMETER: the thread exited after the snapshot
-                        thread = None
-                    if thread is not None: yield thread
-                entry.dwSize = ctypes.sizeof(entry)
-                try:
-                    winapi.Thread32Next(snapshot, ctypes.byref(entry))
-                except OSError as e:
-                    if e.winerror == 18: break  # ERROR_NO_MORE_FILES
-                    raise
-        finally:
-            winapi.CloseHandle(snapshot)
+            if isinstance(thread, Thread): thread._creation_time = record.creation_time
+            yield thread
 
     def read_bytes_zero_trim_unk_size(self, address: int, chunk_size=0x100):
         mbi = self.virtual_query(address)

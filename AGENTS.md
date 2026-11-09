@@ -92,7 +92,7 @@ canonical entry points.
 | `nylib.pdb` | Read PDB files via Microsoft DIA; write PDB files from a model | PDB, DIA, Session, find_symbols, find_type, export_pdb, write_pdb | [docs/nylib/pdb.md](docs/nylib/pdb.md) |
 | `nylib.ctype` | Declarative C-like structures with local or remote-process accessors | CData, Struct, Pointer, Accessor, bit field, remote memory | [docs/nylib/ctype.md](docs/nylib/ctype.md) |
 | `nylib.winapi` | Typed ctypes wrappers for kernel32 / ntdll / user32 / ... | Win32 API, ctypes, kernel32, ntdll, OpenProcess, ReadProcessMemory, NTSTATUS | [docs/nylib/winapi.md](docs/nylib/winapi.md) |
-| `nylib.winutils` | High-level Win32 helpers: process, PE, pipes, RPC, drivers, toolchain | process, PE exports, PE unmap, PE map, pipe, RPC, driver, inline hook, vtable hook, MSVC | [docs/nylib/winutils/index.md](docs/nylib/winutils/index.md) |
+| `nylib.winutils` | High-level Win32 helpers: process, PE, pipes, RPC, drivers, toolchain | process, PE exports, PE unmap, PE map, pipe, RPC, driver, inline hook, vtable hook, MSVC, list_processes | [docs/nylib/winutils/index.md](docs/nylib/winutils/index.md) |
 | `nylib.winutils.pe_map` | Pure PE image planning, host contracts, local or cross-process DLL mapping, and optional post-attach block discard | parse_image, MapHost, Process.current, RemoteProcessHost, InstallTier, SectSkip, LoadedImage | [docs/nylib/winutils/pe_map.md](docs/nylib/winutils/pe_map.md) |
 | `nylib.winutils.breakpoint` | x64 HW/SW breakpoint primitive (VEH + debugger backends) | hardware breakpoints, debug registers, memory trap, BP_E, BreakPoint, VEH | [docs/nylib/winutils/breakpoint.md](docs/nylib/winutils/breakpoint.md) |
 | `nylib.winutils.sign` | Authenticode signing/verification, driver cross-cert signing | SigningService, VerificationService, Authenticode, driver signing, cross-cert, MSCVStore | [docs/nylib/winutils/sign.md](docs/nylib/winutils/sign.md) |
@@ -156,7 +156,7 @@ High-level Win32 helpers; subpackages are loaded lazily.
 
 | Module | Purpose |
 | --- | --- |
-| `winutils.process` | `enable_privilege()`, `run_admin()`, `iter_processes()`, `pid_by_executable()`, `create_suspend_process` |
+| `winutils.process` | `enable_privilege()`, `run_admin()`, `iter_processes()`, `list_processes()`, `pid_by_executable()`, `create_suspend_process` |
 | `winutils.breakpoint` | x64 HW/SW breakpoint primitive (`BreakPoint`, `BP_E`); VEH + debugger backends - see section 3 |
 | `winutils.ensure_env` | locate / install Visual Studio + Windows SDK + LLVM toolchains |
 | `winutils.msvc` | `load_vcvarsall(arch)` and friends |

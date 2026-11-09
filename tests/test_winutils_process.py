@@ -5,7 +5,7 @@ import unittest
 from ctypes import wintypes
 from unittest.mock import MagicMock, patch
 
-from nylib.winutils.process import run_admin
+from nylib.winutils.process import iter_processes, run_admin
 
 
 def _split(params: str) -> list[str]:
@@ -52,6 +52,18 @@ class RunAdminTests(unittest.TestCase):
                 patch.object(ctypes.windll.shell32, 'ShellExecuteW', shell_execute):
             self.assertIsNone(run_admin())
         shell_execute.assert_not_called()
+
+
+class IterProcessesTests(unittest.TestCase):
+    def test_pid_zero_is_yielded_once(self):
+        pids = [entry.th32ProcessID for entry in iter_processes()]
+        self.assertEqual(pids.count(0), 1)
+        self.assertIn(os.getpid(), pids)
+
+    def test_entries_are_independent(self):
+        entries = [(entry, entry.th32ProcessID) for entry in iter_processes()]
+        self.assertEqual(len({id(entry) for entry, _ in entries}), len(entries))
+        self.assertTrue(all(entry.th32ProcessID == pid for entry, pid in entries))
 
 
 if __name__ == '__main__':

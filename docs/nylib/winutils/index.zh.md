@@ -2,12 +2,12 @@
 
 <!-- dt:meta v="1" lang="zh" source="index.md" -->
 
-<!-- dt:section id="__preamble__" hash="7e3364c2d3a7" -->
+<!-- dt:section id="__preamble__" hash="7adc1db6471a" -->
 # nylib.winutils
 
 Windows 工具库：进程枚举、PE 检查与映射、管道、RPC、驱动程序、内联挂钩和工具链管理。
 
-关键词: process, version, PE, PE exports, PE unmap, PE map, memory DLL, pipe, RPC, IPC, driver, service, MSVC, toolchain, inline hook, vtable hook, call queue, PDB, Win32
+关键词: process, version, PE, PE exports, PE unmap, PE map, memory DLL, pipe, RPC, IPC, driver, service, MSVC, toolchain, inline hook, vtable hook, call queue, PDB, Win32, list_processes, process list
 
 <!-- dt:section id="quick-start-0" hash="6289afa907c8" -->
 ## 快速开始
@@ -27,18 +27,25 @@ info = get_file_version_info('C:/Windows/System32/kernel32.dll')
 exports = list(Process.current.enum_exports('kernel32.dll'))[:3]
 ```
 
-<!-- dt:section id="process-0" hash="7399ec5393f0" -->
+<!-- dt:section id="process-0" hash="7387f559e0c8" -->
 ## 进程
 
 枚举进程、启用 SeDebugPrivilege、提升到管理员。
 
 ```python
-from nylib.winutils import iter_processes, enable_privilege
+from nylib.winutils import list_processes, iter_processes, enable_privilege
+
+for p in sorted(list_processes(), key=lambda p: p.name.casefold()):
+    print(p.process_id, p.name, p.session_id)
 
 for p in iter_processes():
     print(f'{p.th32ProcessID} {p.szExeFile.decode()}')
 enable_privilege()
 ```
+
+- `list_processes()` 返回一个列表，元素是来自一次系统快照的不可变、可哈希的 `ProcessInfo` 记录，按快照顺序排列。字段：`name: str`（Unicode）、`process_id: int`、`parent_process_id: int`、`session_id: int`、`creation_time: int`（FILETIME，自 1601 年起的 100 纳秒刻度数）和 `thread_count: int`。它不打开任何进程，也不需要任何特权。跨多次刷新识别同一进程时，使用 `(process_id, creation_time)`：整条记录的相等比较还会比较 `thread_count`，而它可能变化。受沙箱限制的调用方看到的进程可能更少，与 ToolHelp32 相同；这一点未经验证。
+- 完整路径等详细信息只对选中的那一行获取：`QueryFullProcessImageNameW` 需要一个带 `PROCESS_QUERY_LIMITED_INFORMATION` 的进程句柄，受保护的进程可能拒绝。
+- `parent_process_id` 可能指向一个已退出、PID 已被复用的进程。创建时间晚于子进程的候选进程不是它的父进程。
 
 <!-- dt:section id="version-0" hash="efc5ef3f27ad" -->
 ## 版本
@@ -221,10 +228,10 @@ hook.free()
 
 对于任一类挂钩的批量调用，参见 [inline_call.md](inline_call.md)。
 
-<!-- dt:section id="notes-0" hash="2f1d31ca9bf0" -->
+<!-- dt:section id="notes-0" hash="d5bb74ea8c3f" -->
 ## 注意
 
-- `iter_processes()` 通过 ToolHelp32 API 枚举本地进程。
+- `iter_processes()` 与 `list_processes()` 一样，每次调用各取一份系统快照，为每个进程产出一个独立的 `ProcessEntry32`，其中 `szExeFile` 使用 ANSI 代码页。
 - `enable_privilege()` 尝试启用 `SeDebugPrivilege`；无声地成功或失败。
 - `run_admin()` 如果还不是管理员，则通过 `ShellExecuteW("runas")` 重新启动，然后抛出异常。重新启动时会重复原始参数（加引号）和工作目录，无论是脚本、`-m` 还是冻结的应用；在非冻结应用中使用原始命令行（`sys.orig_argv`），因此对 `sys.argv` 所做的更改不会被带入。
 - `read_exports(base)` 仅读取此进程且不抛出异常；改用 `Process.enum_exports(dll)`。

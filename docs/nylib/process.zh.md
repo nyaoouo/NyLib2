@@ -82,7 +82,7 @@ for export in p.enum_exports('kernel32.dll'):
     print(export.name, hex(export.address))
 ```
 
-<!-- dt:section id="threads-and-apc-calls-0" hash="e243439d7469" -->
+<!-- dt:section id="threads-and-apc-calls-0" hash="33c8a1dfc46b" -->
 ## 线程与 APC 调用
 
 打开目标进程的线程，然后通过 `QueueUserAPC` 而不是新建远程线程，在已有线程上运行调用。
@@ -100,13 +100,14 @@ with p.get_thread(thread_id) as thread:
     result = pending.wait(5000)
 ```
 
-- `get_thread(thread_id, da=0x1FFFFF)` 会验证该线程属于此进程；`iter_threads(da=0x1FFFFF)` 通过 Toolhelp 快照打开该进程的线程，并跳过快照之后已退出的线程，以及 id 已被其他进程复用的线程；其他 `OpenThread` 错误照常抛出。每个返回的 `Thread` 拥有自己的句柄：使用 `with thread:` 或调用 `thread.close()`。
-- `thread.suspend()` 和 `thread.resume()` 返回之前的挂起计数。`thread.description()` 返回由 `SetThreadDescription` 设置的名称，若未命名则返回 `None`；`thread.creation_time()` 返回 FILETIME（自 1601 年起的 100 纳秒刻度数），进程中最早的线程即其初始线程。两者在没有 `THREAD_QUERY_LIMITED_INFORMATION` 时都会抛出 `OSError`。
+- `get_thread(thread_id, da=0x1FFFFF)` 会验证该线程属于此进程；`iter_threads(da=0x1FFFFF)` 通过一次系统快照打开该进程的线程（列举本身不需要句柄），并跳过快照之后已退出的线程，以及 id 已被其他进程复用的线程；其他错误照常抛出，除非新取的快照已不再列出该线程。每个返回的 `Thread` 拥有自己的句柄：使用 `with thread:` 或调用 `thread.close()`。
+- `thread.suspend()` 和 `thread.resume()` 返回之前的挂起计数。`thread.description()` 返回由 `SetThreadDescription` 设置的名称，若未命名则返回 `None`；`thread.creation_time()` 返回 FILETIME（自 1601 年起的 100 纳秒刻度数），进程中最早的线程即其初始线程。对于来自 `iter_threads()` 的线程，`creation_time()` 直接返回快照中的值，不发起调用；其他情况下，它与 `description()` 一样，在没有 `THREAD_QUERY_LIMITED_INFORMATION` 时抛出 `OSError`。
 - `call(..., queue_apc_thread=None)` 默认使用 `CreateRemoteThread`；传入 `Thread` 或本地线程句柄则选用 [`QueueUserAPC`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-queueuserapc)。该线程必须属于目标进程，并允许查询、挂起/恢复和设置上下文的访问权限；原生句柄复制路径需要进程句柄拥有 `PROCESS_DUP_HANDLE`。`Process.current.call` 接受当前进程的另一个线程；选择调用线程自身会抛出 `ValueError`。
 - 当目标线程进入可警报等待（例如 `SleepEx(..., True)`）时，APC 才会运行。挂起和恢复会保留其之前的挂起计数，并且不会强制普通线程变为可警报；已经处于挂起状态的线程会保持挂起，直到其所有者恢复它。
 - 阻塞调用以及 `RemoteCall.done` / `.wait()` 跟踪的是回调的完成；目标线程之后可以继续运行。超时会使调用保持未完成状态：保留该 `RemoteCall` 并再次等待。丢弃一个未完成的调用会保留其远程代码和完成资源，直到进程退出。
 - 如果入队成功但恢复失败，则会抛出 `OSError`，并保留已入队的回调内存。请在关闭进程句柄之前等待所有未完成的调用结束。
 
+<!-- dt:section id="handle-and-shared-memory-operations-0" hash="12e3d62560da" -->
 ## 句柄与共享内存操作
 
 `p.duplicate_handle(local_handle)` 将调用进程的句柄复制到 `p`，返回目标进程中的数值。`p.close_remote_handle(remote_handle)` 关闭该目标句柄。`p.map_shared(size)` 返回包含 `local_at`、`remote_at` 和 `close()` 的 `SharedMemoryMapping`；应在关闭 `p` 前关闭映射。原生实现使用可写 section，关闭时解除两侧映射。安装的 Process 适配器可以替换这些方法，但保留相同的资源所有权约定。

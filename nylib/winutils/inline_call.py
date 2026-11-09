@@ -80,30 +80,11 @@ class _WindowBlock(ctypes.Structure):
 
 
 def _thread_ids(process) -> list[int]:
+    from ..process._snapshot import Snapshot
     global _snapshot_size
-    size = max(0x1000, _snapshot_size)
-    for _ in range(8):
-        buf = ctypes.create_string_buffer(size)
-        length = ctypes.c_ulong()
-        status = winapi.NtQuerySystemInformation(5, buf, size, ctypes.byref(length), _ignore_error=True)
-        if status == 0: break
-        if status != 0xC0000004: raise OSError(f'NtStatus: {status:#x}')
-        size = length.value + 0x10000
-    else:
-        raise OSError(f'NtStatus: {status:#x}')
-    _snapshot_size = max(_snapshot_size, size)
-    offset = 0
-    limit = min(size, length.value)
-    while offset + 0x100 <= limit:
-        following, count = struct.unpack_from('<II', buf, offset)
-        end = offset + following if following else limit
-        if end > limit or end < offset + 0x100: raise OSError('truncated process snapshot')
-        if struct.unpack_from('<Q', buf, offset + 0x50)[0] == process.process_id:
-            if count > (end - offset - 0x100) // 0x50: raise OSError('truncated thread snapshot')
-            return [struct.unpack_from('<Q', buf, offset + 0x130 + i * 0x50)[0] for i in range(count)]
-        if not following: break
-        offset = end
-    return []
+    snapshot = Snapshot(_snapshot_size)
+    _snapshot_size = max(_snapshot_size, snapshot.size)
+    return [r.thread_id for r in snapshot.threads(process.process_id)]
 
 
 def _close_threads(handles):

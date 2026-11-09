@@ -2,7 +2,7 @@
 
 Windows utilities: process enumeration, PE inspection and mapping, pipes, RPC, drivers, inline hooks, and toolchain management.
 
-Keywords: process, version, PE, PE exports, PE unmap, PE map, memory DLL, pipe, RPC, IPC, driver, service, MSVC, toolchain, inline hook, vtable hook, call queue, PDB, Win32
+Keywords: process, version, PE, PE exports, PE unmap, PE map, memory DLL, pipe, RPC, IPC, driver, service, MSVC, toolchain, inline hook, vtable hook, call queue, PDB, Win32, list_processes, process list
 
 ## Quick start
 
@@ -26,12 +26,19 @@ exports = list(Process.current.enum_exports('kernel32.dll'))[:3]
 Enumerate processes, enable SeDebugPrivilege, elevate to admin.
 
 ```python
-from nylib.winutils import iter_processes, enable_privilege
+from nylib.winutils import list_processes, iter_processes, enable_privilege
+
+for p in sorted(list_processes(), key=lambda p: p.name.casefold()):
+    print(p.process_id, p.name, p.session_id)
 
 for p in iter_processes():
     print(f'{p.th32ProcessID} {p.szExeFile.decode()}')
 enable_privilege()
 ```
+
+- `list_processes()` returns a list of immutable, hashable `ProcessInfo` records from one system snapshot, in snapshot order. Fields: `name: str` (Unicode), `process_id: int`, `parent_process_id: int`, `session_id: int`, `creation_time: int` (FILETIME, 100-ns ticks since 1601), and `thread_count: int`. It opens no process and needs no privilege. Use `(process_id, creation_time)` as a process's identity across refreshes: whole-record equality also compares `thread_count`, which can change. A sandboxed caller may see fewer processes, as with ToolHelp32; this is unverified.
+- Fetch details such as the full path only for the selected row: `QueryFullProcessImageNameW` needs a process handle with `PROCESS_QUERY_LIMITED_INFORMATION`, which a protected process can refuse.
+- A `parent_process_id` can refer to an exited process whose PID was reused. A candidate created after the child is not its parent.
 
 ## Version
 
@@ -204,7 +211,7 @@ For batched calls on either hook type, see [inline_call.md](inline_call.md).
 
 ## Notes
 
-- `iter_processes()` enumerates local processes via ToolHelp32 API.
+- `iter_processes()` takes its own system snapshot, as `list_processes()` does, and yields a separate `ProcessEntry32` per process, with `szExeFile` in the ANSI code page.
 - `enable_privilege()` tries to enable `SeDebugPrivilege`; silently succeeds or fails.
 - `run_admin()` re-launches via `ShellExecuteW("runas")` if not already admin, then raises. The relaunch repeats the original arguments, quoted, and the working directory, for a script, `-m` or a frozen app alike; outside a frozen app it uses the original command line (`sys.orig_argv`), so changes made to `sys.argv` are not carried over.
 - `read_exports(base)` reads only this process and never raises; use `Process.enum_exports(dll)` instead.

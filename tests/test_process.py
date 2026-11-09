@@ -223,25 +223,27 @@ class ProcessCallTests(unittest.TestCase):
             winapi.DuplicateHandle(self.process.handle, event, None, None, 0, False, 1)
         for address in allocations: original_free(address)
 
-    def test_thread_snapshot_is_closed_on_early_exit(self):
+    def test_early_exit_keeps_the_yielded_thread_open(self):
         with patch.object(winapi, 'CloseHandle', wraps=winapi.CloseHandle) as close:
             iterator = self.process.iter_threads()
             thread = next(iterator)
             iterator.close()
-            self.assertEqual(close.call_count, 1)
+            self.assertEqual(close.call_count, 0)
             thread.close()
+            self.assertEqual(close.call_count, 1)
 
-    def test_empty_thread_snapshot_is_closed(self):
-        with patch.object(winapi, 'Thread32First', side_effect=ctypes.WinError(18)), \
+    def test_absent_process_yields_no_threads(self):
+        process = Process(0xFFFFFFFC, handle=Process.current.handle)
+        with patch.object(winapi, 'OpenThread', wraps=winapi.OpenThread) as open_thread, \
                 patch.object(winapi, 'CloseHandle', wraps=winapi.CloseHandle) as close:
-            self.assertEqual(list(self.process.iter_threads()), [])
-            close.assert_called_once()
+            self.assertEqual(list(process.iter_threads()), [])
+            open_thread.assert_not_called()
+            close.assert_not_called()
 
     def test_thread_snapshot_errors_are_propagated(self):
-        with patch.object(winapi, 'Thread32First', side_effect=ctypes.WinError(5)), \
-                patch.object(winapi, 'CloseHandle', wraps=winapi.CloseHandle) as close:
-            with self.assertRaises(OSError): list(self.process.iter_threads())
-            close.assert_called_once()
+        with patch.object(winapi, 'NtQuerySystemInformation', return_value=0xC0000022):
+            with self.assertRaisesRegex(OSError, '^NtStatus: 0xc0000022$'):
+                list(self.process.iter_threads())
 
     def test_thread_scan_skips_threads_that_exit_after_the_snapshot(self):
         stop = threading.Event()
@@ -266,6 +268,33 @@ class ProcessCallTests(unittest.TestCase):
         with patch.object(winapi, 'OpenThread', side_effect=ctypes.WinError(5)):
             with self.assertRaises(OSError) as raised: list(Process.current.iter_threads(da=0x0800))
             self.assertEqual(raised.exception.winerror, 5)
+
+    def test_thread_scan_skips_a_tid_reused_by_an_unopenable_process(self):
+        stop = threading.Event()
+        helper = threading.Thread(target=stop.wait)
+        helper.start()
+        threads = []
+        iterator = Process.current.iter_threads(da=0x0800)
+        original_open = winapi.OpenThread
+
+        def open_thread(da, inherit, tid):
+            if tid == helper.native_id: raise ctypes.WinError(5)
+            return original_open(da, inherit, tid)
+
+        try:
+            threads.append(next(iterator))
+            stop.set()
+            helper.join(5)
+            self.assertFalse(helper.is_alive())
+            with patch.object(winapi, 'OpenThread', side_effect=open_thread):
+                for thread in iterator:
+                    threads.append(thread)
+                    self.assertNotEqual(thread.thread_id, helper.native_id)
+        finally:
+            iterator.close()
+            stop.set()
+            helper.join(5)
+            for thread in threads: thread.close()
 
     def test_current_process_apc_uses_selected_thread(self):
         stop = threading.Event()

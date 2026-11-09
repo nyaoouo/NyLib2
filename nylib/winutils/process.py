@@ -1,4 +1,5 @@
 import ctypes
+import dataclasses
 import os
 import sys
 import shlex
@@ -7,21 +8,49 @@ import subprocess
 from .. import winapi
 
 
-def iter_processes():
-    hSnap = winapi.CreateToolhelp32Snapshot(0x00000002, 0)
-    process_entry = winapi.ProcessEntry32()
-    process_entry.dwSize = ctypes.sizeof(process_entry)
-    winapi.Process32First(hSnap, ctypes.byref(process_entry))
+def _ansi_name(name: str) -> bytes:
     try:
-        yield process_entry
-        while 1:
-            yield process_entry
-            winapi.Process32Next(hSnap, ctypes.byref(process_entry))
-    except WindowsError as e:
-        if e.winerror != 18:
-            raise
-    finally:
-        winapi.CloseHandle(hSnap)
+        raw = name.encode('mbcs')
+    except UnicodeEncodeError:
+        parts = []
+        for c in name:
+            try:
+                parts.append(c.encode('mbcs'))
+            except UnicodeEncodeError:
+                parts.append(b'?' * (2 if ord(c) > 0xFFFF else 1))
+        raw = b''.join(parts)
+    return raw[:259]
+
+
+def iter_processes():
+    from ..process._snapshot import Snapshot
+    for record in Snapshot().processes():
+        entry = winapi.ProcessEntry32()
+        entry.dwSize = ctypes.sizeof(winapi.ProcessEntry32)
+        entry.th32ProcessID = record.process_id
+        entry.cntThreads = record.thread_count
+        entry.th32ParentProcessID = record.parent_process_id
+        entry.pcPriClassBase = record.base_priority & 0xFFFFFFFF
+        entry.szExeFile = _ansi_name(record.name)
+        yield entry
+
+
+@dataclasses.dataclass(frozen=True)
+class ProcessInfo:
+    """One process from a system snapshot; `creation_time` is a FILETIME (100-ns ticks since 1601)."""
+    name: str
+    process_id: int
+    parent_process_id: int
+    session_id: int
+    creation_time: int
+    thread_count: int
+
+
+def list_processes() -> list[ProcessInfo]:
+    """Every process from one system snapshot, in snapshot order; opens no process and needs no privilege."""
+    from ..process._snapshot import Snapshot
+    return [ProcessInfo(r.name, r.process_id, r.parent_process_id, r.session_id, r.creation_time, r.thread_count)
+            for r in Snapshot().processes()]
 
 
 def pid_by_executable(executable_name: bytes | str):

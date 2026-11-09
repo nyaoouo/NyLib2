@@ -220,14 +220,9 @@ def _file_pe_facts(path: str):
 
 
 def _iter_unique_processes():
-    """(pid, exe) once per live process; iter_processes yields one mutable struct repeatedly."""
-    seen = set()
-    for entry in winutils_process.iter_processes():
-        pid = int(entry.th32ProcessID)
-        if pid in seen:
-            continue
-        seen.add(pid)
-        yield pid, entry.szExeFile.split(b'\0')[0].decode('mbcs', 'replace')
+    """(pid, exe) once per live process, from one system snapshot."""
+    for info in winutils_process.list_processes():
+        yield info.process_id, info.name
 
 
 # --------------------------------------------------------------------------------------------
