@@ -3,6 +3,9 @@ import os as _os
 import threading as _threading
 import typing
 from .defs import *
+from . import _thunk
+
+_tl = _thunk.tl
 
 
 if not globals().get('_gle_installed', False) and not getattr(ctypes.GetLastError, '_nylib_gle_warning', False):
@@ -81,21 +84,50 @@ def _win_error(code, prev, gil):
     return e
 
 
-def _bind(make, dll_name, func_name, error_zero, error_nonzero, error_val, error_nt):
+def _thunk_of(raw):
+    """Return a native capturing stub for `raw`, or False when unavailable."""
+    if len(raw.argtypes or ()) > 16: return False
+    if (at := _thunk.stub(ctypes.cast(raw, ctypes.c_void_p).value)) is None: return False
+    fn = type(raw)(at)
+    fn.argtypes, fn.restype = raw.argtypes, raw.restype
+    return fn
+
+
+def _thunk_error(code, gil):
+    """Build a WinError and write back the code when needed."""
+    e = ctypes.WinError(code) if code not in (0, _NO_CODE) else ctypes.WinError(0, 'The operation completed successfully.')
+    if code != _NO_CODE and (gil or e.strerror == '<no description>'):
+        _SET_LAST_ERROR[1 if gil else 0](code)
+    return e
+
+
+def _bind(make, dll_name, func_name, error_zero, error_nonzero, error_val, error_nt, thunk=False):
     slots = [None, None]
+    fast = [None, None]
     capture = bool(error_zero or error_nonzero or error_val is not _NULL)
 
     def resolve(gil=False):
         g = 1 if gil else 0
-        if (fn := slots[g]) is None:
-            fn = make(bool(g))
-            if capture: fn = _capturing(fn)
+        if fast[g] is None:
+            raw = make(bool(g))
+            fn = _capturing(raw) if capture else raw
+            th = _thunk_of(raw) if thunk and capture else False
             slots[g] = fn
-        return fn
+            fast[g] = th
+        return slots[g]
 
     if error_zero:
         def wrapper(*args, _ignore_error=False, _gil=False, **kwargs):
-            if (call := slots[1 if _gil else 0]) is None: call = resolve(_gil)
+            if (call := fast[1 if _gil else 0]) is None: resolve(_gil); call = fast[1 if _gil else 0]
+            if call is not False:
+                res = call(*args, **kwargs)
+                try: code = _tl.cell.value
+                except AttributeError: code = _thunk.cell().value
+                if code != _NO_CODE: ctypes.set_last_error(code)
+                if not res and not _ignore_error: raise _thunk_error(code, _gil)
+                if _gil and code != _NO_CODE: _SET_LAST_ERROR[1](code)
+                return res
+            call = slots[1 if _gil else 0]
             prev = ctypes.set_last_error(_NO_CODE)
             res = call(*args, **kwargs)
             code = ctypes.get_last_error()
@@ -108,7 +140,16 @@ def _bind(make, dll_name, func_name, error_zero, error_nonzero, error_val, error
             return res
     elif error_nonzero:
         def wrapper(*args, _ignore_error=False, _gil=False, **kwargs):
-            if (call := slots[1 if _gil else 0]) is None: call = resolve(_gil)
+            if (call := fast[1 if _gil else 0]) is None: resolve(_gil); call = fast[1 if _gil else 0]
+            if call is not False:
+                res = call(*args, **kwargs)
+                try: code = _tl.cell.value
+                except AttributeError: code = _thunk.cell().value
+                if code != _NO_CODE: ctypes.set_last_error(code)
+                if res != 0 and not _ignore_error: raise _thunk_error(code, _gil)
+                if _gil and code != _NO_CODE: _SET_LAST_ERROR[1](code)
+                return res
+            call = slots[1 if _gil else 0]
             prev = ctypes.set_last_error(_NO_CODE)
             res = call(*args, **kwargs)
             code = ctypes.get_last_error()
@@ -121,7 +162,16 @@ def _bind(make, dll_name, func_name, error_zero, error_nonzero, error_val, error
             return res
     elif error_val is not _NULL:
         def wrapper(*args, _ignore_error=False, _gil=False, **kwargs):
-            if (call := slots[1 if _gil else 0]) is None: call = resolve(_gil)
+            if (call := fast[1 if _gil else 0]) is None: resolve(_gil); call = fast[1 if _gil else 0]
+            if call is not False:
+                res = call(*args, **kwargs)
+                try: code = _tl.cell.value
+                except AttributeError: code = _thunk.cell().value
+                if code != _NO_CODE: ctypes.set_last_error(code)
+                if res == error_val and not _ignore_error: raise _thunk_error(code, _gil)
+                if _gil and code != _NO_CODE: _SET_LAST_ERROR[1](code)
+                return res
+            call = slots[1 if _gil else 0]
             prev = ctypes.set_last_error(_NO_CODE)
             res = call(*args, **kwargs)
             code = ctypes.get_last_error()
@@ -145,6 +195,7 @@ def _bind(make, dll_name, func_name, error_zero, error_nonzero, error_val, error
             return call(*args, **kwargs)
     if isinstance(func_name, str): wrapper.__name__ = wrapper.__qualname__ = func_name
     wrapper.dll_name, wrapper.func_name, wrapper.resolve = dll_name, func_name, resolve
+    wrapper._thunks = fast
     return wrapper
 
 
@@ -173,4 +224,4 @@ def def_win_api(dll_name, func_name: str, res_type: typing.Any = ctypes.c_void_p
         func = _dll(name, gil)[func_name]
         func.argtypes, func.restype = arg_types, res_type
         return func
-    return _bind(make, name, func_name, error_zero, error_nonzero, error_val, error_nt)
+    return _bind(make, name, func_name, error_zero, error_nonzero, error_val, error_nt, thunk=True)
