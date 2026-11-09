@@ -27,15 +27,15 @@ _open_queues = set()
 _open_queues_lock = threading.Lock()
 
 _gil_kernel32 = ctypes.PyDLL('kernel32.dll', use_last_error=True)
-_gil_suspend = _gil_kernel32.SuspendThread
-_gil_suspend.argtypes = (ctypes.c_void_p,)
-_gil_suspend.restype = ctypes.c_ulong
-_gil_resume = _gil_kernel32.ResumeThread
-_gil_resume.argtypes = (ctypes.c_void_p,)
-_gil_resume.restype = ctypes.c_ulong
-_gil_get_context = _gil_kernel32.GetThreadContext
-_gil_get_context.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
-_gil_get_context.restype = ctypes.c_bool
+_gil_open_thread = _gil_kernel32.OpenThread
+_gil_open_thread.argtypes = (ctypes.c_ulong, ctypes.c_bool, ctypes.c_ulong)
+_gil_open_thread.restype = ctypes.c_void_p
+_gil_thread_process_id = _gil_kernel32.GetProcessIdOfThread
+_gil_thread_process_id.argtypes = (ctypes.c_void_p,)
+_gil_thread_process_id.restype = ctypes.c_ulong
+_gil_close_handle = _gil_kernel32.CloseHandle
+_gil_close_handle.argtypes = (ctypes.c_void_p,)
+_gil_close_handle.restype = ctypes.c_bool
 _gil_exit_code = _gil_kernel32.GetExitCodeThread
 _gil_exit_code.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
 _gil_exit_code.restype = ctypes.c_bool
@@ -47,61 +47,413 @@ def is_executable(process, addr: int) -> bool:
     return mbi.State == 0x1000 and bool(mbi.Protect & 0xF0) and not mbi.Protect & 0x100
 
 
-def _thread_call(func, handle):
-    result = func(handle)
-    if result == 0xFFFFFFFF: raise ctypes.WinError(ctypes.get_last_error())
-    return result
-
-
 def _thread_exited(handle):
     code = ctypes.c_ulong()
     return bool(_gil_exit_code(handle, ctypes.byref(code))) and code.value != 259  # STILL_ACTIVE
 
 
-def _run_quiescent(process, ranges, action, *, busy=None):
-    own_tid = winapi.GetCurrentThreadId() if process.process_id == winapi.GetCurrentProcessId() else None
-    storage = ctypes.create_string_buffer(ctypes.sizeof(winapi.CONTEXT) + 15)
-    context = winapi.CONTEXT.from_address((ctypes.addressof(storage) + 15) & ~15)
-    for _ in range(_PATCH_RETRIES):
-        threads = []
+_snapshot_size = 0x100000
+_PROCESS_WINDOW_ACCESS = 0x0038  # PROCESS_VM_OPERATION|VM_READ|VM_WRITE
+_window_lock = threading.Lock()
+_window_at = 0
+_WINDOW_EXPORTS = ('SuspendThread', 'ResumeThread', 'GetThreadContext', 'ReadProcessMemory', 'VirtualProtectEx',
+                   'WriteProcessMemory', 'FlushInstructionCache', 'VirtualFreeEx')
+
+
+class _Write(typing.NamedTuple):
+    at: int
+    expected: bytes
+    new: bytes
+    changed: str
+    unrestored: str
+    partial_is_changed: bool
+
+
+class _Release(typing.NamedTuple):
+    at: int
+
+
+class _WindowBlock(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_uint64) for name in (*_WINDOW_EXPORTS, 'process', 'handles', 'count', 'flags', 'context',
+                 'ranges', 'range_count', 'busy_at', 'op', 'op_at', 'op_size', 'expected', 'new', 'scratch', 'old_protect',
+                 'status', 'index', 'error', 'restore_error', 'reprotect_error', 'resume_error')]
+
+
+def _thread_ids(process) -> list[int]:
+    global _snapshot_size
+    size = max(0x1000, _snapshot_size)
+    for _ in range(8):
+        buf = ctypes.create_string_buffer(size)
+        length = ctypes.c_ulong()
+        status = winapi.NtQuerySystemInformation(5, buf, size, ctypes.byref(length), _ignore_error=True)
+        if status == 0: break
+        if status != 0xC0000004: raise OSError(f'NtStatus: {status:#x}')
+        size = length.value + 0x10000
+    else:
+        raise OSError(f'NtStatus: {status:#x}')
+    _snapshot_size = max(_snapshot_size, size)
+    offset = 0
+    limit = min(size, length.value)
+    while offset + 0x100 <= limit:
+        following, count = struct.unpack_from('<II', buf, offset)
+        end = offset + following if following else limit
+        if end > limit or end < offset + 0x100: raise OSError('truncated process snapshot')
+        if struct.unpack_from('<Q', buf, offset + 0x50)[0] == process.process_id:
+            if count > (end - offset - 0x100) // 0x50: raise OSError('truncated thread snapshot')
+            return [struct.unpack_from('<Q', buf, offset + 0x130 + i * 0x50)[0] for i in range(count)]
+        if not following: break
+        offset = end
+    return []
+
+
+def _close_threads(handles):
+    error = None
+    for handle in handles:
+        if not _gil_close_handle(handle) and error is None: error = ctypes.get_last_error()
+    if error is not None: raise ctypes.WinError(error)
+
+
+def _open_threads(process, tids, own_tid: int | None) -> list[int]:
+    handles = []
+    try:
+        for tid in tids:
+            if tid == own_tid or not 1 <= tid <= 0xFFFFFFFF: continue
+            handle = _gil_open_thread(_THREAD_PATCH_ACCESS, False, tid)
+            if not handle:
+                code = ctypes.get_last_error()
+                if code == 87: continue
+                raise ctypes.WinError(code)
+            handles.append(handle)
+            pid = _gil_thread_process_id(handle)
+            code = ctypes.get_last_error() if not pid else 0
+            if not pid and code != 87: raise ctypes.WinError(code)
+            if pid != process.process_id:
+                if not _gil_close_handle(handle): raise ctypes.WinError(ctypes.get_last_error())
+                handles.pop()
+        return handles
+    except BaseException:
+        _close_threads(handles)
+        raise
+
+
+def _window_address() -> int:
+    global _window_at
+    with _window_lock:
+        if _window_at: return _window_at
+        read = '''
+            mov rcx, [rbx+0x40]
+            mov rdx, [rbx+0x88]
+            mov r8, [rbx+0xA8]
+            mov r9, [rbx+0x90]
+            mov qword ptr [rsp+0x20], 0
+            call qword ptr [rbx+0x18]
+        '''
+        compare = '''
+            mov rsi, [rbx+0xA8]
+            mov rdi, [rbx+0x98]
+            mov rcx, [rbx+0x90]
+            repe cmpsb
+        '''
+        def write(source):
+            return f'''
+                mov rcx, [rbx+0x40]
+                mov rdx, [rbx+0x88]
+                mov r8, [rbx+{source}]
+                mov r9, [rbx+0x90]
+                mov qword ptr [rsp+0x20], 0
+                call qword ptr [rbx+0x28]
+            '''
+        flush = '''
+            mov rcx, [rbx+0x40]
+            mov rdx, [rbx+0x88]
+            mov r8, [rbx+0x90]
+            call qword ptr [rbx+0x30]
+        '''
+        code = f'''
+            push rbx
+            push rsi
+            push rdi
+            push r12
+            push r13
+            push r14
+            push r15
+            sub rsp, 0x30
+            mov rbx, rcx
+            mov r13, [rbx+0x58]
+            mov r14, [rbx+0x48]
+            xor r12, r12
+            mov qword ptr [rbx+0xB8], 0
+            mov qword ptr [rbx+0xC0], 0
+            mov qword ptr [rbx+0xC8], 0
+            mov qword ptr [rbx+0xD0], 0
+            mov qword ptr [rbx+0xD8], 0
+            mov qword ptr [rbx+0xE0], 0
+        suspend:
+            cmp r12, [rbx+0x50]
+            jae contexts_begin
+            mov rcx, [r14+r12*8]
+            call qword ptr [rbx]
+            cmp eax, -1
+            je suspend_failed
+            mov byte ptr [r13+r12], 1
+            inc r12
+            jmp suspend
+        suspend_failed:
+            mov qword ptr [rbx+0xB8], 2
+            jmp indexed_error
+        contexts_begin:
+            xor r12, r12
+        contexts:
+            cmp r12, [rbx+0x50]
+            jae busy
+            mov rdx, [rbx+0x60]
+            mov dword ptr [rdx+0x30], 0x100001
+            mov rcx, [r14+r12*8]
+            call qword ptr [rbx+0x10]
+            test eax, eax
+            jz context_failed
+            mov rax, [rbx+0x60]
+            mov rax, [rax+0xF8]
+            mov rdx, [rbx+0x68]
+            mov rcx, [rbx+0x70]
+        ranges:
+            test rcx, rcx
+            jz next_context
+            cmp rax, [rdx]
+            jb next_range
+            cmp rax, [rdx+8]
+            jb occupied
+        next_range:
+            add rdx, 16
+            dec rcx
+            jmp ranges
+        next_context:
+            inc r12
+            jmp contexts
+        context_failed:
+            mov qword ptr [rbx+0xB8], 3
+        indexed_error:
+            mov [rbx+0xC0], r12
+            jmp error
+        busy:
+            mov rdx, [rbx+0x78]
+            test rdx, rdx
+            jz operation
+            mov rcx, [rbx+0x40]
+            mov r8, [rbx+0xA8]
+            mov r9, 8
+            mov qword ptr [rsp+0x20], 0
+            call qword ptr [rbx+0x18]
+            test eax, eax
+            jz busy_failed
+            mov rax, [rbx+0xA8]
+            cmp qword ptr [rax], 0
+            jne occupied
+        operation:
+            cmp qword ptr [rbx+0x80], 0
+            je resume_begin
+            cmp qword ptr [rbx+0x80], 2
+            je release
+            {read}
+            test eax, eax
+            jz read_failed
+            {compare}
+            jne changed
+            mov rcx, [rbx+0x40]
+            mov rdx, [rbx+0x88]
+            mov r8, [rbx+0x90]
+            mov r9, 0x40
+            lea rax, [rbx+0xB0]
+            mov [rsp+0x20], rax
+            call qword ptr [rbx+0x20]
+            test eax, eax
+            jz protect_failed
+            {write('0xA0')}
+            test eax, eax
+            jz write_failed
+            {flush}
+            test eax, eax
+            jnz reprotect
+        write_failed:
+            mov eax, dword ptr gs:[0x68]
+            mov [rbx+0xC8], rax
+            mov qword ptr [rbx+0xB8], 8
+            {read}
+            test eax, eax
+            jz restore
+            {compare}
+            je reprotect
+        restore:
+            {write('0x98')}
+            test eax, eax
+            jz restore_failed
+            {flush}
+            test eax, eax
+            jnz reprotect
+        restore_failed:
+            mov eax, dword ptr gs:[0x68]
+            mov [rbx+0xD0], rax
+            mov qword ptr [rbx+0xB8], 9
+        reprotect:
+            mov rcx, [rbx+0x40]
+            mov rdx, [rbx+0x88]
+            mov r8, [rbx+0x90]
+            mov r9d, [rbx+0xB0]
+            lea rax, [rsp+0x28]
+            mov [rsp+0x20], rax
+            call qword ptr [rbx+0x20]
+            test eax, eax
+            jnz resume_begin
+            mov eax, dword ptr gs:[0x68]
+            mov [rbx+0xD8], rax
+            jmp resume_begin
+        release:
+            mov rcx, [rbx+0x40]
+            mov rdx, [rbx+0x88]
+            xor r8, r8
+            mov r9, 0x8000
+            call qword ptr [rbx+0x38]
+            test eax, eax
+            jnz resume_begin
+            mov qword ptr [rbx+0xB8], 10
+            jmp error
+        occupied:
+            mov qword ptr [rbx+0xB8], 1
+            jmp resume_begin
+        busy_failed:
+            mov qword ptr [rbx+0xB8], 4
+            jmp error
+        read_failed:
+            mov qword ptr [rbx+0xB8], 5
+            jmp error
+        changed:
+            mov qword ptr [rbx+0xB8], 6
+            jmp resume_begin
+        protect_failed:
+            mov qword ptr [rbx+0xB8], 7
+        error:
+            mov eax, dword ptr gs:[0x68]
+            mov [rbx+0xC8], rax
+        resume_begin:
+            mov r12, [rbx+0x50]
+        resume:
+            test r12, r12
+            jz finished
+            dec r12
+            cmp byte ptr [r13+r12], 0
+            je resume
+            mov rcx, [r14+r12*8]
+            call qword ptr [rbx+8]
+            cmp eax, -1
+            jne resume
+            cmp qword ptr [rbx+0xE0], 0
+            jne resume
+            mov eax, dword ptr gs:[0x68]
+            mov [rbx+0xE0], rax
+            jmp resume
+        finished:
+            mov rax, [rbx+0xB8]
+            add rsp, 0x30
+            pop r15
+            pop r14
+            pop r13
+            pop r12
+            pop rdi
+            pop rsi
+            pop rbx
+            ret
+        '''
+        machine = bytes(asm(code)[0])
+        from ..process import Process
+        process = Process.current
+        at = process.alloc(0x1000, protect=0x04)
         try:
-            for thread in process.iter_threads(da=_THREAD_PATCH_ACCESS): threads.append(thread)
+            process.write(at, machine)
+            process.virtual_protect(at, 0x1000, 0x20)
+            winapi.FlushInstructionCache(process.handle, at, len(machine))
         except BaseException:
-            for thread in threads: thread.close()
+            process.free(at)
             raise
-        suspended = []
-        occupied = False
-        try:
-            for thread in threads:
-                if thread.thread_id == own_tid: continue
-                try:
-                    _thread_call(_gil_suspend, thread.handle)
-                except OSError:
-                    if _thread_exited(thread.handle): continue
-                    raise
-                suspended.append(thread)
-            for thread in suspended:
-                context.ContextFlags = winapi.CONTEXT_CONTROL
-                if not _gil_get_context(thread.handle, ctypes.addressof(context)): raise ctypes.WinError(ctypes.get_last_error())
-                rip = context.Rip
-                if any(start <= rip < end for start, end in ranges):
-                    occupied = True
+        _window_at = at
+        return at
+
+
+def _call_window(block: _WindowBlock) -> int:
+    return ctypes.PYFUNCTYPE(ctypes.c_uint64, ctypes.POINTER(_WindowBlock))(_window_address())(ctypes.byref(block))
+
+
+def _run_quiescent(process, ranges, op, *, busy_at=None, applied=None) -> None:
+    from ..process import Process
+    ranges = tuple(ranges)
+    if any(not isinstance(value, int) or not 0 <= value < 2**64 for pair in ranges for value in pair):
+        raise ValueError('invalid quiescent range')
+    range_buffer = (ctypes.c_uint64 * (2 * len(ranges)))(*(value for start, end in ranges for value in (start, end)))
+    if op is not None and not isinstance(op, (_Write, _Release)): raise TypeError('invalid quiescent operation')
+    if op is not None and (not isinstance(op.at, int) or not 1 <= op.at < 2**64): raise ValueError('invalid operation address')
+    if isinstance(op, _Write) and (len(op.expected) != len(op.new) or not 1 <= len(op.new) <= 0x1000):
+        raise ValueError('invalid quiescent write size')
+    if busy_at is not None and (not isinstance(busy_at, int) or not 1 <= busy_at <= 2**64 - 8):
+        raise ValueError('invalid busy address')
+    storage = ctypes.create_string_buffer(ctypes.sizeof(winapi.CONTEXT) + 15)
+    expected = ctypes.create_string_buffer(op.expected) if isinstance(op, _Write) else None
+    new = ctypes.create_string_buffer(op.new) if isinstance(op, _Write) else None
+    scratch = ctypes.create_string_buffer(max(len(op.new) if new is not None else 0, 8))
+    exports = [Process.current.get_proc_address('kernel32.dll', name) for name in _WINDOW_EXPORTS]
+    own_tid = threading.get_native_id() if process.process_id == os.getpid() else None
+    duplicate = ctypes.c_void_p()
+    target = process.handle
+    if process.handle & (2**64 - 1) == 2**64 - 1:
+        me = winapi.GetCurrentProcess()
+        winapi.DuplicateHandle(me, process.handle, me, ctypes.byref(duplicate), _PROCESS_WINDOW_ACCESS, False, 0)
+        target = duplicate.value
+    try:
+        for _ in range(_PATCH_RETRIES):
+            handles = _open_threads(process, _thread_ids(process), own_tid)
+            try:
+                active = list(handles)
+                while True:
+                    handle_buffer = (ctypes.c_uint64 * len(active))(*active)
+                    flags = (ctypes.c_ubyte * len(active))()
+                    block = _WindowBlock(*exports, process=target, handles=ctypes.addressof(handle_buffer), count=len(active),
+                                         flags=ctypes.addressof(flags), context=(ctypes.addressof(storage) + 15) & ~15,
+                                         ranges=ctypes.addressof(range_buffer), range_count=len(ranges), busy_at=busy_at or 0,
+                                         op=1 if new is not None else 2 if op is not None else 0, op_at=op.at if op else 0,
+                                         op_size=len(op.new) if new is not None else 0, scratch=ctypes.addressof(scratch),
+                                         expected=ctypes.addressof(expected) if expected is not None else 0,
+                                         new=ctypes.addressof(new) if new is not None else 0)
+                    status = _call_window(block)
+                    if status in (0, 9) and applied is not None:
+                        try:
+                            applied()
+                        except BaseException:
+                            if block.resume_error or block.reprotect_error:
+                                raise ctypes.WinError(block.resume_error or block.reprotect_error)
+                            raise
+                    if status == 2 and not block.resume_error and _thread_exited(active[block.index]):
+                        del active[block.index]
+                        continue
                     break
-            if busy is not None and busy(): occupied = True
-            if not occupied:
-                action()
-                return
-        finally:
-            resume_error = None
-            for thread in reversed(suspended):
                 try:
-                    _thread_call(_gil_resume, thread.handle)
-                except OSError as exc:
-                    if resume_error is None: resume_error = exc
-            for thread in threads: thread.close()
-            if resume_error is not None: raise resume_error
-        time.sleep(0.002)
-    raise RuntimeError('could not find a quiescent interval to patch the inline hook')
+                    try:
+                        if status == 9:
+                            restore = ctypes.WinError(block.restore_error)
+                            restore.__context__ = ctypes.WinError(block.error)
+                            raise RuntimeError(op.unrestored) from restore
+                        if status == 6 or (status == 5 and op.partial_is_changed and block.error == 299 and process is not Process.current):
+                            raise RuntimeError(op.changed)
+                        if status in (2, 3, 4, 5, 7, 8, 10): raise ctypes.WinError(block.error)
+                        if status not in (0, 1): raise RuntimeError(f'quiescent window returned status {status}')
+                    finally:
+                        if block.reprotect_error: raise ctypes.WinError(block.reprotect_error)
+                finally:
+                    if block.resume_error: raise ctypes.WinError(block.resume_error)
+                if status == 0: return
+            finally:
+                _close_threads(handles)
+            time.sleep(0.002)
+        raise RuntimeError('could not find a quiescent interval to patch the inline hook')
+    finally:
+        if duplicate.value: winapi.CloseHandle(duplicate.value)
 
 
 class _AtomicWord:
@@ -471,27 +823,6 @@ def _owner_running(owner) -> bool | None:
         process.close()
 
 
-def _replace_bytes(process, addr, expected, new) -> None:
-    n = len(expected)
-    if process.read(addr, n, strict=True) != expected:
-        raise RuntimeError('the stale hook changed before it could be removed')
-    old = process.virtual_protect(addr, n, 0x40)
-    try:
-        try:
-            process.write(addr, new)
-            winapi.FlushInstructionCache(process.handle, addr, n)
-        except BaseException:
-            try:
-                if process.read(addr, n, strict=True) != expected:
-                    process.write(addr, expected)
-                    winapi.FlushInstructionCache(process.handle, addr, n)
-            except BaseException as exc:
-                raise RuntimeError('could not restore the stale hook after a failed write or flush; the trigger may hold either') from exc
-            raise
-    finally:
-        process.virtual_protect(addr, n, old)
-
-
 def _remove_nylib_hook(process, addr, hook) -> int:
     from ..process import SharedMemoryMapping
     if not _queue_view_mapped(process, hook.data_at):
@@ -504,11 +835,12 @@ def _remove_nylib_hook(process, addr, hook) -> int:
     if -(1 << 31) <= relative < 1 << 31: jumps.append(b'\xe9' + struct.pack('<i', relative))
     if not any(len(jump) <= hook.size and expected == jump + b'\x90' * (hook.size - len(jump)) for jump in jumps):
         raise RuntimeError('the stale hook changed before it could be removed')
-    _run_quiescent(process, ((addr, addr + hook.size),), lambda: _replace_bytes(process, addr, expected, hook.original))
+    op = _Write(addr, expected, hook.original, 'the stale hook changed before it could be removed',
+                'could not restore the stale hook after a failed write or flush; the trigger may hold either', False)
+    _run_quiescent(process, ((addr, addr + hook.size),), op)
     what = f'its dispatcher page {hook.page:#x} and queue view {hook.data_at:#x}'
     try:
-        _run_quiescent(process, ((hook.page, hook.page + 0x1000),), lambda: process.free(hook.page),
-                       busy=lambda: struct.unpack('<Q', process.read(hook.data_at + 0x10, 8, strict=True))[0] != 0)
+        _run_quiescent(process, ((hook.page, hook.page + 0x1000),), _Release(hook.page), busy_at=hook.data_at + 0x10)
         what = f'its queue view {hook.data_at:#x}'
         SharedMemoryMapping(process, remote_at=hook.data_at).close()
     except (OSError, RuntimeError) as err:
@@ -772,7 +1104,10 @@ class InlineCallQueue(_CallQueue, InlineHook):
     def _free_hook(self):
         if self.alloc_at:
             if self.quiescent_patch:
-                self._run_quiescent(((self.alloc_at, self.alloc_at + 0x1000),), self._release_code, idle=True)
+                def applied():
+                    self.alloc_at = 0
+                    self.hook_code = self.orig_code = b''
+                self._run_quiescent(((self.alloc_at, self.alloc_at + 0x1000),), _Release(self.alloc_at), idle=True, applied=applied)
             else:
                 if self._atomic.load(self._shared.local_at + 0x10):
                     raise RuntimeError('inline calls are still pending or running')
@@ -803,11 +1138,12 @@ class InlineCallQueue(_CallQueue, InlineHook):
             self._patch_bytes(value, expected)
 
     def _patch_quiescent(self, value, expected):
-        self._run_quiescent(((self.addr, self.addr + len(expected)),), lambda: self._patch_bytes(value, expected))
+        op = _Write(self.addr, expected, self.hook_code if value else self.orig_code,
+                    'target prologue changed since hook allocation', 'could not restore target prologue after failed hook patch', True)
+        self._run_quiescent(((self.addr, self.addr + len(expected)),), op, applied=lambda: setattr(self, '_enabled', value))
 
-    def _run_quiescent(self, ranges, action, *, idle=False):
-        busy = (lambda: self._atomic.load(self._shared.local_at + 0x10)) if idle else None
-        _run_quiescent(self.process, ranges, action, busy=busy)
+    def _run_quiescent(self, ranges, op, *, idle=False, applied=None):
+        _run_quiescent(self.process, ranges, op, busy_at=self._shared.remote_at + 0x10 if idle else None, applied=applied)
 
     def _patch_bytes(self, value, expected):
         if self.process.read(self.addr, len(expected)) != expected:

@@ -84,13 +84,13 @@ with InlineCallQueue(process, trigger_at, thread_id=game_tid) as hook:
     hook.call(func_at, timeout_ms=5000)
 ```
 
-<!-- dt:section id="notes-0" hash="f235b6465782" -->
+<!-- dt:section id="notes-0" hash="e7c4bab8b41b" -->
 ## 注意事项
 
 - 请在 64 位 Python 中使用 64 位目标。原生异常无法穿过生成的分发器展开。
 - 所有线程中同一时间只运行一次排空，使用通过交换获取的队列头标志。排空运行期间进入的调用(包括重新进入触发点的已排队调用)会运行原函数，不排空任何内容。调用按提交顺序逐个运行，每个调用返回后下一个才开始;每次进入最多运行 `capacity` 个调用。已撤回的槽位会在轮到它时被跳过，并且不改变排空标志。
 - `capacity` 是 1 到 64 之间的 2 的幂;当有这么多票据未释放时，`submit` 会抛出 `BufferError`。
-- 对于热内联触发点，向 `InlineCallQueue` 传入 `quiescent_patch=True`：它会在安装、移除和代码释放期间挂起其他目标线程并检查它们的指令指针。当目标是本 Python 进程时，另一个在 GIL 交接中被挂起的 Python 线程可能导致补丁或代码释放卡住：在这些步骤期间请让其他 Python 线程保持空闲。远程目标不受影响。
+- 对于热内联触发点，向 `InlineCallQueue` 传入 `quiescent_patch=True`：它会在安装、移除和代码释放期间挂起其他目标线程并检查它们的指令指针。静默窗口直接作用于队列的进程句柄，这需要 VM 操作、读取和写入权限，并且不使用被重写的 `Process` 内存方法。
 - 如果 2 GB 范围内没有可用的跳板页，`InlineCallQueue` 会使用 15 字节的绝对跳转，并要求入口代码有同样多的可重定位字节。
 - 传入 `_jmp_support=1` 可重定位直接的 `jmp` 和 `Jcc` 入口指令;默认仍会拒绝它们。
 - 关闭队列(包括离开 `with` 时)在目标仍存活时会拒绝待处理的票据：请先等待或撤回每一张票据。
