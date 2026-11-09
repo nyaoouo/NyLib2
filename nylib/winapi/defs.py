@@ -24,6 +24,13 @@ class SERVICE_STATUS(ctypes.Structure):
     ]
 
 
+class CLIENT_ID(ctypes.Structure):
+    _fields_ = [
+        ('UniqueProcess', ctypes.c_void_p),
+        ('UniqueThread', ctypes.c_void_p),
+    ]
+
+
 class OBJECT_ATTRIBUTES(ctypes.Structure):
     _fields_ = [
         ('Length', ctypes.c_ulong),

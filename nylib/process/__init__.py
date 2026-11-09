@@ -402,17 +402,19 @@ class Process:
         return thread
 
     def iter_threads(self, da=0x1FFFFF) -> typing.Iterator[Thread]:
-        """Yield owned thread objects from one system snapshot, skipping threads that exited since it; close each returned thread."""
+        """Yield owned threads from one snapshot, skipping threads no longer the process's; close each returned thread."""
+        if self.process_id == 0: return
+        attributes = winapi.OBJECT_ATTRIBUTES()
+        attributes.Length = ctypes.sizeof(attributes)
         for record in Snapshot().threads(self.process_id):
-            try:
-                thread = self.get_thread(record.thread_id, da=da)
-            except ValueError:
-                continue
-            except OSError as e:
-                if e.winerror == 87: continue
-                if not any(r.thread_id == record.thread_id for r in Snapshot().threads(self.process_id)): continue
-                raise
-            if isinstance(thread, Thread): thread._creation_time = record.creation_time
+            handle = ctypes.c_void_p()
+            status = winapi.NtOpenThread(ctypes.byref(handle), da, ctypes.byref(attributes),
+                                        ctypes.byref(winapi.CLIENT_ID(self.process_id, record.thread_id)), _ignore_error=True)
+            if status == 0xC000000B: continue
+            if status == 0xC0000022: raise ctypes.WinError(5)
+            if status: raise OSError(f'NtStatus: {status:#x}')
+            thread = Thread(record.thread_id, handle=handle.value)
+            thread._creation_time = record.creation_time
             yield thread
 
     def read_bytes_zero_trim_unk_size(self, address: int, chunk_size=0x100):

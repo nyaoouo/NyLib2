@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from nylib import winapi
 from nylib.process import Process, Thread
+from nylib.process._snapshot import Snapshot, ThreadRecord
 from nylib.process import _APCResumeError
 
 
@@ -234,7 +235,7 @@ class ProcessCallTests(unittest.TestCase):
 
     def test_absent_process_yields_no_threads(self):
         process = Process(0xFFFFFFFC, handle=Process.current.handle)
-        with patch.object(winapi, 'OpenThread', wraps=winapi.OpenThread) as open_thread, \
+        with patch.object(winapi, 'NtOpenThread', wraps=winapi.NtOpenThread) as open_thread, \
                 patch.object(winapi, 'CloseHandle', wraps=winapi.CloseHandle) as close:
             self.assertEqual(list(process.iter_threads()), [])
             open_thread.assert_not_called()
@@ -263,38 +264,22 @@ class ProcessCallTests(unittest.TestCase):
             for thread in threads: thread.close()
 
     def test_thread_scan_skips_reused_thread_ids_but_raises_other_errors(self):
-        with patch.object(winapi, 'GetProcessIdOfThread', return_value=0):
+        with patch.object(winapi, 'NtOpenThread', return_value=0xC000000B):
             self.assertEqual(list(Process.current.iter_threads(da=0x0800)), [])
-        with patch.object(winapi, 'OpenThread', side_effect=ctypes.WinError(5)):
-            with self.assertRaises(OSError) as raised: list(Process.current.iter_threads(da=0x0800))
+        with patch.object(winapi, 'NtOpenThread', return_value=0xC0000022):
+            with self.assertRaises(PermissionError) as raised: list(Process.current.iter_threads(da=0x0800))
             self.assertEqual(raised.exception.winerror, 5)
 
     def test_thread_scan_skips_a_tid_reused_by_an_unopenable_process(self):
-        stop = threading.Event()
-        helper = threading.Thread(target=stop.wait)
-        helper.start()
+        system_tid = Snapshot().threads(4)[0].thread_id
         threads = []
-        iterator = Process.current.iter_threads(da=0x0800)
-        original_open = winapi.OpenThread
-
-        def open_thread(da, inherit, tid):
-            if tid == helper.native_id: raise ctypes.WinError(5)
-            return original_open(da, inherit, tid)
-
-        try:
-            threads.append(next(iterator))
-            stop.set()
-            helper.join(5)
-            self.assertFalse(helper.is_alive())
-            with patch.object(winapi, 'OpenThread', side_effect=open_thread):
-                for thread in iterator:
-                    threads.append(thread)
-                    self.assertNotEqual(thread.thread_id, helper.native_id)
-        finally:
-            iterator.close()
-            stop.set()
-            helper.join(5)
-            for thread in threads: thread.close()
+        with patch('nylib.process.Snapshot') as snapshot:
+            snapshot.return_value.threads.return_value = [ThreadRecord(self.thread_id, 0), ThreadRecord(system_tid, 0)]
+            try:
+                threads.extend(Process.current.iter_threads(da=0x0800))
+            finally:
+                for thread in threads: thread.close()
+        self.assertEqual(threads, [])
 
     def test_current_process_apc_uses_selected_thread(self):
         stop = threading.Event()

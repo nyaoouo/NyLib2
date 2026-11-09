@@ -1,6 +1,7 @@
 from .utils import *
 
 _dll = ctypes.WinDLL('ntdll.dll')
+NtOpenThread = def_win_api(_dll.NtOpenThread, ctypes.c_ulong, (ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_void_p), error_nt=True)
 NtQueryInformationProcess = def_win_api(_dll.NtQueryInformationProcess, ctypes.c_ulong, (ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p), error_nt=True)
 NtOpenFile = def_win_api(_dll.NtOpenFile, ctypes.c_ulong, (ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong), error_nt=True)
 NtSetValueKey = def_win_api(_dll.NtSetValueKey, ctypes.c_ulong, (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong), error_nt=True)
