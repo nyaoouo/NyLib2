@@ -7,6 +7,7 @@ import time
 import typing
 
 from .. import winapi
+from ..winapi.utils import def_win_api
 from .inline_hook import InlineHook, PrologueError, _absolute_jump, _allocate_jump, _read_prologue, _relocate_prologue, asm, capstone
 from .vtable_hook import VTableHook
 
@@ -26,19 +27,7 @@ _PATCH_RETRIES = 32
 _open_queues = set()
 _open_queues_lock = threading.Lock()
 
-_gil_kernel32 = ctypes.PyDLL('kernel32.dll', use_last_error=True)
-_gil_open_thread = _gil_kernel32.OpenThread
-_gil_open_thread.argtypes = (ctypes.c_ulong, ctypes.c_bool, ctypes.c_ulong)
-_gil_open_thread.restype = ctypes.c_void_p
-_gil_thread_process_id = _gil_kernel32.GetProcessIdOfThread
-_gil_thread_process_id.argtypes = (ctypes.c_void_p,)
-_gil_thread_process_id.restype = ctypes.c_ulong
-_gil_close_handle = _gil_kernel32.CloseHandle
-_gil_close_handle.argtypes = (ctypes.c_void_p,)
-_gil_close_handle.restype = ctypes.c_bool
-_gil_exit_code = _gil_kernel32.GetExitCodeThread
-_gil_exit_code.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
-_gil_exit_code.restype = ctypes.c_bool
+_GetExitCodeThread = def_win_api('kernel32.dll', 'GetExitCodeThread', ctypes.c_bool, (ctypes.c_void_p, ctypes.c_void_p))
 
 
 def is_executable(process, addr: int) -> bool:
@@ -49,7 +38,7 @@ def is_executable(process, addr: int) -> bool:
 
 def _thread_exited(handle):
     code = ctypes.c_ulong()
-    return bool(_gil_exit_code(handle, ctypes.byref(code))) and code.value != 259  # STILL_ACTIVE
+    return bool(_GetExitCodeThread(handle, ctypes.byref(code), _gil=True)) and code.value != 259  # STILL_ACTIVE
 
 
 _snapshot_size = 0x100000
@@ -90,7 +79,7 @@ def _thread_ids(process) -> list[int]:
 def _close_threads(handles):
     error = None
     for handle in handles:
-        if not _gil_close_handle(handle) and error is None: error = ctypes.get_last_error()
+        if not winapi.CloseHandle(handle, _gil=True, _ignore_error=True) and error is None: error = ctypes.get_last_error()
     if error is not None: raise ctypes.WinError(error)
 
 
@@ -99,17 +88,17 @@ def _open_threads(process, tids, own_tid: int | None) -> list[int]:
     try:
         for tid in tids:
             if tid == own_tid or not 1 <= tid <= 0xFFFFFFFF: continue
-            handle = _gil_open_thread(_THREAD_PATCH_ACCESS, False, tid)
+            handle = winapi.OpenThread(_THREAD_PATCH_ACCESS, False, tid, _gil=True, _ignore_error=True)
             if not handle:
                 code = ctypes.get_last_error()
                 if code == 87: continue
                 raise ctypes.WinError(code)
             handles.append(handle)
-            pid = _gil_thread_process_id(handle)
+            pid = winapi.GetProcessIdOfThread(handle, _gil=True, _ignore_error=True)
             code = ctypes.get_last_error() if not pid else 0
             if not pid and code != 87: raise ctypes.WinError(code)
             if pid != process.process_id:
-                if not _gil_close_handle(handle): raise ctypes.WinError(ctypes.get_last_error())
+                if not winapi.CloseHandle(handle, _gil=True, _ignore_error=True): raise ctypes.WinError(ctypes.get_last_error())
                 handles.pop()
         return handles
     except BaseException:

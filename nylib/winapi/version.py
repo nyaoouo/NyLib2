@@ -1,12 +1,11 @@
 from .utils import *
 
-_dll = ctypes.WinDLL('version.dll')
 
 # Returns the size of the version resource, 0 if the file has none (e.g. non-PE files).
-GetFileVersionInfoSizeW = def_win_api(_dll.GetFileVersionInfoSizeW, ctypes.c_ulong, (ctypes.c_wchar_p, ctypes.c_void_p))
-GetFileVersionInfoW = def_win_api(_dll.GetFileVersionInfoW, ctypes.c_bool, (ctypes.c_wchar_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p), error_zero=True)
+GetFileVersionInfoSizeW = def_win_api('version.dll', 'GetFileVersionInfoSizeW', ctypes.c_ulong, (ctypes.c_wchar_p, ctypes.c_void_p))
+GetFileVersionInfoW = def_win_api('version.dll', 'GetFileVersionInfoW', ctypes.c_bool, (ctypes.c_wchar_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p), error_zero=True)
 # Returns FALSE when the queried sub-block is absent; that is expected, so no error wrapper.
-VerQueryValueW = def_win_api(_dll.VerQueryValueW, ctypes.c_bool, (ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_void_p, ctypes.c_void_p))
+VerQueryValueW = def_win_api('version.dll', 'VerQueryValueW', ctypes.c_bool, (ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_void_p, ctypes.c_void_p))
 
 
 class VS_FIXEDFILEINFO(ctypes.Structure):

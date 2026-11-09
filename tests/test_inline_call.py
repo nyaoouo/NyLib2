@@ -580,7 +580,7 @@ class InlineCallTests(unittest.TestCase):
             self.assertEqual(self.target(), 42)
             self.assertEqual(ticket.wait(1000), winapi.GetCurrentThreadId())
             hook.enabled = False
-            with patch.object(inline_call, '_gil_exit_code', return_value=False) as query:
+            with patch.object(inline_call, '_GetExitCodeThread', return_value=False) as query:
                 with self.assertRaises(OSError) as raised:
                     self._patch_while_helpers_exit(lambda: setattr(hook, 'enabled', True))
             self.assertTrue(query.called)

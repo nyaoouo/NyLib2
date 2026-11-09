@@ -1,6 +1,5 @@
 from .utils import *
 
-_dll = ctypes.WinDLL('propsys.dll')
 
 
 class PROPERTYKEY(ctypes.Structure):
@@ -53,6 +52,6 @@ class PROPVARIANT(ctypes.Structure):
 
 # All HRESULT-returning; callers inspect the result (some failures are expected for
 # value-less keys), so no error wrapper is applied.
-PSGetNameFromPropertyKey = def_win_api(_dll.PSGetNameFromPropertyKey, ctypes.c_long, (ctypes.c_void_p, ctypes.c_void_p))
-PSGetPropertyDescription = def_win_api(_dll.PSGetPropertyDescription, ctypes.c_long, (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p))
-PropVariantToStringAlloc = def_win_api(_dll.PropVariantToStringAlloc, ctypes.c_long, (ctypes.c_void_p, ctypes.c_void_p))
+PSGetNameFromPropertyKey = def_win_api('propsys.dll', 'PSGetNameFromPropertyKey', ctypes.c_long, (ctypes.c_void_p, ctypes.c_void_p))
+PSGetPropertyDescription = def_win_api('propsys.dll', 'PSGetPropertyDescription', ctypes.c_long, (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p))
+PropVariantToStringAlloc = def_win_api('propsys.dll', 'PropVariantToStringAlloc', ctypes.c_long, (ctypes.c_void_p, ctypes.c_void_p))

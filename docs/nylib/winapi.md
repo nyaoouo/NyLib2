@@ -2,7 +2,7 @@
 
 Typed ctypes wrappers around Windows kernel32, ntdll, user32, advapi32, shell32, ole32, msvcrt, version and propsys DLLs. Every API raises on failure by default; call with `_ignore_error=True` to suppress.
 
-Keywords: Win32 API, ctypes, kernel32, ntdll, user32, OpenProcess, ReadProcessMemory, VirtualQueryEx, NtQueryInformationProcess, def_win_api, WinError, process memory, token privileges, PEB, HANDLE, NTSTATUS
+Keywords: Win32 API, ctypes, kernel32, ntdll, user32, OpenProcess, ReadProcessMemory, VirtualQueryEx, NtQueryInformationProcess, def_win_api, _gil, PyDLL, GIL, WinError, process memory, token privileges, PEB, HANDLE, NTSTATUS
 
 ## Quick start
 
@@ -59,12 +59,13 @@ AdjustTokenPrivileges(token, False, ctypes.byref(privs), ctypes.sizeof(privs), N
 
 ## Add a missing API
 
+The DLL loads and the export resolves on the first call, using a DLL cache shared by every binding.
+
 ```python
 from nylib.winapi.utils import def_win_api
 import ctypes
 
-_dll = ctypes.WinDLL('kernel32.dll')
-GetTickCount = def_win_api(_dll.GetTickCount, ctypes.c_uint32, ())
+GetTickCount = def_win_api('kernel32.dll', 'GetTickCount', ctypes.c_uint32, ())
 ms = GetTickCount()
 print(f'Milliseconds since boot: {ms}')
 ```
@@ -72,7 +73,10 @@ print(f'Milliseconds since boot: {ms}')
 ## Notes
 
 - All wrapped functions raise `ctypes.WinError` on failure (with NTSTATUS functions raising `OSError`). Pass `_ignore_error=True` to any call to suppress this.
-- For the wrappers that raise `ctypes.WinError` (not the NTSTATUS ones), a raised error's `winerror` is the call's own Win32 code. After a failed call with `_ignore_error=True`, read that code with `ctypes.get_last_error()`; `ctypes.GetLastError()` returns it too, but on Python 3.13+ with other threads running it may already hold another value. A call that sets no code, as most successful calls do, leaves both as they were.
+- For bindings with an error mode (`error_zero`, `error_nonzero`, `error_val`), read the call's code from the `use_last_error` copy with `ctypes.get_last_error()`, never `ctypes.GetLastError()`. Bindings without an error mode do not capture, so the copy keeps an older value after them. After importing `nylib.winapi`, nylib logs one warning when `ctypes.GetLastError()` is first called.
+- Pass `_gil=True` to call through a GIL-holding PyDLL function: no other Python thread runs during the native call, and once resolved, the call releases the GIL nowhere. The first call in each mode may release it once for DLL loading or export lookup; call `binding.resolve(gil=True)` ahead of a region that must hold the GIL.
+- For wrappers that raise `ctypes.WinError` (not the NTSTATUS ones), the exception's `winerror` is the call's own Win32 code in either GIL mode. After a failed call with `_ignore_error=True`, read that code with `ctypes.get_last_error()`. A call that sets no code preserves that copy's previous value. The wrapper writes a reported code back to the thread, but on Python 3.13+ a GIL switch can overwrite the thread's value before the caller reads it, especially with `_gil=True`.
+- The legacy form `def_win_api(func, res_type, arg_types, ...)`, with a ctypes function, still works as before, with the error flags passed by keyword; it does not support `_gil=True`.
 - Structures from `defs.py` (PEB, MEMORY_BASIC_INFORMATION, IMAGE_NT_HEADERS64, etc.) are re-exported; use `ctypes.byref()` to pass them to API calls.
 - Most APIs use pseudo-handles like `GetCurrentProcess()` which do not need closing; others return `HANDLE` values that require `CloseHandle()`.
 - NTSTATUS functions use `error_nt=True` and check `NT_SUCCESS(result)` — only raise if result is >= 0x80000000.

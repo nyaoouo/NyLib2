@@ -282,9 +282,9 @@ class CertificateLoader:
             return False
         if caller_free.value and handle.value:
             if key_spec.value == native.CERT_NCRYPT_KEY_SPEC:
-                native.ncrypt.NCryptFreeObject(handle)
+                native.NCryptFreeObject(handle, _ignore_error=True)
             else:
-                native.advapi32.CryptReleaseContext(handle, 0)
+                native.CryptReleaseContext(handle, 0, _ignore_error=True)
         return True
 
 

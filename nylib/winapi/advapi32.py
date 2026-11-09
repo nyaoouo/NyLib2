@@ -1,13 +1,12 @@
 from .utils import *
 
-_dll = ctypes.WinDLL('advapi32.dll')
-OpenProcessToken = def_win_api(_dll.OpenProcessToken, ctypes.c_long, (ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p), error_zero=True)
-LookupPrivilegeName = def_win_api(_dll.LookupPrivilegeNameW, ctypes.c_long, (ctypes.c_wchar_p, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_void_p), error_zero=True)
-LookupPrivilegeValue = def_win_api(_dll.LookupPrivilegeValueW, ctypes.c_long, (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_void_p), error_zero=True)
-AdjustTokenPrivileges = def_win_api(_dll.AdjustTokenPrivileges, ctypes.c_long, (ctypes.c_void_p, ctypes.c_long, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_void_p), error_zero=True)
-OpenSCManagerW = def_win_api(_dll.OpenSCManagerW, ctypes.c_void_p, (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32), error_zero=True)
-CloseServiceHandle = def_win_api(_dll.CloseServiceHandle, ctypes.c_void_p, (ctypes.c_void_p,), error_zero=True)
-CreateServiceW = def_win_api(_dll.CreateServiceW, ctypes.c_void_p, (
+OpenProcessToken = def_win_api('advapi32.dll', 'OpenProcessToken', ctypes.c_long, (ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p), error_zero=True)
+LookupPrivilegeName = def_win_api('advapi32.dll', 'LookupPrivilegeNameW', ctypes.c_long, (ctypes.c_wchar_p, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_void_p), error_zero=True)
+LookupPrivilegeValue = def_win_api('advapi32.dll', 'LookupPrivilegeValueW', ctypes.c_long, (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_void_p), error_zero=True)
+AdjustTokenPrivileges = def_win_api('advapi32.dll', 'AdjustTokenPrivileges', ctypes.c_long, (ctypes.c_void_p, ctypes.c_long, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_void_p), error_zero=True)
+OpenSCManagerW = def_win_api('advapi32.dll', 'OpenSCManagerW', ctypes.c_void_p, (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32), error_zero=True)
+CloseServiceHandle = def_win_api('advapi32.dll', 'CloseServiceHandle', ctypes.c_void_p, (ctypes.c_void_p,), error_zero=True)
+CreateServiceW = def_win_api('advapi32.dll', 'CreateServiceW', ctypes.c_void_p, (
     ctypes.c_void_p,  # hSCManager
     ctypes.c_wchar_p,  # lpServiceName
     ctypes.c_wchar_p,  # lpDisplayName
@@ -22,7 +21,7 @@ CreateServiceW = def_win_api(_dll.CreateServiceW, ctypes.c_void_p, (
     ctypes.c_wchar_p,  # lpServiceStartName
     ctypes.c_wchar_p,  # lpPassword
 ), error_zero=True)
-CreateServiceA = def_win_api(_dll.CreateServiceA, ctypes.c_void_p, (
+CreateServiceA = def_win_api('advapi32.dll', 'CreateServiceA', ctypes.c_void_p, (
     ctypes.c_void_p,  # hSCManager
     ctypes.c_char_p,  # lpServiceName
     ctypes.c_char_p,  # lpDisplayName
@@ -37,7 +36,7 @@ CreateServiceA = def_win_api(_dll.CreateServiceA, ctypes.c_void_p, (
     ctypes.c_char_p,  # lpServiceStartName
     ctypes.c_char_p,  # lpPassword
 ), error_zero=True)
-ChangeServiceConfigW = def_win_api(_dll.ChangeServiceConfigW, ctypes.c_bool, (
+ChangeServiceConfigW = def_win_api('advapi32.dll', 'ChangeServiceConfigW', ctypes.c_bool, (
     ctypes.c_void_p,  # hService
     ctypes.c_ulong,  # dwServiceType
     ctypes.c_ulong,  # dwStartType
@@ -50,13 +49,13 @@ ChangeServiceConfigW = def_win_api(_dll.ChangeServiceConfigW, ctypes.c_bool, (
     ctypes.c_wchar_p,  # lpPassword
     ctypes.c_wchar_p,  # lpDisplayName
 ), error_zero=True)
-OpenServiceW = def_win_api(_dll.OpenServiceW, ctypes.c_void_p, (ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_ulong), error_zero=True)
-ControlService = def_win_api(_dll.ControlService, ctypes.c_bool, (ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p), error_zero=True)
-StartService = def_win_api(_dll.StartServiceW, ctypes.c_bool, (ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p), error_zero=True)
-DeleteService = def_win_api(_dll.DeleteService, ctypes.c_bool, (ctypes.c_void_p,), error_zero=True)
+OpenServiceW = def_win_api('advapi32.dll', 'OpenServiceW', ctypes.c_void_p, (ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_ulong), error_zero=True)
+ControlService = def_win_api('advapi32.dll', 'ControlService', ctypes.c_bool, (ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p), error_zero=True)
+StartService = def_win_api('advapi32.dll', 'StartServiceW', ctypes.c_bool, (ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p), error_zero=True)
+DeleteService = def_win_api('advapi32.dll', 'DeleteService', ctypes.c_bool, (ctypes.c_void_p,), error_zero=True)
 
 CRED_TYPE_GENERIC = 1
 # BOOL CredReadW(LPCWSTR TargetName, DWORD Type, DWORD Flags, PCREDENTIALW *Credential)
-CredReadW = def_win_api(_dll.CredReadW, ctypes.c_bool, (ctypes.c_wchar_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p), error_zero=True)
+CredReadW = def_win_api('advapi32.dll', 'CredReadW', ctypes.c_bool, (ctypes.c_wchar_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p), error_zero=True)
 # void CredFree(PVOID Buffer)
-CredFree = def_win_api(_dll.CredFree, None, (ctypes.c_void_p,))
+CredFree = def_win_api('advapi32.dll', 'CredFree', None, (ctypes.c_void_p,))

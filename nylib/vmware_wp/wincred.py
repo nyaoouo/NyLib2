@@ -32,7 +32,7 @@ def read_credential_password(target: str) -> str:
     ptr = ctypes.POINTER(CREDENTIAL)()
     try:
         CredReadW(target, CRED_TYPE_GENERIC, 0, ctypes.byref(ptr))
-    except OSError as exc:  # def_win_api raises WinError(GetLastError()) on failure
+    except OSError as exc:  # The binding raises the call's own last error.
         raise CredentialNotFoundError(f"CredReadW failed for {target!r}: {exc}") from exc
     try:
         cred = ptr.contents

@@ -1,4 +1,5 @@
 import ctypes
+import functools
 import os
 import struct
 import threading
@@ -138,12 +139,11 @@ def _setup() -> None:
     global _windowscodecs, _Release, _GetSystemDirectoryW, _CoIncrementMTAUsage, _CoCreateInstance
     global _CreateStreamOnHGlobal, _GetHGlobalFromStream, _GlobalLock, _GlobalUnlock
     py, win = ctypes.PYFUNCTYPE, ctypes.WINFUNCTYPE
+    from ... import winapi
     if _GetSystemDirectoryW is None:
-        kernel32 = ctypes.PyDLL('kernel32', use_last_error=True)
-        _GetSystemDirectoryW, _GlobalLock = kernel32.GetSystemDirectoryW, kernel32.GlobalLock
-        _GetSystemDirectoryW.restype, _GetSystemDirectoryW.argtypes = _u32, (ctypes.c_wchar_p, _u32)
-        _GlobalLock.restype, _GlobalLock.argtypes = _p, (_p,)
-        _GlobalUnlock = py(ctypes.c_int, _p)(('GlobalUnlock', kernel32))
+        _GetSystemDirectoryW = functools.partial(winapi.def_win_api('kernel32.dll', 'GetSystemDirectoryW', _u32, (ctypes.c_wchar_p, _u32), error_zero=True), _gil=True, _ignore_error=True)
+        _GlobalLock = functools.partial(winapi.GlobalLock, _gil=True, _ignore_error=True)
+        _GlobalUnlock = functools.partial(winapi.GlobalUnlock, _gil=True)
     buf = ctypes.create_unicode_buffer(1024)
     system = buf.value[:_api('GetSystemDirectoryW', _GetSystemDirectoryW, buf, len(buf))]
     if _windowscodecs is None:
@@ -152,14 +152,14 @@ def _setup() -> None:
         except OSError as e:
             raise ImageCodecError(f'cannot load windowscodecs.dll: {_load_reason(e)}') from e
     if _CoCreateInstance is None:
-        ole32 = ctypes.WinDLL(os.path.join(system, 'ole32.dll'))
-        _CoIncrementMTAUsage = win(_long, _p)(('CoIncrementMTAUsage', ole32))
-        _CreateStreamOnHGlobal = py(_long, _p, ctypes.c_int, _p)(('CreateStreamOnHGlobal', ole32))
-        _GetHGlobalFromStream = py(_long, _p, _p)(('GetHGlobalFromStream', ole32))
+        ole32 = os.path.join(system, 'ole32.dll')
+        _CoIncrementMTAUsage = winapi.def_win_api(ole32, 'CoIncrementMTAUsage', _long, (_p,))
+        _CreateStreamOnHGlobal = functools.partial(winapi.def_win_api(ole32, 'CreateStreamOnHGlobal', _long, (_p, ctypes.c_int, _p)), _gil=True)
+        _GetHGlobalFromStream = functools.partial(winapi.def_win_api(ole32, 'GetHGlobalFromStream', _long, (_p, _p)), _gil=True)
         _Release = py(ctypes.c_ulong, _p)
         for name, (argtypes, releases) in _METHODS.items():
             _protos[name] = (win if releases else py)(_long, _p, *argtypes)
-        _CoCreateInstance = py(_long, _p, _p, _u32, _p, _p)(('CoCreateInstance', ole32))
+        _CoCreateInstance = functools.partial(winapi.def_win_api(ole32, 'CoCreateInstance', _long, (_p, _p, _u32, _p, _p)), _gil=True)
     _api('CoIncrementMTAUsage', _CoIncrementMTAUsage, ctypes.byref(ctypes.c_void_p()))  # the cookie is never released
 
 
