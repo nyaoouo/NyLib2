@@ -9,7 +9,7 @@
 
 本页的每个代码片段都需要一个正在运行的游戏。
 
-<!-- dt:section id="attach-0" hash="d20d6ed0f85e" -->
+<!-- dt:section id="attach-0" hash="4a622c9cd532" -->
 ## 附加（Attach）
 
 ```python
@@ -30,7 +30,7 @@ ue.close()         # 或者: with Unreal.attach(...) as ue:
 - `cache_bytes=` 控制探测以及 `dump='auto'` dump 的遍历：`None` 使用默认的页缓存上限（游戏外为 1 GiB，游戏内为 128 MiB），`0` 表示不使用缓存读取，不小于 `0x10000` 的整数则以字节为单位设置上限。`bool` 或其他非 `int` 类型会抛出 `TypeError`；负值或 `1..0xFFFF` 会抛出 `ValueError`，且发生在目标打开或绑定调用器之前。附加之后通过 `ue` 进行的读取无论如何都不使用缓存。
 - `dump_exports=` 是一个 list 或 tuple，列出 `dump='auto'` 在需要 dump 时写出的导出格式，用以替代默认的五种（[Dump](dump.md#exports)；`()` 只写快照）。无论使用哪种 `dump=` 都会检查它，但仅在那里使用：不是由 `str` 组成的 list 或 tuple 时抛出 `TypeError`，未知格式抛出 `ValueError`。
 - 在游戏内部（通过 `python -m nylib.winutils.python_loader inject --process <exe> --script <file>` 注入的脚本）：使用相同参数调用 `Unreal.attach_current(...)`；`dump='latest'` 和 `'auto'` 需要设置 `out=` 或 `NYLIB_UE_OUT`。
-- 使用 `attach_current(calls='game-thread')` 时，钩子在附加时或首次调用时安装，并在空闲状态下于 `close()` 或解释器正常退出时移除。当被注入解释器的另一个 Python 线程正在运行时，这些步骤可能让游戏卡住：在钩子安装、移除和代码释放期间，请让那些线程保持空闲（[队列说明](../winutils/inline_call.md#notes)）。在进程内以 `replace_stale=True` 移除残留 hook 同样有此风险。
+- 使用 `attach_current(calls='game-thread')` 时，钩子在附加时或首次调用时安装，并在空闲状态下于 `close()` 或解释器正常退出时移除。这些步骤直接作用于进程句柄，而不是通过自有内存后端的 `Process` 方法（[队列说明](../winutils/inline_call.md#notes)）。
 - 使用你自己的内存后端而不是进程句柄：[Own memory backend](dump.md#own-memory-backend)。
 
 <!-- dt:section id="find-objects-0" hash="0e5ed0c4a0e6" -->

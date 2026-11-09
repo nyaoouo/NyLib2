@@ -553,16 +553,17 @@ class InlineCallTests(unittest.TestCase):
         for thread in helpers: thread.start()
         ready.wait(5)
         waiters = [winapi.OpenThread(0x100000, False, tid) for tid in tids]  # SYNCHRONIZE
-        real_iter_threads = Process.iter_threads
+        real_open_threads = inline_call._open_threads
 
-        def iter_threads(process, da=0x1FFFFF):
-            yield from real_iter_threads(process, da=da)
+        def open_threads(process, tids, own_tid):
+            handles = real_open_threads(process, tids, own_tid)
             stop.set()
             for thread in helpers: thread.join(5)
             for waiter in waiters: self.assertEqual(winapi.WaitForSingleObject(waiter, 10000), 0)
+            return handles
 
         try:
-            with patch.object(Process, 'iter_threads', iter_threads):
+            with patch.object(inline_call, '_open_threads', open_threads):
                 patch_action()
         finally:
             stop.set()
@@ -652,6 +653,50 @@ class InlineCallThreadTests(unittest.TestCase):
     def tearDown(self):
         self.process.free(self.addr)
 
+    def test_quiescent_patch_does_not_hang_beside_busy_python_threads(self):
+        source = '''
+import sys
+import threading
+from nylib.process import Process
+from nylib.winutils.inline_call import InlineCallQueue
+
+process = Process.current
+addr = process.alloc(0x1000)
+process.write(addr, bytes.fromhex('B82A000000') + b'\\x90' * 16 + b'\\xC3')
+hook = InlineCallQueue(process, addr, quiescent_patch=True)
+stop = threading.Event()
+ready = threading.Barrier(3)
+def spin():
+    ready.wait(5)
+    count = 0
+    while not stop.is_set(): count += 1
+sys.setswitchinterval(1e-4)
+workers = [threading.Thread(target=spin, daemon=True) for _ in range(2)]
+for worker in workers: worker.start()
+ready.wait(5)
+for i in range(200):
+    hook.enabled = not hook.enabled
+    print(i + 1, flush=True)
+stop.set()
+for worker in workers:
+    worker.join(5)
+    assert not worker.is_alive()
+hook.close()
+process.free(addr)
+print('ok', flush=True)
+'''
+        root = str(Path(__file__).resolve().parents[1])
+        try:
+            child = subprocess.run([sys.executable, '-B', '-u', '-c', source], cwd=root,
+                                   capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired as exc:
+            output = exc.stdout or b''
+            if isinstance(output, bytes): output = output.decode('utf-8', errors='replace')
+            counts = [int(line) for line in output.splitlines() if line.isdecimal()]
+            self.fail(f'quiescent patch hung after {counts[-1] if counts else 0} toggles')
+        self.assertEqual(child.returncode, 0, child.stderr)
+        self.assertEqual(child.stdout.splitlines(), [str(i) for i in range(1, 201)] + ['ok'])
+
     def test_thread_filter_runs_calls_only_on_the_chosen_thread(self):
         get_tid = self.process.get_proc_address('kernel32.dll', 'GetCurrentThreadId')
         commands = queue.Queue()
@@ -697,11 +742,14 @@ class InlineCallThreadTests(unittest.TestCase):
         control = _WorkerControl(0, 0, 0, self.addr)
         tid = ctypes.c_ulong()
         suspended = []
-        real_suspend = inline_call._gil_suspend
+        real_window = inline_call._call_window
 
-        def spy(handle):
-            suspended.append(winapi.GetThreadId(handle))
-            return real_suspend(handle)
+        def spy(block):
+            status = real_window(block)
+            handles = (ctypes.c_uint64 * block.count).from_address(block.handles)
+            flags = (ctypes.c_ubyte * block.count).from_address(block.flags)
+            suspended.extend(winapi.GetThreadId(handle) for handle, flag in zip(handles, flags) if flag == 1)
+            return status
 
         def advance():
             start = control.count
@@ -732,7 +780,7 @@ class InlineCallThreadTests(unittest.TestCase):
             cleanup.callback(stop_worker)
             cleanup.callback(close_hook)
             advance()
-            with patch.object(inline_call, '_gil_suspend', spy):
+            with patch.object(inline_call, '_call_window', spy):
                 hook.enabled = True
                 advance()
                 self.assertEqual(hook.submit(get_tid).wait(10000), tid.value)
