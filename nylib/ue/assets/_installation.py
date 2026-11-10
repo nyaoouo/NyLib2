@@ -143,9 +143,11 @@ def _matches(header: ZenHeader, export: str) -> list:
     """The indexes of the exports of `header` that `export`, a name or a sub-object path, matches."""
     if ':' in export:
         want = _lower(f'{header.name}.{export}')
-        return [i for i, p in enumerate(header.paths()) if _lower(p) == want]
+        length = len(want)
+        return [i for i, p in enumerate(header.paths()) if len(p) == length and _lower(p) == want]
     want = _lower(export)
-    return [i for i, e in enumerate(header.exports) if _lower(e.name) == want]
+    length = len(want)
+    return [i for i, e in enumerate(header.exports) if len(e.name) == length and _lower(e.name) == want]
 
 
 def _find(header: ZenHeader, export: str) -> int:
@@ -173,7 +175,8 @@ def _main_asset(header: ZenHeader) -> int:
 
 def _by_path(header: ZenHeader, path: str) -> int:
     want = _lower(path)
-    if (i := next((i for i, p in enumerate(header.paths()) if _lower(p) == want), None)) is None:
+    length = len(want)
+    if (i := next((i for i, p in enumerate(header.paths()) if len(p) == length and _lower(p) == want), None)) is None:
         raise MissingAssetError(f'package {header.name!r} has no export {path!r}', package=header.name, export=path)
     return i
 
