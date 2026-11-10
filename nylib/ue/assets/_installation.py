@@ -12,6 +12,7 @@ import time
 import warnings
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
+from sys import getsizeof
 from typing import Literal
 
 from nylib.utils import oodle
@@ -38,6 +39,7 @@ _log = logging.getLogger('nylib.ue.assets')
 
 _ENGINES = ('5.7',)
 _DEFAULT_CACHE_BYTES = 4 << 20
+_COOKED_CACHE_BYTES = 96 << 20
 _IDENTITY_TAG = b'nylib.ue.assets identity'
 _DECODE_RULES_VERSION = 1  # raise whenever any decoded output can change
 _EXPORT_BUNDLE_DATA, _BULK_DATA, _SCRIPT_OBJECTS = _texture.EXPORT_BUNDLE_DATA, _texture.BULK_DATA, 5
@@ -516,6 +518,59 @@ class _BlockCache:
             self._size = 0
 
 
+def _cooked_base_charge(header: ZenHeader) -> int:
+    """The shallow and fixed-record portion of a cooked header's retained charge."""
+    size = 1024 + getsizeof(header) + getsizeof(vars(header)) + sum(map(getsizeof, vars(header).values()))
+    if header.exports:
+        size += len(header.exports) * (getsizeof(header.exports[0]) + 9 * 36)
+    size += (len(header.imports) + len(header.imported_hashes)) * 36
+    if header.bulk_data_map:
+        size += len(header.bulk_data_map) * (getsizeof(header.bulk_data_map[0]) + 5 * 36)
+    return size
+
+
+def _cooked_charge(header: ZenHeader, base: int) -> int:
+    """The accounted retained bytes of a validated cooked header."""
+    return (base + sum(map(getsizeof, header.names)) + sum(map(getsizeof, header._paths))
+            + sum(map(getsizeof, header.imported_packages))
+            + sum(map(getsizeof, map(operator.attrgetter('name'), header.exports))))
+
+
+class _CookedCache:
+    """Validated cooked headers in an LRU bounded by their accounted retained bytes."""
+
+    def __init__(self, cap: int):
+        self._cap = cap
+        self._lock = threading.Lock()
+        self._entries = OrderedDict()
+        self._size = 0
+
+    def get(self, key) -> tuple | None:
+        with self._lock:
+            if (entry := self._entries.get(key)) is None:
+                return None
+            self._entries.move_to_end(key)
+            return entry[0]
+
+    def put(self, key, value, charge) -> None:
+        with self._lock:
+            if key in self._entries:
+                self._entries.move_to_end(key)
+                return
+            if not self._cap or charge > self._cap:
+                return
+            while self._size + charge > self._cap:
+                _key, (_value, dropped) = self._entries.popitem(last=False)
+                self._size -= dropped
+            self._entries[key] = value, charge
+            self._size += charge
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+            self._size = 0
+
+
 class _Op:
     """One operation: registered with the close state on entry; its counters join the totals once, on exit."""
     __slots__ = ('_inst', 'counters', '_record', '_t0', '_done')
@@ -569,6 +624,7 @@ class Installation:
         self._mounted_count = len(mounted)
         self._decryptors = decryptors
         self._cache = _BlockCache(cache_bytes) if cache_bytes else None
+        self._cooked_cache = _CookedCache(_COOKED_CACHE_BYTES)
         self._project = project
         self._pak_count = pak_count
         self._totals = totals
@@ -719,6 +775,8 @@ class Installation:
             if self._cache is not None:
                 self._cache.clear()
         finally:
+            self._cooked_cache.clear()
+            self._cooked_cache = None
             self._mounted = ()
             self._decryptors = ()
             self._script = self._listing = self._mappings = self._schemas = None
@@ -1185,6 +1243,11 @@ class Installation:
 
     def _read_cooked(self, toc: Toc, container: Container, idx: int, pkg: str, counters, check: '_Check', method: str) -> tuple:
         """(ZenHeader, ScriptObjects tuple) of the package in chunk `idx`, from its cooked header alone."""
+        cache = self._cooked_cache
+        key = container, idx
+        if (pair := cache.get(key)) is not None:
+            self._check_open()
+            return pair
         script = self._script_objects(counters, method, check)
         c = toc.basename
         cid = toc.chunk_fields(idx)[0]
@@ -1221,7 +1284,10 @@ class Installation:
             if v != NULL_INDEX and v >> 62 == 1 and not table.has(v):
                 detail = f'{what} names the script object {v:#x}, which the global ScriptObjects table does not hold'
                 raise CorruptAssetError(f'{header.name}: {detail}', package=header.name, detail=detail)
-        return header, script
+        pair = header, script
+        if cache._cap and (base := _cooked_base_charge(header)) <= cache._cap:
+            cache.put(key, pair, _cooked_charge(header, base))
+        return pair
 
     def _plan(self, target) -> tuple:
         """(lookup, package, key) of a read, raw or resolve target that `_shown()` accepted; no I/O."""
